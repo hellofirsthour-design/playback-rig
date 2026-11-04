@@ -2,11 +2,40 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
 jobs:
   engine:
+    name: Engine tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo run --release -p rig-render -- --arrangement "Intro,Chorus,Verse 1,Chorus,Bridge,Outro" --mute "Verse 1=Drums" --channels 10 --out render.wav
+
+  mac-app:
+    name: Mac app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - name: App tests
+        working-directory: apps/desktop/src-tauri
+        run: cargo test
+      - name: Build Playback Rig.app (Apple Silicon + Intel)
+        working-directory: apps/desktop/src-tauri
+        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app
+      - name: Zip the app
+        run: ditto -c -k --keepParent "apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Playback Rig.app" PlaybackRig-mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlaybackRig-mac
+          path: PlaybackRig-mac.zip
+          retention-days: 30

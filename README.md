@@ -10,9 +10,29 @@ Product decisions are in [`docs/product.md`](docs/product.md).
 |---|---|
 | `crates/engine` | The real-time playback engine in Rust. It plays arrangements (reordered and repeated sections, stems muted per block), makes quantized jumps (now, next bar, end of section), handles next, repeat and vamp, routes to any output of a multi-channel interface, and generates the click and count-in. It also maps pedals and faders with MIDI learn and tap/hold. Its audio thread never allocates or blocks. |
 | `crates/rig-render` | Offline renderer. It plays an arrangement through the engine and writes a multi-channel WAV, so the engine can be tested without hardware. |
-| `prototype/index.html` | Browser prototype of the live screen: setlist, section pads, overview, mixer. Open it in Chrome. |
+| `apps/desktop` | **The Mac app** (Tauri). The engine runs on the audio thread of your interface. Songs are loaded from stem folders, pedals and controllers come in over MIDI, and there are three screens: Live, Build and Setup. |
+| `prototype/index.html` | The earlier browser prototype. Kept for reference. |
 
-## Run it
+## Get the Mac app
+
+Every push builds the app on GitHub's Mac machines. One build runs on both Apple Silicon and Intel Macs.
+
+1. Open the repo on GitHub and go to **Actions**. Pick the latest green **CI** run and download **PlaybackRig-mac** under *Artifacts*.
+2. Unzip it and drag **Playback Rig** into Applications.
+3. The app isn't signed with an Apple developer certificate yet, so the first launch needs one extra step. Right-click the app, choose **Open**, then click **Open** again. If macOS says the app is damaged, run this once in Terminal:
+
+```bash
+xattr -cr "/Applications/Playback Rig.app"
+```
+
+## First-time setup on the church Mac
+
+1. **Setup → Audio output:** pick the Behringer. Out 1-2 is front of house; Out 3-4 is the in-ears.
+2. **Setup → Pedals and controller:** pick the Akai (or your pedal) as the MIDI input. Then click **Learn** next to each pedal row and press the pedal or button you want for it.
+3. **Add songs:** choose one folder per song, each holding that song's stems (for example, unzipped MultiTracks downloads).
+4. **Build:** for each song, set the tempo and mark where each section starts (by bar number). Then build the arrangement and click **Save**. All of this is saved in `rig-song.json` inside the song's folder.
+
+## Develop
 
 The test suite:
 
@@ -34,6 +54,12 @@ cargo run --release -p rig-render -- --arrangement "Intro,Chorus,Verse 1,Chorus,
 - **Click.** The click is locked to the song's own bar grid, so it stays right after any jump.
 - **Threading.** The host calls `Engine::handle(Command)` and `Engine::process(&mut [f32])` on the audio thread and reads `Engine::snapshot()` to update the screen.
 
+Desktop app tests and a local build. On Linux this needs the WebKitGTK and ALSA development packages:
+
+```bash
+cd apps/desktop/src-tauri && cargo test && npx @tauri-apps/cli@2 dev
+```
+
 ## Next
 
-The Mac app shell (Tauri): choosing the audio interface, streaming stems from disk, pedal and controller input, then the Build mode and Live mode screens. See the build order in `docs/product.md`.
+Song transitions (key-following pads, segues), guide cues cut by section, and streaming from disk for very long sets. See the build order in `docs/product.md`.

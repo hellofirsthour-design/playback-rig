@@ -43,7 +43,7 @@ pub enum Command {
 }
 
 /// What the screen needs to draw, read after each `process` call.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 pub struct Snapshot {
     pub playing: bool,
     pub counting_in: bool,

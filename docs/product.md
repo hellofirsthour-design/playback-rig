@@ -61,7 +61,7 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 ## Build order
 
 1. **Engine:** arrangement playback, quantized jumps, vamp and repeat, per-block mutes, routing, click, count-in, MIDI mapping. *Done, with tests.*
-2. **Mac app shell (Tauri):** choose the audio interface and its outputs, stream audio from disk, take pedal and controller input, run the engine on the audio thread.
-3. **Arrangement view (Build mode)** and **Live mode** screens.
+2. **Mac app (Tauri):** choose the audio interface and its outputs, take pedal and controller input (MIDI learn, tap/hold), run the engine on the audio thread, load songs from stem folders, resample to the interface's rate. *Done.* Stems are still loaded fully into memory; streaming from disk is still to do.
+3. **Build mode** (arrangement blocks, per-block stem mutes, section markers, mixer) and **Live mode** (current/next block, queued call, bars left). *First version done.*
 4. Song transitions: pads, segues, guide cues cut by section.
 5. Tempo and key changes, clip editing, ProPresenter.

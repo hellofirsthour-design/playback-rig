@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/engine", "crates/rig-render"]
+exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
 edition = "2021"
