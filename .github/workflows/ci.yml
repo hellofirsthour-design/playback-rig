@@ -1,0 +1,12 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+      - run: cargo run --release -p rig-render -- --arrangement "Intro,Chorus,Verse 1,Chorus,Bridge,Outro" --mute "Verse 1=Drums" --channels 10 --out render.wav

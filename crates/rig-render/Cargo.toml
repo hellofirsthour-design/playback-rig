@@ -1,0 +1,10 @@
+[package]
+name = "rig-render"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Offline renderer: plays an arrangement through the engine and writes a multichannel WAV."
+
+[dependencies]
+rig-engine = { path = "../engine" }
+hound = "3.5"
