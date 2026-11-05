@@ -37,8 +37,11 @@ fn onsets(x: &[f32], sr: u32) -> Vec<Onset> {
     let refractory = (0.1 * 200.0) as usize; // 100 ms in hops
     let mut out = vec![];
     let mut last: Option<usize> = None;
-    for i in 1..env.len() {
-        if env[i] >= thr && env[i - 1] < thr * 0.6 && last.map_or(true, |l| i - l > refractory) {
+    // Before the file starts counts as silence: a click right at sample 0 (as in
+    // MultiTracks stems) is a click, not something to skip.
+    for i in 0..env.len() {
+        let prev = if i == 0 { 0.0 } else { env[i - 1] };
+        if env[i] >= thr && prev < thr * 0.6 && last.map_or(true, |l| i - l > refractory) {
             last = Some(i);
             // refine to the first sample over the threshold
             let s0 = i * hop;
@@ -551,6 +554,14 @@ mod tests {
         let mut g = mk(bar);
         assert!(snap_grid_to_click(&mut g, &x, sr));
         assert_eq!((g.markers[0].bar, g.markers[1].bar), (4, 8));
+        // The click starts at the very first sample of the file (real MultiTracks stems
+        // do): that first click is bar 1, not the one after it.
+        let z = click_track(sr, 155.0, 0.0, 200, true);
+        let mut z1 = mk(60.0 / 155.0); // the grid one click late, as 0.5.1 had it
+        assert!(snap_grid_to_click(&mut z1, &z, sr));
+        assert_eq!(z1.offset_ms, 0.0, "bar 1 at the very start");
+        assert_eq!((z1.markers[0].bar, z1.markers[1].bar), (3, 7));
+        assert_eq!(first_click(&z, sr), Some(0.0));
         // A click that starts later in the file: bar 1 is there.
         let y = click_track(sr, 155.0, 1.2, 100, true);
         let mut h2 = mk(0.0);

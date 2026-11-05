@@ -1584,7 +1584,7 @@ mod tests {
 
     /// A MultiTracks-style download: stems in MultiTracks/, an Ableton set running at
     /// double time (155 for a 77.5 song) with a "Build" cue locator, an eighth-note
-    /// click whose first downbeat is at 0.05 s, folder name with key and tempo.
+    /// click that starts on the very first sample (bar 1), folder name with key and tempo.
     fn multitracks_folder(root: &Path) -> PathBuf {
         let sr = 44_100u32;
         let folder = root.join("See a Victory-At Midnight-A-77.50bpm");
@@ -1595,7 +1595,7 @@ mod tests {
         let mut click = vec![0f32; len];
         let mut k = 0;
         loop {
-            let t = 0.05 + k as f64 * eighth;
+            let t = k as f64 * eighth;
             let s0 = (t * sr as f64) as usize;
             if s0 + 2000 >= len { break; }
             let (f, a) = if k % 4 == 0 { (1760.0, 0.9) } else { (1175.0, 0.55) };
@@ -1613,8 +1613,8 @@ mod tests {
         write_wav(&mt.join("Drums (Live).wav"), &tone(80.0, 0.3), sr);
         write_wav(&mt.join("EG 2.wav"), &tone(220.0, 0.2), sr);
         write_wav(&mt.join("EG 1.wav"), &tone(220.0, 0.2), sr);
-        // Live beats at 155: the clip starts at beat 0, 0.05 s + one eighth into the audio
-        // (the off-by-an-eighth reading the user saw), 155 beats per 60 s.
+        // Live beats at 155: the set says beat 0 is 0.28 s into the audio (a reading
+        // that left the grid late, as the user saw), 155 beats per 60 s.
         let als = format!(r#"<Ableton><LiveSet><Tracks><AudioTrack><DeviceChain><Mixer><Tempo><LomId Value="0" /><Manual Value="120" /></Tempo></Mixer>
             <AudioClip Id="1" Time="0"><LoopStart Value="0" /><StartRelative Value="0" /><IsWarped Value="true" />
             <WarpMarkers><WarpMarker Id="0" SecTime="{s0}" BeatTime="0" /><WarpMarker Id="1" SecTime="{s1}" BeatTime="155" /></WarpMarkers></AudioClip>
@@ -1628,7 +1628,7 @@ mod tests {
             </Locators></Locators>
             <MasterTrack><DeviceChain><Mixer><Tempo><LomId Value="0" /><Manual Value="155" /></Tempo>
             <TimeSignature><LomId Value="0" /><Manual Value="201" /></TimeSignature></Mixer></DeviceChain></MasterTrack></LiveSet></Ableton>"#,
-            s0 = 0.05 + eighth, s1 = 0.05 + eighth + 60.0);
+            s0 = 0.28, s1 = 0.28 + 60.0);
         std::fs::write(folder.join("MultiTrack.als"), als).unwrap();
         folder
     }
@@ -1647,9 +1647,9 @@ mod tests {
         // band cue dropped, repeated name numbered, sections on real bars
         let m: Vec<(&str, u32)> = f.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
         assert_eq!(m, [("Intro", 3), ("Verse 1", 7), ("Chorus 1", 11), ("Chorus 2", 15)]);
-        // grid snapped to the click you hear (first downbeat 0.05 s, not an eighth later)
+        // bar 1 is the first click, at the very start of the file
         assert_eq!(f.grid_version, songfile::GRID_VERSION);
-        assert!((f.offset_ms - 50.0).abs() < 3.0, "bar 1 is the first click: offset {}", f.offset_ms);
+        assert_eq!(f.offset_ms, 0.0, "bar 1 is the first click");
         // every section between the first and last is whole bars
         let bar = l.song.frames_per_bar();
         for s in &l.song.sections[1..l.song.sections.len() - 1] {

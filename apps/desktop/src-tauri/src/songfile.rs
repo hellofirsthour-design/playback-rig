@@ -70,7 +70,7 @@ pub struct SongFile {
 pub const SETUP_VERSION: u32 = 3;
 
 /// Raise to line up the grid of automatically set up songs with the click again.
-pub const GRID_VERSION: u32 = 2;
+pub const GRID_VERSION: u32 = 3;
 
 /// Where a stem sits in the track list: click and guide first, then Drums,
 /// Percussion, Bass, Guitars, Keys, Other instruments, Vocals, FX.
