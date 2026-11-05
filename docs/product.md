@@ -84,3 +84,25 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 3. **Arrangement view, section rail, live rearranging and automatic setup from the click and guide.** *Done.*
 4. Song transitions: pads, segues, guide cues cut by section.
 5. Tempo and key changes, clip editing, ProPresenter.
+
+## Positioning (decided 2026-11-05)
+
+**Why this exists:** MultiTracks Playback is easy, but it's tied to an iPad and the cloud. When the Wi-Fi drops, songs and key changes won't load, and the app has to be restarted over and over on a Sunday. Ableton runs offline and sounds better, but it costs a lot and isn't built for this. MultiTracks' own downloaded stems also sound better than the Playback app.
+
+**What sets us apart:**
+1. **Offline first, always.** Nothing on stage depends on the network: loading a song, changing the key or tempo, switching songs. The only things that touch the internet are updates and the one-time speech-model download, and the app works without both.
+2. **Own your files, no lock-in.** MultiTracks downloads, other stores' stems and your own recordings are all plain files on disk. No subscription is needed to play them.
+3. **Smart transitions.** Key-aware pad bridges and tempo-matched segues between songs in a set.
+4. **Planning Center sync.** Pull the Sunday set, keys and arrangements from Planning Center. (This one uses the network, but before the service, never during it.)
+
+**How it's used:** the music director plays keys and runs tracks from a computer, controlled from a **MIDI controller**. A phone or iPad remote would be nice to have, but it's not a priority. Team sharing and editing on other devices are not needed yet.
+
+**Wanted later:** lyrics and lighting cues (MIDI to ProPresenter), MIDI clock, SMPTE/LTC timecode, a backup computer for redundancy.
+
+## Next up
+
+1. Confirm the grid is right on real MultiTracks songs (needs See a Victory's MultiTrack.als).
+2. **Song transitions:** crossfade or segue into the next song, with pads carrying across.
+3. **Dynamic guide cues:** the guide calls the right section after a rearrangement.
+4. Song and key changes stay instant: preload the next song in the set, so switching never waits.
+5. Planning Center sync.
