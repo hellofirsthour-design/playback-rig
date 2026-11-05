@@ -381,6 +381,33 @@ impl Engine {
         }
     }
 
+    /// Where the guide stem reads from at source frame `src` (None = silence). In the
+    /// last stretch of a block it plays the call for the block that's actually coming
+    /// next (planned, queued, repeated or vamped); the call the recording had there for
+    /// a different section is silenced.
+    fn guide_src(&self, src: u64) -> Option<u64> {
+        let sec = self.section(self.item);
+        let (next, d) = match &self.pending {
+            Some(p) => (Some(p.target), p.at.saturating_sub(self.abs)),
+            None => (self.natural_next(), sec.len().saturating_sub(self.fpos)),
+        };
+        if let Some(n) = next {
+            let ns = self.arr.items[n].section;
+            if let Some(Some((cs, ce))) = self.song.calls.get(ns) {
+                let l = ce.saturating_sub(*cs);
+                if d > 0 && d <= l {
+                    return Some(ce - d);
+                }
+            }
+        }
+        let silenced = self.song.calls.iter().flatten().any(|(cs, ce)| *ce == sec.end && src >= *cs && src < *ce);
+        if silenced {
+            None
+        } else {
+            Some(src)
+        }
+    }
+
     fn target_gain(&self, i: usize) -> f32 {
         let m = &self.mix[i];
         if m.muted || self.arr.items[self.item].muted_stems.contains(&i) {
@@ -528,7 +555,14 @@ impl Engine {
                     continue;
                 }
                 let gg = *g * env;
-                let (l, r) = self.stems[i].frame(src);
+                let (l, r) = if Some(i) == self.song.guide_stem && !self.song.calls.is_empty() {
+                    match self.guide_src(src) {
+                        Some(gs) => self.stems[i].frame(gs),
+                        None => (0.0, 0.0),
+                    }
+                } else {
+                    self.stems[i].frame(src)
+                };
                 Self::write(out, base, ch, self.mix[i].route, l * gg, r * gg);
             }
 
@@ -596,6 +630,8 @@ mod tests {
                 Section { name: "C".into(), start: 16000, end: 24000 },
             ],
             stems: vec![StemInfo { name: "Ramp".into(), route: Route::Mono(0), gain: 1.0, muted: false }],
+            guide_stem: None,
+            calls: vec![],
         };
         let arrangement = match arr {
             Some(names) => Arrangement::from_names(&song, names).unwrap(),
@@ -779,6 +815,57 @@ mod tests {
         e.handle(Command::Seek(2, 4000)); // playing: C at 4000, after a 5 ms fade
         let out = run(&mut e, 100);
         assert_eq!(out[0][50], 16000.0 + 4000.0 + 45.0);
+    }
+
+    /// The ramp stem as a guide: B's call is the last 2000 frames of A, C's the last 2000
+    /// of B (the guide says the next section in the bar before it).
+    fn guide_rig(arr: &[&str]) -> Engine {
+        let mut e = rig(Some(arr));
+        e.handle(Command::Stop);
+        let mut song = e.song().clone();
+        song.guide_stem = Some(0);
+        song.calls = vec![None, Some((6000, 8000)), Some((14000, 16000))];
+        let arrangement = Arrangement::from_names(&song, arr).unwrap();
+        let audio = StemAudio::mono((0..24000).map(|i| i as f32).collect());
+        let mut e = Engine::new(song, arrangement, vec![audio], CH).unwrap();
+        e.handle(Command::SetCountIn(false));
+        e.handle(Command::SetClick(false));
+        e
+    }
+
+    #[test]
+    fn guide_calls_the_section_that_actually_comes_next() {
+        // A then C: the end of A must call C (source 14000..16000), not B.
+        let mut e = guide_rig(&["A", "C"]);
+        e.handle(Command::Play);
+        let out = run(&mut e, 8100);
+        assert_eq!(out[0][5000], 5000.0, "before the call: A as recorded");
+        assert_eq!(out[0][7000], 15000.0, "C's call in the last stretch of A");
+        // A then A (repeat): the end of A calls A, which has no call -> B's call silenced
+        let mut e = guide_rig(&["A", "A"]);
+        e.handle(Command::Play);
+        let out = run(&mut e, 8100);
+        assert_eq!(out[0][7000], 0.0, "B's call isn't heard when B isn't next");
+        // A then B as recorded: unchanged
+        let mut e = guide_rig(&["A", "B"]);
+        e.handle(Command::Play);
+        let out = run(&mut e, 8100);
+        assert_eq!(out[0][7000], 7000.0);
+        // C then C (duplicated): the end of the first C calls C again
+        let mut e = guide_rig(&["B", "C", "C"]);
+        e.handle(Command::Play);
+        let out = run(&mut e, 24100);
+        assert_eq!(out[0][8000 + 7000], 15000.0, "second C announced at the end of the first");
+    }
+
+    #[test]
+    fn vamping_calls_the_same_section_again() {
+        let mut e = guide_rig(&["B", "C"]);
+        e.handle(Command::Play);
+        e.handle(Command::ToggleVamp); // loop B
+        let out = run(&mut e, 8000);
+        // B has a call (6000..8000); the end of B now calls B again, not C
+        assert_eq!(out[0][7000], 7000.0);
     }
 
     #[test]

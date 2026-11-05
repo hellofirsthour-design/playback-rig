@@ -100,6 +100,8 @@ fn demo() -> (Song, Vec<StemAudio>) {
         length: len as u64,
         sections,
         stems: vec![stem("Drums"), stem("Bass"), stem("Keys")],
+        guide_stem: None,
+        calls: vec![],
     };
     (song, vec![StemAudio::mono(drums), StemAudio::mono(bass), StemAudio::mono(keys)])
 }

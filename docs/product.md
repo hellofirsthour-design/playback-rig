@@ -23,7 +23,7 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
 It combines Ableton's arrangement view with MultiTracks Playback, in our own design.
 
 - **Top bar:** the transport, plus a display showing the current section, bar and beat, and the queued call ("Going to Chorus 2 in 1.5 bars").
-- **Section rail** (MultiTracks-style): the arrangement as big colored blocks. Drag a block to reorder it, drag it off the rail to remove it, or use ⧉ to repeat it. Drag a section in from the palette below the rail. This works **while playing**. Cmd+Z undoes.
+- **Section rail** (MultiTracks-style): the arrangement as big colored blocks. While playing it scrolls with the song, keeping the playing block (and the one before it) in view; scroll it yourself and it leaves you alone for a few seconds. Drag a block to reorder it, drag it off the rail to remove it, or use ⧉ to repeat it. Drag a section in from the palette below the rail. This works **while playing**. Cmd+Z undoes.
 - **Arrangement view** (Ableton-style): one lane per stem with its waveform, cut into section clips in arrangement order, with a bar ruler, the playhead and the queued jump. Double-click a clip, or select it and press 0, to switch that stem off for that section only. Each track header has level, mute and solo.
 - **Automatic setup**, the first time a song loads:
   1. **The Ableton set.** If the folder has a `.als` (MultiTracks downloads include `MultiTrack.als`), its locators become the section markers, and it supplies the tempo and meter. This is exact and instant.
@@ -73,7 +73,7 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 ## Songs and transitions
 
 - **Stems come from MultiTracks and Loop Community downloads.**
-- **The guide stem is cut by section,** so each spoken cue ("Chorus", "Bridge") moves with its section when you reorder.
+- **The guide stem is cut by section.** Each section's call (the cue and its count, from just before the speech to the section's downbeat, at most two bars) belongs to that section. In the last stretch of any block, the guide plays the call for whatever block actually comes next: the planned next block, a live jump, a repeat or a vamp. Duplicate an Outro and the guide says "Outro" before the second one, then "Ending" after it. A call recorded there for a section that isn't coming is silenced. A section with no call gets silence, never a wrong call.
 - **Each song has its own transition setting:** segue into the next song, end and wait, or pad underneath. Pads follow the song's key.
 
 ## Rig
@@ -109,6 +109,9 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 
 1. Confirm the grid is right on real MultiTracks songs (needs See a Victory's MultiTrack.als).
 2. **Song transitions:** crossfade or segue into the next song, with pads carrying across.
-3. **Dynamic guide cues:** the guide calls the right section after a rearrangement.
-4. Song and key changes stay instant: preload the next song in the set, so switching never waits.
-5. Planning Center sync.
+3. ~~Dynamic guide cues~~ *Done in 0.6.0.*
+4. **Live page and Edit page:** a Playback-style live screen (big current/next, bars left, the set) and the arrangement view for editing.
+5. **Transitions per song:** crossfade or overlap into the next song, auto fade-out of long endings.
+6. **Clip trimming and automation:** trim a clip's start or end in a lane (e.g. vocals off for the first half), volume automation.
+7. Song and key changes stay instant: preload the next song in the set, so switching never waits.
+8. Planning Center sync.

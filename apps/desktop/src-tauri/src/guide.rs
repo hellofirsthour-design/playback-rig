@@ -453,6 +453,49 @@ pub fn call_starts(guide: &[f32], sr: u32, bpm: f64, bpb: u32, offset: f64) -> V
     out
 }
 
+/// The guide's calls: (where the call's speech starts, in seconds; the bar it calls in).
+/// Same grouping as `call_starts`.
+pub fn calls(guide: &[f32], sr: u32, bpm: f64, bpb: u32, offset: f64) -> Vec<(f64, u32)> {
+    let beat = 60.0 / bpm;
+    let bar = beat * bpb.max(1) as f64;
+    let mut groups: Vec<(f64, f64)> = vec![];
+    let mut last_end = f64::NEG_INFINITY;
+    for c in &find_cues(guide, sr) {
+        if c.start - last_end > 0.75 * bar {
+            groups.push((c.start, c.end));
+        } else if let Some(g) = groups.last_mut() {
+            g.1 = c.end;
+        }
+        last_end = c.end;
+    }
+    groups.iter().map(|(s, e)| (*s, ((e - 0.35 * beat - offset) / bar).ceil().max(0.0) as u32 + 1)).collect()
+}
+
+/// For each section, the stretch of guide (in frames) that calls it in: from just before
+/// the call's speech to the section's start. At most two bars, and never before the
+/// previous section starts.
+pub fn call_regions(song: &rig_engine::Song, calls: &[(f64, u32)], sr: u32) -> Vec<Option<(u64, u64)>> {
+    let bar = song.frames_per_bar();
+    let pre = sr as f64 * 0.05;
+    song.sections
+        .iter()
+        .enumerate()
+        .map(|(i, sec)| {
+            if i == 0 {
+                return None;
+            }
+            let prev = song.sections[i - 1].start;
+            calls
+                .iter()
+                .filter(|(_, b)| (song.offset as f64 + (*b as f64 - 1.0) * bar - sec.start as f64).abs() < bar * 0.25)
+                .map(|(t, _)| (t * sr as f64 - pre).max(0.0) as u64)
+                .filter(|cs| *cs < sec.start && (sec.start - cs) as f64 <= bar * 2.0 + pre)
+                .min()
+                .map(|cs| (cs.max(prev), sec.start))
+        })
+        .collect()
+}
+
 /// Moves each section marker onto the guide's section start beside it: a marker that
 /// sits on the cue's own bar (one early) or one bar late moves to where the guide
 /// says the section starts. Markers already on a start, or with no call nearby, stay.

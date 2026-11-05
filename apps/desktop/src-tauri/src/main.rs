@@ -410,9 +410,19 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
         file.grid_version = songfile::GRID_VERSION;
         let _ = file.save(folder);
     }
-    let (song, arr) = file.build(sample_rate, length)?;
+    let (mut song, arr) = file.build(sample_rate, length)?;
+    cut_guide(&mut song, &file, &stems, sample_rate);
     let peaks = stems.iter().map(|s| peaks(s, sample_rate)).collect();
     Ok(Loaded { folder: folder.to_path_buf(), file, song, arr, stems, sample_rate, length, peaks })
+}
+
+/// Cuts the guide by section, so it calls whatever section actually comes next.
+fn cut_guide(song: &mut Song, file: &SongFile, stems: &[StemAudio], sample_rate: u32) {
+    if let Some(g) = file.stems.iter().position(|s| songfile::is_guide(&s.name)) {
+        let c = guide::calls(&guide::to_mono(&stems[g]), sample_rate, song.bpm, song.beats_per_bar, song.offset as f64 / sample_rate as f64);
+        song.calls = guide::call_regions(song, &c, sample_rate);
+        song.guide_stem = Some(g);
+    }
 }
 
 /// Builds a fresh engine for the loaded song and hands it to the audio thread.
@@ -996,7 +1006,8 @@ fn edit_song(state: &AppState, f: impl FnOnce(&mut SongFile)) -> Result<AppView,
         let l = song.as_mut().ok_or("Load a song first.")?;
         let mut file = l.file.clone();
         f(&mut file);
-        let (s, a) = file.build(l.sample_rate, l.length)?;
+        let (mut s, a) = file.build(l.sample_rate, l.length)?;
+        cut_guide(&mut s, &file, &l.stems, l.sample_rate);
         l.file = file;
         l.song = s;
         l.arr = a;
@@ -1678,6 +1689,18 @@ mod tests {
         let m: Vec<(&str, u32)> = f.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
         assert_eq!(m, [("Intro", 3), ("Verse 1", 7), ("Chorus 1", 11), ("Chorus 2", 15)]);
         assert_eq!(l.song.sections[0].name, "Count-in", "the two bars before Intro");
+        // The guide is cut by section: each called section knows its call, which ends
+        // where it starts and sits within the bar or two before it.
+        assert_eq!(l.song.guide_stem, Some(1));
+        assert_eq!(l.song.calls.len(), l.song.sections.len());
+        let bar = l.song.frames_per_bar();
+        for (i, name) in [(2, "Verse 1"), (3, "Chorus 1"), (4, "Chorus 2")] {
+            assert_eq!(l.song.sections[i].name, name);
+            let (cs, ce) = l.song.calls[i].unwrap_or_else(|| panic!("{name} has no call"));
+            assert_eq!(ce, l.song.sections[i].start);
+            assert!(ce - cs > (bar * 0.5) as u64 && ce - cs <= (bar * 2.1) as u64, "{name}: {cs}..{ce}");
+        }
+        assert_eq!(l.song.calls[0], None, "nothing calls the count-in");
         // bar 1 is the first click, at the very start of the file
         assert_eq!(f.grid_version, songfile::GRID_VERSION);
         assert_eq!(f.offset_ms, 0.0, "bar 1 is the first click");

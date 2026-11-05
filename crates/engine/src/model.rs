@@ -65,6 +65,14 @@ pub struct Song {
     pub length: u64,
     pub sections: Vec<Section>,
     pub stems: Vec<StemInfo>,
+    /// The spoken guide stem, if any. With `calls`, it says the right section before
+    /// each block, however the song is arranged.
+    #[serde(default)]
+    pub guide_stem: Option<usize>,
+    /// For each section (same order as `sections`): the guide's call for it (the cue and
+    /// any count, in source frames, ending where the section starts), if the guide has one.
+    #[serde(default)]
+    pub calls: Vec<Option<(u64, u64)>>,
 }
 
 impl Song {

@@ -192,7 +192,26 @@
       const pr = b.querySelector('.prog');
       pr.style.width = i === cur && snap ? Math.min(100, snap.frame_in_section / Math.max(1, snap.section_frames) * 100) + '%' : '0';
     });
+    followRail(cur, p);
   }
+
+  // The rail follows the playhead: the playing block (and the one before it) stay in
+  // view. If you scroll the rail yourself it leaves you alone for a few seconds.
+  let railFollowed = -1, railHandScroll = 0;
+  function followRail(cur, p) {
+    const rail = $('#rail');
+    if (!p || cur < 0 || drag || Date.now() - railHandScroll < 4000) { if (!p) railFollowed = -1; return; }
+    const b = rail.querySelector(`.blk[data-i="${cur}"]`);
+    if (!b) return;
+    const left = b.offsetLeft, right = left + b.offsetWidth;
+    const out = left < rail.scrollLeft || right > rail.scrollLeft + rail.clientWidth;
+    if (cur === railFollowed && !out) return;
+    railFollowed = cur;
+    const prev = rail.querySelector(`.blk[data-i="${cur - 1}"]`);
+    const want = Math.max(0, (prev ? prev.offsetLeft : left) - 8);
+    if (Math.abs(rail.scrollLeft - want) > 2) rail.scrollTo({ left: want, behavior: 'smooth' });
+  }
+  document.addEventListener('wheel', e => { if (e.target.closest && e.target.closest('#rail')) railHandScroll = Date.now(); }, { passive: true });
 
   /* ---------- section rail (drag to arrange) ---------- */
   function renderRail() {

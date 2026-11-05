@@ -402,6 +402,8 @@ impl SongFile {
                 .iter()
                 .map(|s| StemInfo { name: s.name.clone(), route: s.route, gain: s.gain, muted: s.muted })
                 .collect(),
+            guide_stem: None,
+            calls: vec![],
         };
         let items: Vec<ArrItem> = self
             .arrangement
