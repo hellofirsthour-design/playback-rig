@@ -12,6 +12,8 @@ pub struct AlsInfo {
     /// The set's master tempo (Live's beat grid; may be double/half the song's feel).
     pub bpm: Option<f64>,
     pub beats_per_bar: Option<u32>,
+    /// The time signature at the start of the song: (beats, note value), e.g. (6, 8).
+    pub meter: Option<(u32, u32)>,
     /// (position in beats from the start of the arrangement, name)
     pub locators: Vec<(f64, String)>,
     /// How arrangement beats map onto the audio files (from the first audio clip).
@@ -165,10 +167,32 @@ pub fn parse(xml: &str) -> AlsInfo {
     let master = section(xml, "<MasterTrack>", "</MasterTrack>").unwrap_or(xml);
     let bpm = num(master, r#"(?s)<Tempo>.*?<Manual Value="([0-9.eE+]+)""#).filter(|b| (20.0..=400.0).contains(b));
     // Live encodes the meter as numerator-1 + 99*log2(denominator): 4/4 = 201, 6/8 = 302.
-    let beats_per_bar = num(master, r#"(?s)<TimeSignature>.*?<Manual Value="(\d+)""#)
-        .map(|v| (v as u32 % 99) + 1)
-        .or_else(|| num(xml, r#"<Numerator Value="(\d+)""#).map(|n| n as u32))
-        .filter(|n| (1..=16).contains(n));
+    // The song's meter is the time signature automation at the start of the song if the
+    // set has any (signature markers), else the master's own setting.
+    let decode = |v: u32| -> Option<(u32, u32)> {
+        let (n, d) = (v % 99 + 1, 1u32 << (v / 99).min(5));
+        ((1..=16).contains(&n) && [1, 2, 4, 8, 16, 32].contains(&d)).then_some((n, d))
+    };
+    let ts = section(master, "<TimeSignature>", "</TimeSignature>").unwrap_or("");
+    let automated = Regex::new(r#"<AutomationTarget Id="(\d+)""#).unwrap().captures(ts).and_then(|c| {
+        let id = c[1].to_string();
+        let env = Regex::new(r#"(?s)<AutomationEnvelope Id="\d+">(.*?)</AutomationEnvelope>"#).unwrap();
+        let ev = Regex::new(r#"<EnumEvent Id="\d+" Time="([-0-9.eE+]+)" Value="(\d+)""#).unwrap();
+        let body = env
+            .captures_iter(xml)
+            .map(|c| c.get(1).map_or("", |m| m.as_str()))
+            .find(|b| b.contains(&format!(r#"<PointeeId Value="{id}" />"#)) || b.contains(&format!(r#"<PointeeId Value="{id}"/>"#)))?;
+        let first = ev
+            .captures_iter(body)
+            .filter_map(|m| Some((m[1].parse::<f64>().ok()?, m[2].parse::<u32>().ok()?)))
+            .filter(|(t, _)| *t <= 0.0)
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        first.and_then(|(_, v)| decode(v))
+    });
+    let manual = num(ts, r#"<Manual Value="(\d+)""#).and_then(|v| decode(v as u32));
+    let remote = num(xml, r#"<Numerator Value="(\d+)""#).zip(num(xml, r#"<Denominator Value="(\d+)""#)).map(|(n, d)| (n as u32, d as u32));
+    let meter = automated.or(manual).or(remote).filter(|(n, d)| (1..=16).contains(n) && [2, 4, 8, 16].contains(d));
+    let beats_per_bar = meter.map(|m| m.0);
     let mut locators = vec![];
     // Ableton nests <Locators><Locators>…</Locators></Locators>; the entries all sit
     // before the first closing tag.
@@ -221,7 +245,7 @@ pub fn parse(xml: &str) -> AlsInfo {
         }
     }
     tempo_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    AlsInfo { bpm, beats_per_bar, locators, clip, tempo_points }
+    AlsInfo { bpm, beats_per_bar, meter, locators, clip, tempo_points }
 }
 
 pub fn read(path: &Path) -> Result<AlsInfo, String> {
@@ -251,6 +275,25 @@ pub fn find(folder: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_six_eight_from_the_master_or_its_automation() {
+        // Set as the master's own setting
+        let a = parse(r#"<Ableton><LiveSet><MasterTrack><DeviceChain><Mixer><Tempo><Manual Value="90" /></Tempo>
+            <TimeSignature><LomId Value="0" /><Manual Value="302" /></TimeSignature></Mixer></DeviceChain></MasterTrack></LiveSet></Ableton>"#);
+        assert_eq!(a.meter, Some((6, 8)));
+        // Master left at 4/4, the song's 6/8 is a time signature marker (automation) at the start
+        let b = parse(r#"<Ableton><LiveSet><MasterTrack><DeviceChain><Mixer><Tempo><Manual Value="90" /></Tempo>
+            <TimeSignature><LomId Value="0" /><Manual Value="201" /><AutomationTarget Id="9"><LockEnvelope Value="0" /></AutomationTarget></TimeSignature></Mixer></DeviceChain>
+            <AutomationEnvelopes><Envelopes><AutomationEnvelope Id="0"><EnvelopeTarget><PointeeId Value="9" /></EnvelopeTarget><Automation><Events>
+              <EnumEvent Id="1" Time="-63072000" Value="302" /><EnumEvent Id="2" Time="96" Value="201" />
+            </Events></Automation></AutomationEnvelope></Envelopes></AutomationEnvelopes></MasterTrack></LiveSet></Ableton>"#);
+        assert_eq!(b.meter, Some((6, 8)), "the signature at the start of the song wins");
+        assert_eq!(b.beats_per_bar, Some(6));
+        // 3/4 (2 + 99*2 = 200) still reads as before
+        let c = parse(r#"<MasterTrack><TimeSignature><Manual Value="200" /></TimeSignature></MasterTrack>"#);
+        assert_eq!(c.meter, Some((3, 4)));
+    }
 
     #[test]
     fn reads_tempo_automation_and_integrates_it() {

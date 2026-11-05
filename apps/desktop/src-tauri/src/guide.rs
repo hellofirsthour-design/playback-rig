@@ -404,6 +404,64 @@ pub fn first_click(x: &[f32], sr: u32) -> Option<f64> {
     onsets(x, sr).first().map(|o| if o.t < 0.03 { 0.0 } else { o.t })
 }
 
+/// The meter the click's accents say, for songs with no time signature to read: the
+/// strong click every 6 pulses (6/8 counted in eighths), every 3 (3/4, or 6/8 when the
+/// pulse is too fast to be a quarter note), or every 4. Returns (beats, note value,
+/// pulse BPM), or None when the click has no clear accent (it stays as it is).
+pub fn meter_from_click(x: &[f32], sr: u32) -> Option<(u32, u32, f64)> {
+    let on = onsets(x, sr);
+    if on.len() < 24 {
+        return None;
+    }
+    let mut iv: Vec<f64> = on.windows(2).map(|w| w[1].t - w[0].t).filter(|d| (0.12..=2.0).contains(d)).collect();
+    if iv.len() < 20 {
+        return None;
+    }
+    iv.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p = iv[iv.len() / 2];
+    // pulse index of each click (gaps in the click count as missing pulses)
+    let mut k = vec![0i64; on.len()];
+    for i in 1..on.len() {
+        k[i] = k[i - 1] + ((on[i].t - on[i - 1].t) / p).round().max(1.0) as i64;
+    }
+    // How clearly one position in a group of g stands out from the next strongest,
+    // by loudness or brightness (accent clicks are louder or higher).
+    let clarity = |g: i64| -> f64 {
+        let mut best = 0.0f64;
+        for feat in 0..2 {
+            let mut sum = vec![0.0f64; g as usize];
+            let mut n = vec![0u32; g as usize];
+            for (o, &kk) in on.iter().zip(&k) {
+                let ph = kk.rem_euclid(g) as usize;
+                sum[ph] += if feat == 0 { o.amp as f64 } else { o.zcr as f64 };
+                n[ph] += 1;
+            }
+            let mut m: Vec<f64> = (0..g as usize).filter(|&i| n[i] > 2).map(|i| sum[i] / n[i] as f64).collect();
+            if m.len() < g as usize {
+                return 0.0;
+            }
+            m.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            if m[1] > 0.0 {
+                best = best.max(m[0] / m[1]);
+            }
+        }
+        best
+    };
+    let (c3, c4, c6) = (clarity(3), clarity(4), clarity(6));
+    let pulse_bpm = 60.0 / p;
+    const CLEAR: f64 = 1.12;
+    if c6 >= CLEAR && c6 >= c4 * 1.03 && c6 >= c3 * 0.97 {
+        return Some((6, 8, pulse_bpm));
+    }
+    if c3 >= CLEAR && c3 > c4 * 1.03 {
+        return Some(if pulse_bpm > 140.0 { (6, 8, pulse_bpm) } else { (3, 4, pulse_bpm) });
+    }
+    if c4 >= CLEAR {
+        return Some((4, 4, pulse_bpm));
+    }
+    None
+}
+
 /// Reads every beat off the click, for songs whose tempo changes (ramps, or a new
 /// tempo for a section). `bpm` is the song's tempo (from the folder name), used to
 /// tell an eighth-note click from a quarter-note one. Beat 0 is the first click.
@@ -770,6 +828,46 @@ mod tests {
             t += 60.0 / bpm / sub as f64;
         }
         out
+    }
+
+    /// Clicks every `pulse` seconds; `accent(k)` gives the k-th click's (frequency, level).
+    fn click_pattern(sr: u32, pulse: f64, n: usize, accent: impl Fn(usize) -> (f32, f32)) -> Vec<f32> {
+        let times: Vec<f64> = (0..n).map(|k| k as f64 * pulse).collect();
+        let len = ((times[n - 1] + 1.0) * sr as f64) as usize;
+        let mut x = vec![0.0f32; len];
+        for (k, &t0) in times.iter().enumerate() {
+            let (f, a) = accent(k);
+            let s0 = (t0 * sr as f64) as usize;
+            for i in 0..(sr as usize / 25) {
+                let t = i as f32 / sr as f32;
+                x[s0 + i] += (std::f32::consts::TAU * f * t).sin() * a * (-t * 80.0).exp();
+            }
+        }
+        x
+    }
+
+    #[test]
+    fn hears_six_eight_three_four_and_four_four_in_the_click() {
+        let sr = 44_100;
+        // 6/8 in eighths at 180: strong on 1, medium on 4
+        let six = click_pattern(sr, 60.0 / 180.0, 120, |k| match k % 6 { 0 => (1760.0, 0.9), 3 => (1400.0, 0.7), _ => (1175.0, 0.5) });
+        let (n, d, p) = meter_from_click(&six, sr).expect("6/8");
+        assert_eq!((n, d), (6, 8));
+        assert!((p - 180.0).abs() < 1.0, "{p}");
+        // 6/8 whose click accents 1 and 4 the same (a fast pulse in threes)
+        let six_b = click_pattern(sr, 60.0 / 180.0, 120, |k| if k % 3 == 0 { (1760.0, 0.9) } else { (1175.0, 0.5) });
+        assert_eq!(meter_from_click(&six_b, sr).map(|m| (m.0, m.1)), Some((6, 8)));
+        // 3/4 in quarters at 90
+        let three = click_pattern(sr, 60.0 / 90.0, 60, |k| if k % 3 == 0 { (1760.0, 0.9) } else { (1175.0, 0.55) });
+        assert_eq!(meter_from_click(&three, sr).map(|m| (m.0, m.1)), Some((3, 4)));
+        // 4/4: quarter clicks, and an eighth-note click with every quarter a little louder
+        let four = click_pattern(sr, 60.0 / 77.5, 64, |k| if k % 4 == 0 { (1760.0, 0.9) } else { (1175.0, 0.55) });
+        assert_eq!(meter_from_click(&four, sr).map(|m| (m.0, m.1)), Some((4, 4)));
+        let eighths = click_pattern(sr, 60.0 / 155.0, 128, |k| if k % 8 == 0 { (1760.0, 0.9) } else if k % 2 == 0 { (1175.0, 0.7) } else { (1175.0, 0.5) });
+        assert_ne!(meter_from_click(&eighths, sr).map(|m| (m.0, m.1)), Some((6, 8)), "a 4/4 eighth click is never read as 6/8");
+        // no accents at all: nothing to say
+        let flat = click_pattern(sr, 0.5, 64, |_| (1175.0, 0.6));
+        assert_eq!(meter_from_click(&flat, sr), None);
     }
 
     #[test]

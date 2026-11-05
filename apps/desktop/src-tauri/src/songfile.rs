@@ -86,6 +86,10 @@ fn two() -> f64 {
     2.0
 }
 
+fn four() -> u32 {
+    4
+}
+
 impl Default for Transition {
     fn default() -> Self {
         Transition { mode: TransitionMode::Stop, bars: 2.0, pad: false }
@@ -104,6 +108,10 @@ pub struct SongFile {
     pub name: String,
     pub bpm: f64,
     pub beats_per_bar: u32,
+    /// The time signature's note value: 4 for x/4, 8 for 6/8. `bpm` and the grid count
+    /// in this note (6/8: six eighth notes a bar, `bpm` in eighth notes).
+    #[serde(default = "four")]
+    pub meter_den: u32,
     #[serde(default)]
     pub offset_ms: f64,
     #[serde(default)]
@@ -152,7 +160,7 @@ pub struct SongFile {
 pub const SETUP_VERSION: u32 = 3;
 
 /// Raise to line up the grid of automatically set up songs with the click again.
-pub const GRID_VERSION: u32 = 5;
+pub const GRID_VERSION: u32 = 6;
 
 /// Where a stem sits in the track list: click and guide first, then Drums,
 /// Percussion, Bass, Guitars, Keys, Other instruments, Vocals, FX.
@@ -327,6 +335,7 @@ impl SongFile {
                 name,
                 bpm: folder_bpm.or_else(|| files.iter().find_map(|f| bpm_in(f))).unwrap_or(120.0),
                 beats_per_bar: 4,
+                meter_den: 4,
                 offset_ms: 0.0,
                 key: key.unwrap_or_default(),
                 click: !files.iter().any(|f| is_click(&stem_name(f))),
@@ -356,6 +365,17 @@ impl SongFile {
             }
             sf.setup = SETUP_VERSION;
         }
+        // Songs set up from the Ableton set before its time signature was read right
+        // (a 6/8 song set up as 4/4) are set up again.
+        if sf.markers_from.as_deref() == Some("ableton") {
+            if let Some((n, d)) = crate::als::find(folder).and_then(|p| crate::als::read(&p).ok()).and_then(|i| i.meter) {
+                if (n, d) != (sf.beats_per_bar, sf.meter_den) {
+                    sf.markers_from = None;
+                    sf.grid_version = 0;
+                    sf.beat_times.clear();
+                }
+            }
+        }
         // A MultiTracks download includes an Ableton set with the exact section markers.
         if sf.markers_from.is_none() {
             if let Some(info) = crate::als::find(folder).and_then(|p| crate::als::read(&p).ok()) {
@@ -381,9 +401,32 @@ impl SongFile {
         let live_bpm = info.bpm.or(known_bpm).unwrap_or(self.bpm);
         let bpm = known_bpm.unwrap_or(live_bpm);
         self.bpm = bpm;
-        if let Some(n) = info.beats_per_bar {
+        if let Some((n, d)) = info.meter {
+            self.beats_per_bar = n;
+            self.meter_den = d;
+            // The grid counts in the meter's note (eighths in 6/8). Live's tempo is in
+            // quarter notes; the folder's tempo may be given per dotted quarter (6/8 "60"),
+            // per quarter or per eighth: take the multiple of it that matches the set.
+            if d != 4 {
+                let e = live_bpm * d as f64 / 4.0;
+                // (Like 4/4 sets, the set itself may run at double time: try e/2 as well.)
+                let off = |c: f64, t: f64| (c / t).ln().abs();
+                self.bpm = match known_bpm {
+                    Some(f) => {
+                        let best = [3.0 * f, 2.0 * f, f]
+                            .into_iter()
+                            .flat_map(|c| [(c, off(c, e)), (c, off(c, e / 2.0))])
+                            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                            .unwrap();
+                        if best.1 < 0.04 { best.0 } else { e }
+                    }
+                    None => e,
+                };
+            }
+        } else if let Some(n) = info.beats_per_bar {
             self.beats_per_bar = n;
         }
+        let bpm = self.bpm;
         if info.locators.is_empty() {
             return false;
         }
@@ -508,6 +551,38 @@ impl SongFile {
         crate::guide::unique_names(&mut markers);
         // Keep the arrangement: names that still exist stay put.
         self.markers = markers;
+    }
+
+    /// Compound meters (6/8, 9/8, 12/8) are felt in dotted quarters: three of the grid's
+    /// eighth notes to a beat. Used to show the tempo the way musicians count it.
+    pub fn felt_per_beat(&self) -> f64 {
+        if self.meter_den == 8 && self.beats_per_bar % 3 == 0 && self.beats_per_bar >= 6 {
+            3.0
+        } else {
+            1.0
+        }
+    }
+
+    /// Changes the time signature (and the grid's tempo, in the new note value), keeping
+    /// every section at its place in the audio, moved to the nearest bar.
+    pub fn set_meter(&mut self, beats: u32, den: u32, bpm: f64) {
+        let times: Vec<f64> = self.markers.iter().map(|m| self.bar_time(m.bar)).collect();
+        self.beats_per_bar = beats.max(1);
+        self.meter_den = den;
+        self.bpm = bpm;
+        self.target_bpm = None;
+        self.beat_times.clear();
+        let bpb = self.beats_per_bar as f64;
+        let bars: Vec<u32> = times.iter().map(|&t| (self.beat_at(t) / bpb).round().max(0.0) as u32 + 1).collect();
+        for (m, b) in self.markers.iter_mut().zip(bars) {
+            m.bar = b;
+        }
+        let mut seen = 0;
+        self.markers.retain(|m| {
+            let keep = m.bar > seen;
+            seen = seen.max(m.bar);
+            keep
+        });
     }
 
     /// Tempo the song plays at.
@@ -636,6 +711,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_six_eight_set_counts_eighths_and_shows_the_dotted_quarter() {
+        // Live at 90 (quarters) in 6/8 = 180 eighths a minute = 60 dotted quarters: bars of 2 s.
+        // Locators at beats 6 and 30 (quarters) = 4 s and 20 s = bars 3 and 11.
+        let info = crate::als::AlsInfo {
+            bpm: Some(90.0),
+            beats_per_bar: Some(6),
+            meter: Some((6, 8)),
+            locators: vec![(6.0, "Verse".into()), (30.0, "Chorus".into())],
+            clip: None,
+            tempo_points: vec![],
+        };
+        for folder in [Some(60.0), Some(90.0), Some(180.0), None] {
+            let mut sf = SongFile { name: "S".into(), bpm: 120.0, beats_per_bar: 4, meter_den: 4, ..Default::default() };
+            sf.apply_ableton(&info, folder);
+            assert_eq!((sf.beats_per_bar, sf.meter_den), (6, 8));
+            assert!((sf.bpm - 180.0).abs() < 1e-9, "folder {folder:?}: grid tempo {}", sf.bpm);
+            assert!((sf.bpm / sf.felt_per_beat() - 60.0).abs() < 1e-9, "shown as 60 (dotted quarter)");
+            let m: Vec<(&str, u32)> = sf.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
+            assert_eq!(m, [("Verse", 3), ("Chorus", 11)], "folder {folder:?}");
+            assert!((sf.bar_time(3) - 4.0).abs() < 1e-6);
+        }
+        // a set that runs at double time (180 quarters) still gives 2 s bars with the folder's 60
+        let mut fast = info.clone();
+        fast.bpm = Some(180.0);
+        fast.locators = vec![(12.0, "Verse".into()), (60.0, "Chorus".into())];
+        let mut sf = SongFile { name: "S".into(), bpm: 120.0, beats_per_bar: 4, meter_den: 4, ..Default::default() };
+        sf.apply_ableton(&fast, Some(60.0));
+        assert!((sf.bpm - 180.0).abs() < 1e-9, "{}", sf.bpm);
+        // and 4/4 songs are untouched by all this
+        let mut four = SongFile { name: "S".into(), bpm: 120.0, beats_per_bar: 4, meter_den: 4, ..Default::default() };
+        let mut i4 = info.clone();
+        i4.meter = Some((4, 4));
+        i4.beats_per_bar = Some(4);
+        four.apply_ableton(&i4, Some(77.5));
+        assert_eq!((four.beats_per_bar, four.meter_den, four.bpm), (4, 4, 77.5));
+        assert_eq!(four.felt_per_beat(), 1.0);
+    }
+
+    #[test]
+    fn set_meter_keeps_sections_where_they_are_in_the_audio() {
+        // set up wrongly as 4/4 at 60 (4 s bars): sections at bars 2 and 4 = 4 s and 12 s
+        let mut sf = SongFile { name: "S".into(), bpm: 60.0, beats_per_bar: 4, meter_den: 4, markers: vec![Marker { name: "A".into(), bar: 2 }, Marker { name: "B".into(), bar: 4 }], ..Default::default() };
+        sf.set_meter(6, 8, 180.0); // 2 s bars
+        let m: Vec<u32> = sf.markers.iter().map(|m| m.bar).collect();
+        assert_eq!(m, [3, 7]);
+    }
+
+    #[test]
     fn reads_multitracks_folder_names() {
         assert_eq!(parse_folder_name("See a Victory-At Midnight-A-77.50bpm"), ("See a Victory".into(), Some("A".into()), Some(77.5)));
         assert_eq!(parse_folder_name("Way Maker-Bb-68bpm"), ("Way Maker".into(), Some("Bb".into()), Some(68.0)));
@@ -679,6 +802,7 @@ mod tests {
         let info = crate::als::AlsInfo {
             bpm: Some(155.0),
             beats_per_bar: Some(4),
+            meter: Some((4, 4)),
             locators: vec![(16.0, "Intro".into()), (48.0, "Verse".into()), (80.0, "Build".into()), (112.0, "Chorus".into())],
             clip: Some(crate::als::ClipTiming { time: 0.0, start: 0.0, warped: true, warp: vec![(0.0, 0.1), (155.0, 60.1)] }),
             tempo_points: vec![],
@@ -729,6 +853,7 @@ mod tests {
             name: "S".into(),
             bpm: 60.0,
             beats_per_bar: 4,
+            meter_den: 4,
             offset_ms: 500.0,
             key: "D".into(),
             click: true,

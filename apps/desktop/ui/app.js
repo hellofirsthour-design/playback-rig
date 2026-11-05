@@ -108,9 +108,11 @@
   // Bars left in the block: from the engine, which follows tempo changes.
   const barsLeft = sn => (sn.bars_left != null ? sn.bars_left : (sn.section_frames - sn.frame_in_section) / V.song.sample_rate / barSec());
   // "77.5 BPM", or "70 → 84 BPM" for a song whose tempo changes.
+  // Tempo as musicians count it: in 6/8 that's the dotted quarter (the grid counts eighths).
+  const felt = (s, bpm) => bpm / ((s && s.felt_per_beat) || 1);
   function tempoText(s) {
-    const tc = s.tempo_changes || [];
-    if (tc.length < 2) return `${+playBpm().toFixed(2)} BPM`;
+    const tc = (s.tempo_changes || []).map(([b, t]) => [b, felt(s, t)]);
+    if (tc.length < 2) return `${+felt(s, playBpm()).toFixed(2)} BPM`;
     if (tc.length <= 3) return tc.map(t => +t[1].toFixed(1)).join(' → ') + ' BPM';
     const lo = Math.min(...tc.map(t => t[1])), hi = Math.max(...tc.map(t => t[1]));
     return `${+lo.toFixed(1)}–${+hi.toFixed(1)} BPM`;
@@ -177,7 +179,7 @@
   function renderBar() {
     const s = V.song;
     $('#songTitle').textContent = loading ? 'Loading…' : s ? s.name : (V.setlist.length ? 'Pick a song' : 'No songs yet');
-    $('#songMeta').textContent = s ? `${tempoText(s)} · ${s.beats_per_bar}/4${s.key || s.transpose ? ' · ' + keyName(s.key, s.transpose) : ''}${s.transpose ? ` (${s.transpose > 0 ? '+' : ''}${s.transpose})` : ''}` : '';
+    $('#songMeta').textContent = s ? `${tempoText(s)} · ${s.beats_per_bar}/${s.meter_den || 4}${s.key || s.transpose ? ' · ' + keyName(s.key, s.transpose) : ''}${s.transpose ? ` (${s.transpose > 0 ? '+' : ''}${s.transpose})` : ''}` : '';
     document.querySelectorAll('#quant button').forEach(b => b.classList.toggle('on', b.dataset.q === V.quantize));
     $('#clickBtn').classList.toggle('on', !!(s && s.click)); $('#clickBtn').disabled = !s;
     $('#countBtn').classList.toggle('on', V.count_in);
@@ -389,7 +391,7 @@
     const bpb = s ? s.beats_per_bar : 4, beats = $('#lvBeats');
     if (beats.children.length !== bpb) { beats.innerHTML = ''; for (let i = 0; i < bpb; i++) beats.append(el('i')); }
     [...beats.children].forEach((d, i) => { d.className = (p && snap && snap.beat === i + 1 ? 'on' : '') + (i === 0 ? ' one' : ''); });
-    $('#lvPos').textContent = s ? `${p && snap && !counting ? snap.bar + '.' + snap.beat + ' · ' : ''}${+((p && snap && snap.bpm) || (s.tempo_changes && s.tempo_changes.length ? s.tempo_changes[0][1] : playBpm())).toFixed(1)} BPM${s.key ? ' · ' + keyName(s.key, s.transpose) : ''}` : '';
+    $('#lvPos').textContent = s ? `${p && snap && !counting ? snap.bar + '.' + snap.beat + ' · ' : ''}${+felt(s, (p && snap && snap.bpm) || (s.tempo_changes && s.tempo_changes.length ? s.tempo_changes[0][1] : playBpm())).toFixed(1)} BPM${s.key ? ' · ' + keyName(s.key, s.transpose) : ''}` : '';
     const nx = $('#lvNext'); let lbl = 'Next', name = '—'; nx.className = 'lnext';
     if (s && o) {
       if (snap && snap.pending != null && L[snap.pending]) {
@@ -1164,7 +1166,7 @@
     const hl = $('#heard'); hl.innerHTML = '';
     heard.forEach(([t, w]) => { const li = el('li'); li.append(fmt(t) + '  ', el('b', null, w || '…')); hl.append(li); });
     if (!document.activeElement || !document.activeElement.closest('#songDrawer .form')) {
-      $('#f-name').value = s.name; $('#f-bpm').value = s.bpm; $('#f-bpb').value = s.beats_per_bar; $('#f-key').value = s.key; $('#f-off').value = Math.round(s.offset_ms);
+      $('#f-name').value = s.name; $('#f-bpm').value = s.bpm; $('#f-bpb').value = s.beats_per_bar; $('#f-den').value = String(s.meter_den || 4); $('#f-key').value = s.key; $('#f-off').value = Math.round(s.offset_ms);
     }
     renderMarkers();
     renderKeyTempo();
@@ -1175,8 +1177,8 @@
     if (!kt || kt.folder !== s.folder) kt = { folder: s.folder, transpose: s.transpose, bpm: playBpm() };
     $('#keyVal').textContent = keyName(s.key, kt.transpose) + (kt.transpose ? ` (${kt.transpose > 0 ? '+' : ''}${kt.transpose})` : '');
     $('#keyOrig').textContent = s.key ? `Recorded in ${s.key}` : 'Add the recorded key under Song details to see key names';
-    if (document.activeElement !== $('#bpmVal')) $('#bpmVal').value = +kt.bpm.toFixed(2);
-    $('#bpmOrig').textContent = `Recorded at ${+s.bpm.toFixed(2)}`;
+    if (document.activeElement !== $('#bpmVal')) $('#bpmVal').value = +felt(s, kt.bpm).toFixed(2);
+    $('#bpmOrig').textContent = `Recorded at ${+felt(s, s.bpm).toFixed(2)}${(s.felt_per_beat || 1) > 1 ? ' (dotted quarter)' : ''}`;
     const changed = kt.transpose !== s.transpose || Math.abs(kt.bpm - playBpm()) > 0.004;
     $('#ktApply').disabled = !changed || applyingKt;
     $('#ktApply').textContent = applyingKt ? 'Applying…' : 'Apply';
@@ -1184,9 +1186,12 @@
   let applyingKt = false;
   $('#keyDown').onclick = () => { kt.transpose = Math.max(-12, kt.transpose - 1); renderKeyTempo(); };
   $('#keyUp').onclick = () => { kt.transpose = Math.min(12, kt.transpose + 1); renderKeyTempo(); };
-  $('#bpmDown').onclick = () => { kt.bpm = Math.max(30, Math.round((kt.bpm - 0.5) * 2) / 2); renderKeyTempo(); };
-  $('#bpmUp').onclick = () => { kt.bpm = Math.min(300, Math.round((kt.bpm + 0.5) * 2) / 2); renderKeyTempo(); };
-  $('#bpmVal').oninput = e => { const v = +e.target.value; if (v >= 30 && v <= 300) { kt.bpm = v; renderKeyTempo(); } };
+  // The tempo boxes count in felt beats (dotted quarters in 6/8); kt.bpm is the grid's.
+  const fpb = () => (V.song && V.song.felt_per_beat) || 1;
+  const stepBpm = d => { const f = fpb(); const v = Math.round((kt.bpm / f + d) * 2) / 2; if (v >= 20 && v <= 300) kt.bpm = v * f; renderKeyTempo(); };
+  $('#bpmDown').onclick = () => stepBpm(-0.5);
+  $('#bpmUp').onclick = () => stepBpm(0.5);
+  $('#bpmVal').oninput = e => { const v = +e.target.value; if (v >= 20 && v <= 300) { kt.bpm = v * fpb(); renderKeyTempo(); } };
   $('#ktReset').onclick = () => { kt.transpose = 0; kt.bpm = V.song.bpm; renderKeyTempo(); };
   $('#ktApply').onclick = async () => {
     if (playing()) { toast('Stop playback before changing the key or tempo.'); return; }
@@ -1195,7 +1200,7 @@
       const v = await invoke('set_key_tempo', { transpose: kt.transpose, bpm: kt.bpm });
       songKey = null; // stems changed: reload waveforms
       await refresh(v); kt = null;
-      const s = V.song; toast(`Now in ${keyName(s.key, s.transpose)} at ${+playBpm().toFixed(2)} BPM.`);
+      const s = V.song; toast(`Now in ${keyName(s.key, s.transpose)} at ${+felt(s, playBpm()).toFixed(2)} BPM.`);
     } catch (e) { err(e); } finally { applyingKt = false; hideTask(); renderKeyTempo(); }
   };
 
@@ -1233,7 +1238,7 @@
   $('#songSave').onclick = () => {
     const names = draftMarkers.map(m => m.name.trim().toLowerCase()).filter(Boolean);
     if (new Set(names).size !== names.length) { toast('Two sections have the same name. Give each its own (e.g. Chorus 1, Chorus 2).'); return; }
-    invoke('update_song', { meta: { name: $('#f-name').value, bpm: +$('#f-bpm').value || V.song.bpm, beats_per_bar: Math.round(+$('#f-bpb').value || 4), offset_ms: +$('#f-off').value || 0, key: $('#f-key').value, markers: draftMarkers.map(m => ({ name: m.name.trim(), bar: m.bar })) } })
+    invoke('update_song', { meta: { name: $('#f-name').value, bpm: +$('#f-bpm').value || V.song.bpm, beats_per_bar: Math.round(+$('#f-bpb').value || 4), meter_den: +$('#f-den').value || 4, offset_ms: +$('#f-off').value || 0, key: $('#f-key').value, markers: draftMarkers.map(m => ({ name: m.name.trim(), bar: m.bar })) } })
       .then(v => { refresh(v); toast('Song saved.'); }).catch(err);
   };
 

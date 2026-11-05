@@ -619,6 +619,24 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
         let had_map = !file.beat_times.is_empty();
         if let Some(i) = file.stems.iter().position(|s| songfile::is_click(&s.name)) {
             let click = guide::to_mono(&stems[i]);
+            // A song still on the 4/4 default whose click accents say 6/8 or 3/4 (and the
+            // Ableton set, if any, didn't say otherwise) moves to that meter.
+            let als_meter = ableton.as_ref().and_then(|a| a.meter).filter(|m| *m != (4, 4));
+            if (file.beats_per_bar, file.meter_den) == (4, 4) && als_meter.is_none() && file.beat_times.is_empty() {
+                if let Some((n, d, pulse)) = guide::meter_from_click(&click, sample_rate) {
+                    if (n, d) != (4, 4) {
+                        let k = file.stretch();
+                        // the grid counts in the click's pulse (eighths in 6/8); a pulse
+                        // close to a multiple of the folder's tempo takes that exact value
+                        let pulse = pulse * k;
+                        let bpm = [file.bpm, 2.0 * file.bpm, 3.0 * file.bpm]
+                            .into_iter()
+                            .find(|c| (c / pulse - 1.0).abs() < 0.02)
+                            .unwrap_or((pulse * 100.0).round() / 100.0);
+                        file.set_meter(n, d, bpm);
+                    }
+                }
+            }
             guide::snap_grid_to_click(&mut file, &click, sample_rate);
             // Songs whose tempo changes: the grid follows every beat of the click.
             if file.beat_times.is_empty() {
@@ -897,6 +915,11 @@ struct SongView {
     name: String,
     bpm: f64,
     beats_per_bar: u32,
+    /// The time signature's note value (4, or 8 for 6/8).
+    meter_den: u32,
+    /// Grid notes per felt beat: 3 in 6/8 (felt in dotted quarters), else 1. The tempo
+    /// shown is bpm / felt_per_beat.
+    felt_per_beat: f64,
     offset_ms: f64,
     key: String,
     click: bool,
@@ -945,6 +968,8 @@ impl SongView {
             name: l.file.name.clone(),
             bpm: l.file.bpm,
             beats_per_bar: l.file.beats_per_bar,
+            meter_den: l.file.meter_den,
+            felt_per_beat: l.file.felt_per_beat(),
             offset_ms: l.file.offset_ms,
             key: l.file.key.clone(),
             click: l.file.click,
@@ -1581,6 +1606,9 @@ struct SongMeta {
     name: String,
     bpm: f64,
     beats_per_bar: u32,
+    /// The time signature's note value (4 or 8); older screens don't send it.
+    #[serde(default)]
+    meter_den: Option<u32>,
     offset_ms: f64,
     key: String,
     markers: Vec<Marker>,
@@ -1616,7 +1644,8 @@ fn update_song(state: State<'_, AppState>, meta: SongMeta) -> Result<AppView, St
         }
         let bpm = meta.bpm.clamp(30.0, 300.0);
         let offset = meta.offset_ms.max(0.0);
-        if (bpm - f.bpm).abs() > 1e-9 || meta.beats_per_bar != f.beats_per_bar {
+        let den = meta.meter_den.filter(|d| [2, 4, 8, 16].contains(d)).unwrap_or(f.meter_den);
+        if (bpm - f.bpm).abs() > 1e-9 || meta.beats_per_bar != f.beats_per_bar || den != f.meter_den {
             f.beat_times.clear(); // a new tempo by hand: one steady tempo
         } else if !f.beat_times.is_empty() {
             // moving the downbeat moves the whole tempo map
@@ -1625,6 +1654,7 @@ fn update_song(state: State<'_, AppState>, meta: SongMeta) -> Result<AppView, St
         }
         f.bpm = bpm;
         f.beats_per_bar = meta.beats_per_bar.clamp(1, 12);
+        f.meter_den = den;
         f.offset_ms = offset;
         f.key = meta.key.trim().to_string();
         let mut m = meta.markers;
@@ -2059,12 +2089,12 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
         return Err("Stop playback before reading the guide.".into());
     }
     // Read the original recordings from disk, not the key/tempo-changed copies.
-    let (click_path, guide_path, sr, bpb, bpm, known_bpm) = {
+    let (click_path, guide_path, sr, bpb, bpm, known_bpm, meter) = {
         let song = state.song.lock().unwrap();
         let l = song.as_ref().ok_or("Load a song first.")?;
         let known_bpm = songfile::parse_folder_name(&songfile::song_title(&l.folder)).2;
         let find = |f: fn(&str) -> bool| l.file.stems.iter().find(|s| f(&s.name)).map(|s| l.folder.join(&s.file));
-        (find(songfile::is_click), find(songfile::is_guide), l.sample_rate, l.file.beats_per_bar, l.file.bpm, known_bpm)
+        (find(songfile::is_click), find(songfile::is_guide), l.sample_rate, l.file.beats_per_bar, l.file.bpm, known_bpm, (l.file.beats_per_bar, l.file.meter_den))
     };
     if click_path.is_none() && guide_path.is_none() {
         return Err("This song has no Click or Guide stem to read. Add sections by hand in the Song panel.".into());
@@ -2075,6 +2105,16 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
     })
     .await
     .map_err(|e| e.to_string())??;
+    // A song still on the 4/4 default: the click's accents may say 6/8 or 3/4. The grid then
+    // counts the click's pulse (eighths in 6/8), at the multiple of the folder's tempo it matches.
+    let (bpb, known_bpm, new_meter) = match (meter == (4, 4)).then(|| click.as_ref().and_then(|c| guide::meter_from_click(&guide::to_mono(c), sr))).flatten() {
+        Some((n, d, pulse)) if (n, d) != (4, 4) => {
+            let base = known_bpm.unwrap_or(bpm);
+            let k = [base, 2.0 * base, 3.0 * base].into_iter().find(|c| (c / pulse - 1.0).abs() < 0.02).unwrap_or((pulse * 100.0).round() / 100.0);
+            (n, Some(k), Some((n, d)))
+        }
+        _ => (bpb, known_bpm, None),
+    };
     let data_dir = state.core.data_dir.clone();
     let h = app.clone();
     let analysis = tauri::async_runtime::spawn_blocking(move || {
@@ -2094,6 +2134,13 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
     let view = edit_song(&state, |f| {
         if analysis.bpm.is_some() || analysis.offset_ms.is_some() {
             f.beat_times.clear(); // reading the guide sets one steady tempo
+        }
+        if let Some((n, d)) = new_meter {
+            f.beats_per_bar = n;
+            f.meter_den = d;
+            if let Some(k) = known_bpm {
+                f.bpm = k;
+            }
         }
         if let Some(b) = analysis.bpm {
             f.bpm = b;
@@ -2688,6 +2735,80 @@ mod tests {
         assert_eq!(again.file.markers, f.markers);
         assert_eq!(again.file.beat_times.len(), f.beat_times.len());
         assert!(again.file.beat_times.iter().zip(&f.beat_times).all(|(a, b)| (a - b).abs() < 1e-9), "saved and read back (to the last decimal)");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_six_eight_song_is_set_up_in_six_eight() {
+        let root = std::env::temp_dir().join(format!("rig-68-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sr = 44_100u32;
+        // 6/8 at a dotted quarter of 60 (the folder's number): eighths at 180, bars of 2 s.
+        let folder = root.join("Six Song-A-60bpm");
+        std::fs::create_dir_all(&folder).unwrap();
+        let len = (sr as f64 * 26.0) as usize;
+        let mut click = vec![0f32; len];
+        for k in 0..72 {
+            let s0 = (k as f64 / 3.0 * sr as f64) as usize;
+            let (f, a) = match k % 6 { 0 => (1760.0, 0.9), 3 => (1400.0, 0.7), _ => (1175.0, 0.5) };
+            for i in 0..1500 {
+                let tt = i as f32 / sr as f32;
+                click[s0 + i] += (std::f32::consts::TAU * f * tt).sin() * a * (-tt * 80.0).exp();
+            }
+        }
+        write_wav(&folder.join("Click.wav"), &click, sr);
+        // guide calls in bars 4 and 8 for sections in bars 5 and 9
+        let mut guide = vec![0f32; len];
+        for b in [4.0, 8.0] {
+            let t0 = (b - 1.0) * 2.0;
+            for i in (t0 * sr as f64) as usize..((t0 + 0.5) * sr as f64) as usize {
+                guide[i] = (i as f32 * 0.21).sin() * 0.4;
+            }
+        }
+        write_wav(&folder.join("Guide.wav"), &guide, sr);
+        write_wav(&folder.join("Keys.wav"), &(0..len).map(|i| (i as f32 * 0.03).sin() * 0.2).collect::<Vec<_>>(), sr);
+        // Live at 90 quarters; the song's 6/8 is a signature marker (master left at 4/4).
+        // Bar n starts at quarter beat 3(n-1): Verse bar 5 = 12, Chorus bar 9 = 24.
+        let als = r#"<Ableton><LiveSet><Tracks><AudioTrack><DeviceChain>
+            <AudioClip Id="1" Time="0"><LoopStart Value="0" /><StartRelative Value="0" /><IsWarped Value="true" />
+            <WarpMarkers><WarpMarker Id="0" SecTime="0" BeatTime="0" /><WarpMarker Id="1" SecTime="60" BeatTime="90" /></WarpMarkers></AudioClip>
+            </DeviceChain></AudioTrack></Tracks>
+            <Locators><Locators>
+              <Locator Id="0"><Time Value="12" /><Name Value="Verse" /></Locator>
+              <Locator Id="1"><Time Value="24" /><Name Value="Chorus" /></Locator>
+            </Locators></Locators>
+            <MasterTrack><DeviceChain><Mixer><Tempo><LomId Value="0" /><Manual Value="90" /></Tempo>
+            <TimeSignature><LomId Value="0" /><Manual Value="201" /><AutomationTarget Id="9"><LockEnvelope Value="0" /></AutomationTarget></TimeSignature></Mixer></DeviceChain>
+            <AutomationEnvelopes><Envelopes><AutomationEnvelope Id="0"><EnvelopeTarget><PointeeId Value="9" /></EnvelopeTarget><Automation><Events>
+              <EnumEvent Id="1" Time="-63072000" Value="302" />
+            </Events></Automation></AutomationEnvelope></Envelopes></AutomationEnvelopes></MasterTrack></LiveSet></Ableton>"#;
+        std::fs::write(folder.join("MultiTrack.als"), als).unwrap();
+
+        let check = |l: &Loaded| {
+            let f = &l.file;
+            assert_eq!((f.beats_per_bar, f.meter_den), (6, 8));
+            assert!((f.bpm - 180.0).abs() < 0.01, "grid tempo {}", f.bpm);
+            let m: Vec<(&str, u32)> = f.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
+            assert_eq!(m, [("Verse", 5), ("Chorus", 9)]);
+            for (i, t) in [(1, 8.0), (2, 16.0)] {
+                let got = l.song.sections[i].start as f64 / 48_000.0;
+                assert!((got - t).abs() < 0.01, "{} at {got} s, want {t}", l.song.sections[i].name);
+            }
+            let v = SongView::from(l);
+            assert_eq!((v.beats_per_bar, v.meter_den, v.felt_per_beat), (6, 8, 3.0), "shows 6/8 at 60");
+            assert!(f.beat_times.is_empty(), "a steady 6/8 song has no tempo map");
+        };
+        let l = load(&folder, 48_000, 2).unwrap();
+        check(&l);
+
+        // A song an older version set up as 4/4 is set up again in 6/8 when it loads.
+        let mut old = l.file.clone();
+        old.beats_per_bar = 4;
+        old.meter_den = 4;
+        old.bpm = 60.0;
+        old.save(&folder).unwrap();
+        let again = load(&folder, 48_000, 2).unwrap();
+        check(&again);
         std::fs::remove_dir_all(&root).ok();
     }
 
