@@ -180,6 +180,29 @@ impl Engine {
         Ok(())
     }
 
+    /// Swaps in a new arrangement while playing, without allocating or freeing:
+    /// `new` receives the old arrangement, so the caller frees it off the audio thread.
+    /// `keep` is the index, in the new arrangement, of the block that is playing now.
+    /// The caller must validate `new` against the song first (`Arrangement::validate`).
+    /// If the block at `keep` is a different section, playback moves to its start.
+    pub fn swap_arrangement(&mut self, new: &mut Arrangement, keep: usize) {
+        if new.items.is_empty() {
+            return;
+        }
+        let old_section = self.arr.items.get(self.item).map(|it| it.section);
+        std::mem::swap(&mut self.arr, new);
+        self.item = keep.min(self.arr.items.len() - 1);
+        self.pending = None;
+        if Some(self.arr.items[self.item].section) != old_section {
+            self.fpos = 0;
+            if self.playing {
+                self.last_jump = Some(self.abs);
+                self.last_beat = None;
+            }
+        }
+        self.finished = false;
+    }
+
     pub fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::Play => self.play(),
@@ -728,10 +751,25 @@ mod tests {
     }
 
     #[test]
-    fn arrangement_cannot_change_while_playing() {
+    fn arrangement_cannot_be_rebuilt_while_playing() {
         let mut e = rig(None);
         e.handle(Command::Play);
         let arr = e.arrangement().clone();
         assert!(e.set_arrangement(arr).is_err());
+    }
+
+    #[test]
+    fn live_swap_keeps_the_current_block_playing_and_uses_the_new_order() {
+        let mut e = rig(None); // A B C
+        e.handle(Command::Play);
+        run(&mut e, 3000); // in A
+        let song = e.song().clone();
+        let mut new = Arrangement::from_names(&song, &["C", "A", "C"]).unwrap();
+        e.swap_arrangement(&mut new, 1); // A is now block 2
+        assert_eq!(new.items.len(), 3, "old arrangement handed back to be freed");
+        assert_eq!(e.snapshot().item, 1);
+        let out = run(&mut e, 5100);
+        assert_eq!(out[0][1000], 4000.0, "A keeps playing where it was");
+        assert_eq!(out[0][5050], 16050.0, "then the new next block (C)");
     }
 }

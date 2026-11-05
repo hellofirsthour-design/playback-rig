@@ -23,6 +23,9 @@ midir = "0.10"
 rtrb = "0.3"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "wav", "pcm", "flac", "alac", "aiff"] }
 rubato = "0.16"
+whisper-rs = "0.15"
+ureq = "2"
+base64 = "0.22"
 
 [profile.release]
 opt-level = 3

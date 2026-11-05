@@ -5,105 +5,128 @@
 <title>Playback Rig</title>
 <link rel="stylesheet" href="style.css">
 <body>
-<header class="top">
-  <div class="brand"><span class="tally" id="tally"></span>Playback Rig</div>
-  <nav class="tabs" role="tablist">
-    <button role="tab" data-mode="live" class="on">Live</button>
-    <button role="tab" data-mode="build">Build</button>
-    <button role="tab" data-mode="setup">Setup</button>
-  </nav>
-  <div class="out" id="outinfo"></div>
+<header class="bar">
+  <button class="ib" id="setBtn" title="Set list">Set</button>
+  <div class="songsel">
+    <button class="ib arrow" id="prevSong" aria-label="Previous song" title="Previous song">‹</button>
+    <div class="title"><b id="songTitle">No song</b><span id="songMeta"></span></div>
+    <button class="ib arrow" id="nextSong" aria-label="Next song" title="Next song">›</button>
+  </div>
+
+  <div class="transport">
+    <button class="tp play" id="playBtn" title="Play / stop (Space)" aria-label="Play">
+      <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></svg>
+      <svg class="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+    </button>
+    <button class="tp" data-cmd="Next" title="Next block (N). Press again to skip one more.">Next</button>
+    <button class="tp" data-cmd="Repeat" title="Play this block again (R)">Repeat</button>
+    <button class="tp" id="vampBtn" data-cmd="Vamp" title="Loop this block until pressed again (V)">Vamp</button>
+  </div>
+
+  <div class="lcd" aria-live="polite">
+    <div class="lcd-sec" id="lcdSec">—</div>
+    <div class="lcd-row"><span class="bb" id="lcdBB">–</span><span id="lcdTime">0:00</span><span id="lcdLeft"></span></div>
+    <div class="lcd-call" id="lcdCall"></div>
+  </div>
+
+  <div class="opts">
+    <div class="seg" id="quant" role="group" aria-label="Jump timing"><button data-q="Now">Now</button><button data-q="Bar">Bar</button><button data-q="SectionEnd">End</button></div>
+    <button class="tog" id="clickBtn" title="Built-in click">Click</button>
+    <button class="tog" id="countBtn" title="One bar of click before the song">Count-in</button>
+  </div>
+  <div class="right">
+    <button class="ib" id="songBtn">Song</button>
+    <button class="ib" id="setupBtn">Setup</button>
+  </div>
 </header>
 
-<main class="rig">
-  <aside class="panel setlist">
-    <h2>Set</h2>
-    <ol class="songs" id="songs"></ol>
-    <button class="btn" id="addSongs">Add songs</button>
-    <p class="hint">Each song is a folder of stems, like a MultiTracks download.</p>
-  </aside>
+<section class="railwrap">
+  <div class="rail" id="rail" aria-label="Arrangement"></div>
+  <div class="palette"><span class="lbl">Sections</span><div class="chips" id="palette"></div><span class="hint" id="palHint">Drag into the arrangement, or + to add at the end</span></div>
+</section>
 
-  <!-- LIVE -->
-  <section class="mode" id="mode-live">
-    <div class="panel now">
-      <div class="songline" id="songline">No song loaded. Add songs to the set, then pick one.</div>
-      <div class="block" id="blockname">—</div>
-      <div class="call" id="call"></div>
-      <div class="meter">
-        <span class="bb" id="bb">–</span>
-        <span class="left" id="barsleft"></span>
-        <span class="countin" id="countin"></span>
-      </div>
-    </div>
-    <div class="panel strip" id="strip"></div>
-    <div class="panel transport">
-      <button class="big play" id="playBtn" title="Space"><span>Play</span></button>
-      <button class="big" data-cmd="Next" title="N or →"><span>Next</span><small>Tap again to skip</small></button>
-      <button class="big" data-cmd="Repeat" title="R"><span>Repeat</span><small>This block again</small></button>
-      <button class="big" id="vampBtn" data-cmd="Vamp" title="V"><span>Vamp</span><small>Loop until off</small></button>
-      <div class="opts">
-        <span><span class="lbl">Jump</span> <span class="seg" id="quant"><button data-q="Now">Now</button><button data-q="Bar">Next bar</button><button data-q="SectionEnd">End of block</button></span></span>
-        <button class="btn" id="clickBtn">Click</button>
-        <button class="btn" id="countBtn">Count-in</button>
-        <button class="btn" data-cmd="CancelJump" title="Esc">Cancel jump</button>
-      </div>
-    </div>
-    <div class="keys"><span><kbd>Space</kbd> play / stop</span><span><kbd>N</kbd> next</span><span><kbd>R</kbd> repeat</span><span><kbd>V</kbd> vamp</span><span><kbd>1</kbd>–<kbd>9</kbd> jump to block</span><span><kbd>Esc</kbd> cancel jump</span></div>
-  </section>
+<section class="arr" id="arr">
+  <div class="arrtop">
+    <div class="headtop"><span class="lbl">Tracks</span><button class="mini" id="followBtn" title="Keep the playhead in view (F)">Follow</button></div>
+    <canvas id="cvTop"></canvas>
+  </div>
+  <div class="lanes" id="lanes">
+    <div class="heads" id="heads"></div>
+    <div class="tl"><canvas id="cvLanes"></canvas></div>
+  </div>
+  <div class="empty-arr" id="emptyArr">Open the Set and add a song folder to begin.</div>
+</section>
 
-  <!-- BUILD -->
-  <section class="mode" id="mode-build" hidden>
-    <p class="empty" id="buildEmpty">Pick a song from the set to edit it.</p>
-    <div id="buildBody" hidden>
-      <div class="panel pad">
-        <div class="row between"><h2>Arrangement</h2>
-          <div class="row"><button class="btn" id="arrReset">As recorded</button><button class="btn on" id="arrSave">Save arrangement</button></div></div>
-        <p class="hint">Blocks play top to bottom. Click a stem name on a block to mute it for that block only.</p>
-        <ol class="blocks" id="blocks"></ol>
-        <div class="row"><label class="lbl" for="addSection">Add block</label><select id="addSection"></select><button class="btn" id="addBlock">Add</button></div>
-      </div>
-      <div class="panel pad">
-        <div class="row between"><h2>Song</h2><button class="btn on" id="songSave">Save song</button></div>
-        <div class="form">
-          <label>Name<input id="f-name"></label>
-          <label>Tempo (BPM)<input id="f-bpm" type="number" min="30" max="300" step="0.01"></label>
-          <label>Beats per bar<input id="f-bpb" type="number" min="1" max="12"></label>
-          <label>Key<input id="f-key" maxlength="6"></label>
-          <label>First downbeat (ms)<input id="f-off" type="number" min="0" step="1"></label>
-        </div>
-        <h3>Sections</h3>
-        <p class="hint">Name each section and the bar it starts on. Bar 1 is the first downbeat.</p>
-        <div class="markers" id="markers"></div>
-        <button class="btn" id="addMarker">Add section</button>
-      </div>
-      <div class="panel pad">
-        <h2>Mixer</h2>
-        <div class="strips" id="strips"></div>
-      </div>
-    </div>
-  </section>
+<footer class="status">
+  <span id="stOut"></span>
+  <span id="stMidi"></span>
+  <span class="task" id="stTask" hidden><span id="stTaskText"></span><span class="pbar"><i id="stTaskBar"></i></span></span>
+  <span class="zoom"><button class="mini" id="zoomOut" aria-label="Zoom out">−</button><button class="mini" id="zoomFit">Fit</button><button class="mini" id="zoomIn" aria-label="Zoom in">+</button></span>
+</footer>
 
-  <!-- SETUP -->
-  <section class="mode" id="mode-setup" hidden>
-    <div class="panel pad">
-      <h2>Audio output</h2>
+<!-- Set list -->
+<aside class="drawer left" id="setDrawer" hidden>
+  <div class="dhead"><h2>Set</h2><button class="ib" data-close>Close</button></div>
+  <ol class="songs" id="songs"></ol>
+  <button class="btn" id="addSongs">Add song folders</button>
+  <p class="hint">Each song is a folder of stems, like an unzipped MultiTracks download. The app reads the Click and Guide to set up tempo and sections.</p>
+</aside>
+
+<!-- Song -->
+<aside class="drawer right" id="songDrawer" hidden>
+  <div class="dhead"><h2>Song</h2><button class="ib" data-close>Close</button></div>
+  <div id="songEmpty" class="hint">Load a song first.</div>
+  <div id="songBody">
+    <div class="card">
+      <div class="row between"><h3>Sections from the guide</h3><button class="btn accent" id="analyzeBtn">Read guide</button></div>
+      <p class="hint" id="analyzeHint"></p>
+      <ol class="heard" id="heard"></ol>
+    </div>
+    <div class="card">
+      <h3>Tempo</h3>
       <div class="form">
-        <label>Interface<select id="outSel"></select></label>
-        <label>Click goes to<select id="clickRoute"></select></label>
-        <label>Click level<input id="clickGain" type="range" min="0" max="1.5" step="0.01"></label>
+        <label>Name<input id="f-name"></label>
+        <label>Tempo (BPM)<input id="f-bpm" type="number" min="30" max="300" step="0.01"></label>
+        <label>Beats per bar<input id="f-bpb" type="number" min="1" max="12"></label>
+        <label>Key<input id="f-key" maxlength="6"></label>
+        <label>First downbeat (ms)<input id="f-off" type="number" min="0" step="1"></label>
       </div>
-      <p class="hint" id="outHint"></p>
     </div>
-    <div class="panel pad">
-      <h2>Pedals and controller</h2>
-      <div class="form"><label>MIDI input<select id="midiSel"></select></label></div>
-      <p class="hint">Click <b>Learn</b>, then press the pedal or button (or move the fader) you want to use. Pedal rows have two actions: a quick tap does the first, holding does the second.</p>
-      <div class="learn" id="learn"></div>
-      <h3>Assigned</h3>
-      <div class="bindings" id="bindings"></div>
+    <div class="card">
+      <h3>Section markers</h3>
+      <p class="hint">Each section starts on a bar. Bar 1 is the first downbeat.</p>
+      <div class="markers" id="markers"></div>
+      <div class="row between"><button class="btn" id="addMarker">Add section</button><button class="btn accent" id="songSave">Save song</button></div>
     </div>
-  </section>
-</main>
+    <div class="card">
+      <h3>Outputs</h3>
+      <div class="routes" id="routes"></div>
+    </div>
+  </div>
+</aside>
+
+<!-- Setup -->
+<aside class="drawer right" id="setupDrawer" hidden>
+  <div class="dhead"><h2>Setup</h2><button class="ib" data-close>Close</button></div>
+  <div class="card">
+    <h3>Audio output</h3>
+    <div class="form one">
+      <label>Interface<select id="outSel"></select></label>
+      <label>Click goes to<select id="clickRoute"></select></label>
+      <label>Click level<input id="clickGain" type="range" min="0" max="1.5" step="0.01"></label>
+    </div>
+    <p class="hint" id="outHint"></p>
+  </div>
+  <div class="card">
+    <h3>Pedals and controller</h3>
+    <div class="form one"><label>MIDI input<select id="midiSel"></select></label></div>
+    <p class="hint">Press <b>Learn</b>, then the pedal or button (or move the fader). Pedal rows: tap does the first action, hold does the second.</p>
+    <div class="learn" id="learn"></div>
+    <h3>Assigned</h3>
+    <div class="bindings" id="bindings"></div>
+  </div>
+</aside>
+
 <div class="toast" id="toast" role="status" hidden></div>
 <script src="app.js"></script>
 </body>

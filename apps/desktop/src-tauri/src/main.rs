@@ -3,7 +3,9 @@
 
 mod audio;
 mod decode;
+mod guide;
 mod midi_io;
+mod model;
 mod songfile;
 
 use audio::{OpenOutput, Output, OutputInfo, ToAudio};
@@ -55,6 +57,26 @@ struct Loaded {
     stems: Vec<StemAudio>,
     sample_rate: u32,
     length: u64,
+    /// Waveform overview per stem: one byte (0-255) per 10 ms, base64.
+    peaks: Vec<String>,
+}
+
+const PEAKS_PER_SEC: u32 = 100;
+
+fn peaks(a: &StemAudio, sr: u32) -> String {
+    use base64::Engine as _;
+    let hop = (sr / PEAKS_PER_SEC).max(1) as u64;
+    let n = a.frames().div_ceil(hop);
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let mut m = 0.0f32;
+        for f in i * hop..((i + 1) * hop).min(a.frames()) {
+            let (l, r) = a.frame(f);
+            m = m.max(l.abs()).max(r.abs());
+        }
+        out.push((m.min(1.0) * 255.0).round() as u8);
+    }
+    base64::engine::general_purpose::STANDARD.encode(out)
 }
 
 /// Shared with the MIDI and hold-timer threads.
@@ -63,6 +85,7 @@ struct Core {
     status: Arc<Mutex<Option<Snapshot>>>,
     map: Mutex<MidiMap>,
     config_dir: PathBuf,
+    data_dir: PathBuf,
     start: Instant,
 }
 
@@ -205,7 +228,8 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
     let stems = results.into_iter().collect::<Result<Vec<_>, _>>()?;
     let length = stems.iter().map(|s| s.frames()).max().unwrap_or(0);
     let (song, arr) = file.build(sample_rate, length)?;
-    Ok(Loaded { folder: folder.to_path_buf(), file, song, arr, stems, sample_rate, length })
+    let peaks = stems.iter().map(|s| peaks(s, sample_rate)).collect();
+    Ok(Loaded { folder: folder.to_path_buf(), file, song, arr, stems, sample_rate, length, peaks })
 }
 
 /// Builds a fresh engine for the loaded song and hands it to the audio thread.
@@ -236,6 +260,8 @@ struct SectionView {
     name: String,
     bar: i64,
     bars: f64,
+    start_sec: f64,
+    secs: f64,
 }
 
 #[derive(Serialize)]
@@ -269,6 +295,10 @@ struct SongView {
     sections: Vec<SectionView>,
     stems: Vec<StemView>,
     blocks: Vec<BlockView>,
+    has_click: bool,
+    has_guide: bool,
+    /// Markers haven't been set up yet (by the guide or by hand).
+    needs_setup: bool,
 }
 
 impl SongView {
@@ -293,6 +323,8 @@ impl SongView {
                     name: s.name.clone(),
                     bar: ((s.start as f64 - l.song.offset as f64) / bar).round() as i64 + 1,
                     bars: s.len() as f64 / bar,
+                    start_sec: s.start as f64 / l.sample_rate as f64,
+                    secs: s.len() as f64 / l.sample_rate as f64,
                 })
                 .collect(),
             stems: l.file.stems.iter().map(|s| StemView { name: s.name.clone(), route: s.route, gain: s.gain, muted: s.muted }).collect(),
@@ -307,6 +339,9 @@ impl SongView {
                     bars: l.song.sections[it.section].len() as f64 / bar,
                 })
                 .collect(),
+            has_click: l.file.stems.iter().any(|s| songfile::is_click(&s.name)),
+            has_guide: l.file.stems.iter().any(|s| songfile::is_guide(&s.name)),
+            needs_setup: l.file.markers_from.is_none(),
         }
     }
 }
@@ -529,6 +564,8 @@ enum UiCmd {
     ClickRoute { route: Route },
     StemGain { stem: usize, gain: f32 },
     StemMute { stem: usize, muted: bool },
+    /// Mute without saving (used for solo).
+    StemMuteLive { stem: usize, muted: bool },
     StemRoute { stem: usize, route: Route },
 }
 
@@ -607,6 +644,9 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 }
                 core.send(Command::SetStemMute(stem, muted));
             }
+            UiCmd::StemMuteLive { stem, muted } => {
+                core.send(Command::SetStemMute(stem, muted));
+            }
             UiCmd::StemRoute { stem, route } => {
                 if let Some(st) = song.as_mut().and_then(|l| l.file.stems.get_mut(stem)) {
                     st.route = route;
@@ -668,6 +708,7 @@ fn edit_song(state: &AppState, f: impl FnOnce(&mut SongFile)) -> Result<AppView,
 #[tauri::command]
 fn update_song(state: State<'_, AppState>, meta: SongMeta) -> Result<AppView, String> {
     edit_song(&state, |f| {
+        f.markers_from = Some("manual".into());
         if !meta.name.trim().is_empty() {
             f.name = meta.name.trim().to_string();
         }
@@ -682,9 +723,102 @@ fn update_song(state: State<'_, AppState>, meta: SongMeta) -> Result<AppView, St
     })
 }
 
+/// Saves a new arrangement. While playing it is swapped in live: `keep` is the
+/// new index of the block that's playing, so playback carries on from there.
 #[tauri::command]
-fn set_arrangement(state: State<'_, AppState>, blocks: Vec<Block>) -> Result<AppView, String> {
-    edit_song(&state, |f| f.arrangement = blocks)
+fn set_arrangement(state: State<'_, AppState>, blocks: Vec<Block>, keep: Option<usize>) -> Result<AppView, String> {
+    if !state.core.playing() {
+        return edit_song(&state, |f| f.arrangement = blocks);
+    }
+    {
+        let mut song = state.song.lock().unwrap();
+        let l = song.as_mut().ok_or("Load a song first.")?;
+        let mut file = l.file.clone();
+        file.arrangement = blocks;
+        let (_, arr) = file.build(l.sample_rate, l.length)?;
+        let keep = keep.or_else(|| state.core.snapshot().map(|s| s.item)).unwrap_or(0).min(arr.items.len() - 1);
+        let sent = state.core.output.lock().unwrap().as_mut().map_or(false, |o| o.send(ToAudio::Arrange(Box::new(arr.clone()), keep)));
+        if !sent {
+            return Err("The audio thread is busy. Try again.".into());
+        }
+        l.arr = arr;
+        l.file = file;
+        l.file.save(&l.folder)?;
+    }
+    Ok(view(&state))
+}
+
+#[derive(Serialize)]
+struct PeaksView {
+    per_sec: u32,
+    stems: Vec<String>,
+}
+
+#[tauri::command]
+fn song_peaks(state: State<'_, AppState>) -> Option<PeaksView> {
+    state.song.lock().unwrap().as_ref().map(|l| PeaksView { per_sec: PEAKS_PER_SEC, stems: l.peaks.clone() })
+}
+
+#[derive(Serialize, Clone)]
+struct AnalysisProgress {
+    stage: String,
+    progress: f32,
+}
+
+#[derive(Serialize)]
+struct AnalysisResult {
+    view: AppView,
+    heard: Vec<(f64, String)>,
+    found_tempo: bool,
+    sections: usize,
+}
+
+/// Reads the Click (tempo, downbeat) and Guide (section cues) stems and sets up the
+/// song's markers. Downloads the speech model the first time.
+#[tauri::command]
+async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<AnalysisResult, String> {
+    if state.core.playing() {
+        return Err("Stop playback before reading the guide.".into());
+    }
+    let (click, guide, sr, bpb, bpm) = {
+        let song = state.song.lock().unwrap();
+        let l = song.as_ref().ok_or("Load a song first.")?;
+        let find = |f: fn(&str) -> bool| l.file.stems.iter().position(|s| f(&s.name)).map(|i| l.stems[i].clone());
+        (find(songfile::is_click), find(songfile::is_guide), l.sample_rate, l.file.beats_per_bar, l.file.bpm)
+    };
+    if click.is_none() && guide.is_none() {
+        return Err("This song has no Click or Guide stem to read. Add sections by hand in the Song panel.".into());
+    }
+    let data_dir = state.core.data_dir.clone();
+    let h = app.clone();
+    let analysis = tauri::async_runtime::spawn_blocking(move || {
+        let emit = |stage: &str, p: f32| {
+            let _ = h.emit("analysis", AnalysisProgress { stage: stage.into(), progress: p });
+        };
+        let model = match &guide {
+            Some(_) => Some(model::ensure(&data_dir, |p| emit("Downloading the speech model (one time, about 150 MB)", p))?),
+            None => None,
+        };
+        guide::analyze(click.as_ref(), guide.as_ref(), sr, bpb, bpm, model.as_deref(), |s, p| emit(s, p))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let found_tempo = analysis.bpm.is_some();
+    let sections = analysis.markers.len();
+    let view = edit_song(&state, |f| {
+        if let Some(b) = analysis.bpm {
+            f.bpm = b;
+        }
+        if let Some(o) = analysis.offset_ms {
+            f.offset_ms = o;
+        }
+        if !analysis.markers.is_empty() {
+            f.markers = analysis.markers.clone();
+            f.arrangement = vec![];
+        }
+        f.markers_from = Some(if analysis.markers.is_empty() { "manual" } else { "guide" }.into());
+    })?;
+    Ok(AnalysisResult { view, heard: analysis.heard, found_tempo, sections })
 }
 
 #[tauri::command]
@@ -715,6 +849,8 @@ fn main() {
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&dir)?;
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
             let settings: Settings = read_json(&dir.join("settings.json"));
             let map: MidiMap = read_json(&dir.join("midi.json"));
             let core = Arc::new(Core {
@@ -722,6 +858,7 @@ fn main() {
                 status: Arc::new(Mutex::new(None)),
                 map: Mutex::new(map),
                 config_dir: dir,
+                data_dir,
                 start: Instant::now(),
             });
             let handle = app.handle().clone();
@@ -757,6 +894,8 @@ fn main() {
             cmd,
             update_song,
             set_arrangement,
+            song_peaks,
+            analyze_song,
             midi_learn,
             midi_cancel,
             midi_unbind

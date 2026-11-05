@@ -18,6 +18,15 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
 | Screen | Timeline, mixer, editing | Current section, next section, bars left, queued call |
 | Editing | Everything | None. You can't change the arrangement mid-song |
 
+## The main screen
+
+It combines Ableton's arrangement view with MultiTracks Playback, in our own design.
+
+- **Top bar:** the transport, plus a display showing the current section, bar and beat, and the queued call ("Going to Chorus 2 in 1.5 bars").
+- **Section rail** (MultiTracks-style): the arrangement as big colored blocks. Drag a block to reorder it, drag it off the rail to remove it, or use ⧉ to repeat it. Drag a section in from the palette below the rail. This works **while playing**. Cmd+Z undoes.
+- **Arrangement view** (Ableton-style): one lane per stem with its waveform, cut into section clips in arrangement order, with a bar ruler, the playhead and the queued jump. Double-click a clip, or select it and press 0, to switch that stem off for that section only. Each track header has level, mute and solo.
+- **Automatic setup:** the first time a song loads, the app reads its **Click** stem (tempo and first downbeat) and its **Guide** stem. It recognizes the spoken cues with an offline speech model (about 150 MB, downloaded once) and places a marker on the downbeat after each cue. Repeated names are numbered (Chorus 1, Chorus 2). "Read guide" in the Song panel runs it again.
+
 ## Live behaviour
 
 The plan is set, but you make live calls during the song:
@@ -62,6 +71,6 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 
 1. **Engine:** arrangement playback, quantized jumps, vamp and repeat, per-block mutes, routing, click, count-in, MIDI mapping. *Done, with tests.*
 2. **Mac app (Tauri):** choose the audio interface and its outputs, take pedal and controller input (MIDI learn, tap/hold), run the engine on the audio thread, load songs from stem folders, resample to the interface's rate. *Done.* Stems are still loaded fully into memory; streaming from disk is still to do.
-3. **Build mode** (arrangement blocks, per-block stem mutes, section markers, mixer) and **Live mode** (current/next block, queued call, bars left). *First version done.*
+3. **Arrangement view, section rail, live rearranging and automatic setup from the click and guide.** *Done.*
 4. Song transitions: pads, segues, guide cues cut by section.
 5. Tempo and key changes, clip editing, ProPresenter.

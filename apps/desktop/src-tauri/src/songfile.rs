@@ -48,6 +48,18 @@ pub struct SongFile {
     /// Empty means "as recorded".
     #[serde(default)]
     pub arrangement: Vec<Block>,
+    /// Where the markers came from: None (not set up yet), "guide" or "manual".
+    #[serde(default)]
+    pub markers_from: Option<String>,
+}
+
+pub fn is_click(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("click")
+}
+
+pub fn is_guide(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("guide") || n.contains("cue")
 }
 
 fn is_cue(name: &str) -> bool {
@@ -112,6 +124,7 @@ impl SongFile {
                 markers: vec![Marker { name: "Top".into(), bar: 1 }],
                 stems: vec![],
                 arrangement: vec![],
+                markers_from: None,
             },
         };
         sf.stems.retain(|s| files.contains(&s.file));
@@ -211,6 +224,7 @@ mod tests {
                 Block { section: "Verse".into(), muted: vec!["Drums".into()] },
                 Block { section: "Missing".into(), muted: vec![] },
             ],
+            markers_from: None,
         };
         let (song, arr) = sf.build(1000, 20_000).unwrap();
         let names: Vec<&str> = song.sections.iter().map(|s| s.name.as_str()).collect();

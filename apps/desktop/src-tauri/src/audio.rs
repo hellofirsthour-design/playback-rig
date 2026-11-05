@@ -4,13 +4,22 @@
 //! off the audio thread.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use rig_engine::{Command, Engine, Snapshot};
+use rig_engine::{Arrangement, Command, Engine, Snapshot};
 use serde::Serialize;
 use std::sync::{mpsc, Arc, Mutex};
 
 pub enum ToAudio {
     Cmd(Command),
     Swap(Box<Engine>),
+    /// A new arrangement while playing, and the new index of the block playing now.
+    Arrange(Box<Arrangement>, usize),
+}
+
+/// Things the audio thread hands back to be freed elsewhere. Only ever dropped.
+#[allow(dead_code)]
+pub enum Garbage {
+    Engine(Box<Engine>),
+    Arrangement(Box<Arrangement>),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -30,7 +39,7 @@ pub struct OpenOutput {
 pub struct Output {
     pub info: OpenOutput,
     pub tx: rtrb::Producer<ToAudio>,
-    garbage: rtrb::Consumer<Box<Engine>>,
+    garbage: rtrb::Consumer<Garbage>,
     stop: mpsc::Sender<()>,
 }
 
@@ -71,7 +80,7 @@ pub fn list_outputs() -> Vec<OutputInfo> {
 /// Opens an output (by name, or the system default) using all of its channels.
 pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, on_error: impl Fn(String) + Send + 'static) -> Result<Output, String> {
     let (tx, mut rx) = rtrb::RingBuffer::<ToAudio>::new(1024);
-    let (mut gtx, garbage) = rtrb::RingBuffer::<Box<Engine>>::new(32);
+    let (mut gtx, garbage) = rtrb::RingBuffer::<Garbage>::new(32);
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<OpenOutput, String>>();
 
@@ -124,8 +133,14 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, on_error
                             }
                             ToAudio::Swap(e) => {
                                 if let Some(old) = engine.replace(e) {
-                                    let _ = gtx.push(old);
+                                    let _ = gtx.push(Garbage::Engine(old));
                                 }
+                            }
+                            ToAudio::Arrange(mut arr, keep) => {
+                                if let Some(e) = engine.as_mut() {
+                                    e.swap_arrangement(&mut arr, keep);
+                                }
+                                let _ = gtx.push(Garbage::Arrangement(arr));
                             }
                         }
                     }

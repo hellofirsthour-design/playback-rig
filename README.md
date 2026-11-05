@@ -10,7 +10,7 @@ Product decisions are in [`docs/product.md`](docs/product.md).
 |---|---|
 | `crates/engine` | The real-time playback engine in Rust. It plays arrangements (reordered and repeated sections, stems muted per block), makes quantized jumps (now, next bar, end of section), handles next, repeat and vamp, routes to any output of a multi-channel interface, and generates the click and count-in. It also maps pedals and faders with MIDI learn and tap/hold. Its audio thread never allocates or blocks. |
 | `crates/rig-render` | Offline renderer. It plays an arrangement through the engine and writes a multi-channel WAV, so the engine can be tested without hardware. |
-| `apps/desktop` | **The Mac app** (Tauri). The engine runs on the audio thread of your interface. Songs are loaded from stem folders, pedals and controllers come in over MIDI, and there are three screens: Live, Build and Setup. |
+| `apps/desktop` | **The Mac app** (Tauri). The engine runs on the audio thread of your interface. The screen has a MultiTracks-style section rail (drag to rearrange, even while playing) over an Ableton-style arrangement view (a waveform lane per stem). Songs set themselves up from the Click and Guide stems. Pedals and controllers come in over MIDI. |
 | `prototype/index.html` | The earlier browser prototype. Kept for reference. |
 
 ## Get the Mac app
@@ -30,7 +30,7 @@ xattr -cr "/Applications/Playback Rig.app"
 1. **Setup → Audio output:** pick the Behringer. Out 1-2 is front of house; Out 3-4 is the in-ears.
 2. **Setup → Pedals and controller:** pick the Akai (or your pedal) as the MIDI input. Then click **Learn** next to each pedal row and press the pedal or button you want for it.
 3. **Add songs:** choose one folder per song, each holding that song's stems (for example, unzipped MultiTracks downloads).
-4. **Build:** for each song, set the tempo and mark where each section starts (by bar number). Then build the arrangement and click **Save**. All of this is saved in `rig-song.json` inside the song's folder.
+4. **Pick a song.** The first time, the app reads the Click and Guide stems to find the tempo and sections. The first song also downloads the speech model (about 150 MB, one time). Then drag sections in the rail to build the arrangement. Everything is saved in `rig-song.json` inside the song's folder. To fix a marker by hand, open **Song**.
 
 ## Develop
 
