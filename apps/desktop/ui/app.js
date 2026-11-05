@@ -24,10 +24,10 @@
   function rows() {
     const out = []; let y = 0;
     if (!V || !V.song) return out;
-    const buses = V.buses && V.buses.length ? V.buses : [{ cat: 6, name: 'Tracks', gain: 1, muted: false, route: null, stems: V.song.stems.map((_, i) => i) }];
+    const buses = V.buses && V.buses.length ? V.buses : [{ id: 'all', name: 'Tracks', gain: 1, muted: false, route: null, custom: false, stems: V.song.stems.map((_, i) => i) }];
     for (const b of buses) {
       out.push({ kind: 'bus', b, y, h: BUS_H }); y += BUS_H;
-      if (collapsed.has(b.cat)) continue;
+      if (collapsed.has(b.id)) continue;
       for (const i of b.stems) { out.push({ kind: 'stem', i, b, y, h: LANE_H }); y += LANE_H; }
     }
     return out;
@@ -324,21 +324,26 @@
     if (!V.song) return;
     rows().forEach(row => {
       if (row.kind === 'bus') {
-        const b = row.b, r = el('div', 'busrow' + (b.muted ? ' off' : ''));
-        const fold = el('button', 'fold', collapsed.has(b.cat) ? '▸' : '▾');
-        fold.title = collapsed.has(b.cat) ? `Show ${b.name}` : `Fold ${b.name}`; fold.setAttribute('aria-label', fold.title);
-        fold.onclick = () => { collapsed.has(b.cat) ? collapsed.delete(b.cat) : collapsed.add(b.cat); saveCollapsed(); renderHeads(); dirty = true; };
-        const nm = el('b', null, b.name); nm.title = `${b.stems.length} track${b.stems.length > 1 ? 's' : ''}`;
-        const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.5; f.step = 0.01; f.value = b.gain; f.id = 'bus-' + b.cat; f.setAttribute('aria-label', `${b.name} bus level`);
-        f.oninput = () => { b.gain = +f.value; send({ type: 'BusGain', cat: b.cat, gain: b.gain }); };
-        const m = el('button', 'm' + (b.muted ? ' on' : ''), 'M'); m.title = `Mute all ${b.name}`; m.setAttribute('aria-pressed', b.muted);
-        m.onclick = async () => { b.muted = !b.muted; await send({ type: 'BusMute', cat: b.cat, muted: b.muted }); if (solo.size) applySolo(); renderHeads(); dirty = true; };
+        const b = row.b, r = el('div', 'busrow' + (b.muted ? ' off' : '')); r.dataset.bus = b.id;
+        const fold = el('button', 'fold', collapsed.has(b.id) ? '▸' : '▾');
+        fold.title = collapsed.has(b.id) ? `Show ${b.name}` : `Fold ${b.name}`; fold.setAttribute('aria-label', fold.title);
+        fold.onclick = () => { collapsed.has(b.id) ? collapsed.delete(b.id) : collapsed.add(b.id); saveCollapsed(); renderHeads(); dirty = true; };
+        const nm = el('b', null, b.name);
+        nm.title = `${b.stems.length} track${b.stems.length === 1 ? '' : 's'} · double-click to rename · drag a track here to move it to this bus`;
+        nm.ondblclick = () => renameBus(b, nm);
+        const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.5; f.step = 0.01; f.value = b.gain; f.id = 'bus-' + b.id; f.setAttribute('aria-label', `${b.name} bus level`);
+        f.oninput = () => { b.gain = +f.value; send({ type: 'BusGain', bus: b.id, gain: b.gain }); };
+        const m = el('button', 'm' + (b.muted ? ' on' : ''), 'M'); m.title = `Mute all of ${b.name}`; m.setAttribute('aria-pressed', b.muted);
+        m.onclick = async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); if (solo.size) applySolo(); renderHeads(); dirty = true; };
         const sel = el('select'); sel.setAttribute('aria-label', `${b.name} bus output`);
         routeOptions(sel, b.route || { Pair: 0 });
         sel.prepend(new Option('Own outputs', 'own')); if (!b.route) sel.value = 'own';
-        sel.title = 'Send this whole group to one output';
-        sel.onchange = () => { b.route = sel.value === 'own' ? null : keyRoute(sel.value); send({ type: 'BusRoute', cat: b.cat, route: b.route }); renderSongDrawer(); };
-        const top = el('div', 'bt'); top.append(fold, nm, m);
+        sel.title = 'Send this whole bus to one output';
+        sel.onchange = () => { b.route = sel.value === 'own' ? null : keyRoute(sel.value); send({ type: 'BusRoute', bus: b.id, route: b.route }); renderSongDrawer(); };
+        const top = el('div', 'bt'); top.append(fold, nm);
+        if (b.custom) { const x = el('button', 'del', '✕'); x.title = `Delete ${b.name} (its tracks go back to their usual bus)`; x.setAttribute('aria-label', x.title); x.onclick = () => busEdit({ type: 'Delete', bus: b.id }); top.append(x); }
+        else top.append(el('span'));
+        top.append(m);
         const bot = el('div', 'bb'); bot.append(f, sel);
         r.append(top, bot);
         box.append(r);
@@ -346,7 +351,8 @@
       }
       const i = row.i, st = V.song.stems[i];
       const r = el('div', 'lane'); r.style.setProperty('--c', stemColor(st.name, i));
-      const ln = el('div', 'ln'); ln.append(el('b', null, st.name));
+      const ln = el('div', 'ln'); const tn = el('b', 'grab', st.name); tn.title = 'Drag onto a bus header to move this track to that bus'; ln.append(tn);
+      tn.onpointerdown = e => startTrackDrag(e, st.name, r);
       const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.5; f.step = 0.01; f.value = st.gain; f.id = 'fader-' + i; f.setAttribute('aria-label', `${st.name} level`);
       f.oninput = () => { st.gain = +f.value; send({ type: 'StemGain', stem: i, gain: st.gain }); };
       ln.append(f);
@@ -359,6 +365,43 @@
       r.append(el('div', 'sw'), ln, ms);
       box.append(r);
     });
+    const nb = el('button', 'newbus', '+ New bus'); nb.title = 'Make a bus, then drag tracks onto it';
+    nb.onclick = () => busEdit({ type: 'Create', name: 'New bus' }).then(() => { const last = [...document.querySelectorAll('#heads .busrow')].pop(); const nm = last && last.querySelector('b'); const b = V.buses.find(x => x.id === (last && last.dataset.bus)); if (b && nm) renameBus(b, nm); });
+    box.append(nb);
+  }
+
+  /* ---------- buses: rename, move tracks ---------- */
+  function busEdit(edit) { return invoke('bus_edit', { edit }).then(refresh).catch(err); }
+  function renameBus(b, nameEl) {
+    const inp = el('input', 'rename'); inp.value = b.name; inp.setAttribute('aria-label', 'Bus name');
+    nameEl.replaceWith(inp); inp.focus(); inp.select();
+    let done = false;
+    const finish = save => { if (done) return; done = true; const v = inp.value.trim(); if (save && v && v !== b.name) busEdit({ type: 'Rename', bus: b.id, name: v }); else renderHeads(); };
+    inp.onkeydown = e => { if (e.key === 'Enter') finish(true); else if (e.key === 'Escape') finish(false); e.stopPropagation(); };
+    inp.onblur = () => finish(true);
+  }
+  let trackDrag = null;
+  function startTrackDrag(e, track, rowEl) {
+    if (e.button !== 0) return;
+    trackDrag = { track, rowEl, sx: e.clientX, sy: e.clientY, started: false, over: null };
+    window.addEventListener('pointermove', trackDragMove);
+    window.addEventListener('pointerup', trackDragUp, { once: true });
+  }
+  function trackDragMove(e) {
+    const d = trackDrag; if (!d) return;
+    if (!d.started) { if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 6) return; d.started = true; d.ghost = el('div', 'trackghost', d.track); document.body.append(d.ghost); }
+    d.ghost.style.left = e.clientX + 12 + 'px'; d.ghost.style.top = e.clientY - 10 + 'px';
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    const busRow = target && target.closest && target.closest('.busrow');
+    document.querySelectorAll('.busrow.dropto').forEach(x => x.classList.remove('dropto'));
+    d.over = busRow ? busRow.dataset.bus : null;
+    if (busRow) busRow.classList.add('dropto');
+  }
+  function trackDragUp() {
+    window.removeEventListener('pointermove', trackDragMove);
+    const d = trackDrag; trackDrag = null; if (!d || !d.started) return;
+    d.ghost.remove(); document.querySelectorAll('.busrow.dropto').forEach(x => x.classList.remove('dropto'));
+    if (d.over && d.over !== 'all') busEdit({ type: 'Assign', track: d.track, bus: d.over }).then(() => toast(`${d.track} now goes to ${(V.buses.find(b => b.id === d.over) || {}).name || 'that bus'} (in every song).`));
   }
 
   /* ---------- arrangement canvases ---------- */
@@ -843,6 +886,18 @@
   T.event.listen('click-level', e => { if (V) V.click_gain = e.payload; });
   T.event.listen('midi-learned', () => { learnWait = null; refresh().then(() => toast('Control assigned.')); });
   T.event.listen('audio-error', e => toast('Audio problem: ' + e.payload));
+  T.event.listen('dropped', e => {
+    const r = e.payload;
+    songKey = null; // stems may have changed: reload waveforms
+    refresh().then(() => {
+      const parts = [];
+      if (r.songs_added) parts.push(`Added ${r.songs_added} song${r.songs_added > 1 ? 's' : ''} to the set.`);
+      if (r.tracks_added.length) parts.push(`Added ${r.tracks_added.join(', ')} to this song.`);
+      if (r.message) parts.push(r.message);
+      if (parts.length) toast(parts.join(' '), 6000);
+      if (r.songs_added && V.current == null && V.setlist.length) selectSong(V.setlist.length - r.songs_added);
+    });
+  });
   T.event.listen('pedal', e => {
     if (e.payload === 'next-song') { if (playing()) { toast('Next song loads when this one stops.'); return; } if (V && V.current != null && V.current + 1 < V.setlist.length) selectSong(V.current + 1); }
     else if (e.payload === 'pad-only') togglePad();

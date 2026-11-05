@@ -395,45 +395,34 @@ pub fn align_to_counts(tempo: Tempo, heard: &[Heard], bpb: u32) -> Tempo {
     Tempo { bpm: tempo.bpm, offset: best.1.rem_euclid(bar) }
 }
 
-/// Lines the song's bar grid up with the click you can hear. The tempo stays; the
-/// first downbeat moves by less than half a beat to the nearest click-derived
-/// downbeat (accents can't tell bar from half-bar, so the existing grid picks which).
-/// Sections keep their bar numbers, so they move with the grid. `x` is the click,
-/// mono, as it plays (after any tempo change). Returns true if the grid changed.
+/// When the click starts: the first click in the file is bar 1, beat 1 (MultiTracks
+/// stems, and click songs, start on the one). None if there's no click to hear.
+pub fn first_click(x: &[f32], sr: u32) -> Option<f64> {
+    onsets(x, sr).first().map(|o| if o.t < 0.03 { 0.0 } else { o.t })
+}
+
+/// Puts bar 1 on the first click. Sections keep the audio position they had, rounded
+/// to the new bars, so a small correction moves them with the grid and a whole-bar
+/// difference renumbers them. `x` is the click as it plays (after any tempo change).
+/// Returns true if the grid changed.
 pub fn snap_grid_to_click(f: &mut crate::songfile::SongFile, x: &[f32], sr: u32) -> bool {
-    let bpb = f.beats_per_bar.max(1);
-    let Some(t) = tempo_with_known(x, sr, bpb, Some(f.play_bpm())) else { return false };
-    if (t.bpm - f.play_bpm()).abs() > 0.05 {
-        return false; // the click doesn't match the song's tempo: leave the grid alone
-    }
-    let stretch = f.stretch();
-    let beat = 60.0 / f.bpm;
-    let bar = beat * bpb as f64;
+    let Some(first) = first_click(x, sr) else { return false };
+    let new = first / f.stretch(); // back to the recording's own time
     let cur = f.offset_ms / 1000.0;
-    let det = t.offset / stretch; // back to the recording's own time
-    // the click-derived downbeat candidate closest to the current grid
-    let wrap = |d: f64| d - (d / bar).round() * bar;
-    let mut best = f64::MAX;
-    for k in 0..bpb {
-        let d = wrap(det + k as f64 * beat - cur);
-        if d.abs() < best.abs() {
-            best = d;
-        }
-    }
-    if best.abs() > 0.5 * beat || best.abs() < 0.0005 {
+    if (new - cur).abs() < 0.0005 {
         return false;
     }
-    let mut new = cur + best;
-    if new < 0.0 {
-        if new > -0.03 {
-            new = 0.0; // a few ms before the file starts: call it the start
-        } else {
-            new += bar; // bar 1 is earlier than the audio: renumber
-            for m in f.markers.iter_mut() {
-                m.bar = m.bar.saturating_sub(1).max(1);
-            }
-        }
+    let bar = 60.0 / f.bpm * f.beats_per_bar.max(1) as f64;
+    for m in f.markers.iter_mut() {
+        let t = cur + (m.bar.max(1) - 1) as f64 * bar;
+        m.bar = ((t - new) / bar).round().max(0.0) as u32 + 1;
     }
+    let mut seen = 0;
+    f.markers.retain(|m| {
+        let keep = m.bar > seen;
+        seen = seen.max(m.bar);
+        keep
+    });
     f.offset_ms = new * 1000.0;
     true
 }
@@ -472,7 +461,11 @@ pub fn analyze(
             heard.push(Heard { start: c.start, end: c.end, label: label_for(&text), text });
         }
     }
-    use_tempo = align_to_counts(use_tempo, &heard, bpb);
+    // Bar 1 is the first click when there is one; otherwise the counts decide.
+    match click.and_then(|c| first_click(&to_mono(c), sr)) {
+        Some(first) if tempo.is_some() => use_tempo.offset = first,
+        _ => use_tempo = align_to_counts(use_tempo, &heard, bpb),
+    }
     progress("Done", 1.0);
     let found = tempo.is_some() || known_bpm.is_some();
     Ok(Analysis {
@@ -535,25 +528,34 @@ mod tests {
     }
 
     #[test]
-    fn grid_snaps_to_the_click_without_moving_sections_to_other_bars() {
-        // Click (eighths at 155) starts on the downbeat at 0.05 s; the Ableton reading
-        // put the grid one eighth late.
+    fn bar_one_is_the_first_click_and_sections_move_with_the_grid() {
         let sr = 48_000;
-        let x = click_track(sr, 155.0, 0.05, 120, true);
-        let eighth = 60.0 / 155.0;
-        let mut f = crate::songfile::SongFile {
+        let bar = 60.0 / 77.5 * 4.0;
+        let mk = |off: f64| crate::songfile::SongFile {
             name: "S".into(),
             bpm: 77.5,
             beats_per_bar: 4,
-            offset_ms: (0.05 + eighth) * 1000.0,
+            offset_ms: off * 1000.0,
             markers: vec![crate::songfile::Marker { name: "Intro".into(), bar: 3 }, crate::songfile::Marker { name: "Verse".into(), bar: 7 }],
             ..Default::default()
         };
+        // Eighth-note click from the very start of the file (a MultiTracks stem).
+        let x = click_track(sr, 155.0, 0.01, 200, true);
+        // The grid read 0.28 s late (not a whole number of clicks): bar 1 moves to 0.
+        let mut f = mk(0.28);
         assert!(snap_grid_to_click(&mut f, &x, sr));
-        assert!((f.offset_ms - 50.0).abs() < 2.0, "offset {}", f.offset_ms);
-        assert_eq!((f.markers[0].bar, f.markers[1].bar), (3, 7));
-        // already right: nothing changes
-        assert!(!snap_grid_to_click(&mut f, &x, sr));
+        assert_eq!(f.offset_ms, 0.0);
+        assert_eq!((f.markers[0].bar, f.markers[1].bar), (3, 7), "sections move with the grid");
+        assert!(!snap_grid_to_click(&mut f, &x, sr), "already right");
+        // A grid a whole bar late renumbers the sections so they stay on the same audio.
+        let mut g = mk(bar);
+        assert!(snap_grid_to_click(&mut g, &x, sr));
+        assert_eq!((g.markers[0].bar, g.markers[1].bar), (4, 8));
+        // A click that starts later in the file: bar 1 is there.
+        let y = click_track(sr, 155.0, 1.2, 100, true);
+        let mut h2 = mk(0.0);
+        assert!(snap_grid_to_click(&mut h2, &y, sr));
+        assert!((h2.offset_ms - 1200.0).abs() < 2.0, "{}", h2.offset_ms);
     }
 
     #[test]

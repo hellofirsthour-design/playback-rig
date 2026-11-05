@@ -43,42 +43,88 @@ struct Settings {
     pads_folder: Option<PathBuf>,
     pad_level: f32,
     pad_route: Option<Route>,
-    /// One bus per track group (see songfile::stem_category), shared by every song.
+    /// 0.5.0's per-group buses (read once to carry their settings over; never written).
+    #[serde(skip_serializing)]
     buses: Vec<Bus>,
+    /// The buses, in track-list order. Shared by every song.
+    bus_list: Vec<Bus>,
+    /// Tracks moved to a bus by hand, by track name (lowercase) -> bus id.
+    /// Applies to that track name in every song.
+    bus_of_track: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 struct Bus {
+    id: String,
+    name: String,
     gain: f32,
     muted: bool,
-    /// Where the group's stems go; None = each stem uses its own output.
+    /// Where the bus's tracks go; None = each track uses its own output.
     route: Option<Route>,
+    /// Made with "New bus" (can be deleted).
+    custom: bool,
 }
 
 impl Default for Bus {
     fn default() -> Self {
-        Bus { gain: 1.0, muted: false, route: None }
+        Bus { id: String::new(), name: String::new(), gain: 1.0, muted: false, route: None, custom: false }
     }
 }
 
-const BUS_NAMES: [&str; 9] = ["Click & guide", "Drums", "Percussion", "Bass", "Guitars", "Keys", "Other", "Vocals", "FX"];
+/// The built-in buses and the track groups (songfile::stem_category) that go to each.
+const DEFAULT_BUSES: [(&str, &str, &[u8]); 8] = [
+    ("cues", "Click & guide", &[0]),
+    ("drums", "Drums & percussion", &[1, 2]),
+    ("bass", "Bass", &[3]),
+    ("guitars", "Guitars", &[4]),
+    ("keys", "Keys", &[5]),
+    ("other", "Other instruments", &[6]),
+    ("vocals", "Vocals", &[7]),
+    ("fx", "FX", &[8]),
+];
 
 impl Settings {
-    fn bus(&self, cat: u8) -> Bus {
-        self.buses.get(cat as usize).cloned().unwrap_or_default()
-    }
-    fn bus_mut(&mut self, cat: u8) -> &mut Bus {
-        while self.buses.len() < BUS_NAMES.len() {
-            self.buses.push(Bus::default());
+    /// Makes sure every built-in bus exists, carrying over 0.5.0's per-group settings.
+    fn ensure_buses(&mut self) {
+        for (i, (id, name, cats)) in DEFAULT_BUSES.iter().enumerate() {
+            // Settings from 0.5.0 had one entry per group: copy them over.
+            if let (Some(old), Some(b)) = (self.buses.get(cats[0] as usize).cloned(), self.bus_list.iter_mut().find(|b| b.id == *id)) {
+                b.gain = old.gain;
+                b.muted = old.muted;
+                b.route = old.route;
+            }
+            if !self.bus_list.iter().any(|b| b.id == *id) {
+                let old = self.buses.get(cats[0] as usize).cloned().unwrap_or_default();
+                let b = Bus { id: id.to_string(), name: name.to_string(), gain: old.gain, muted: old.muted, route: old.route, custom: false };
+                let at = self.bus_list.iter().take_while(|x| !x.custom && DEFAULT_BUSES.iter().position(|d| d.0 == x.id).map_or(false, |p| p < i)).count();
+                self.bus_list.insert(at.min(self.bus_list.len()), b);
+            }
         }
-        &mut self.buses[(cat as usize).min(BUS_NAMES.len() - 1)]
+        self.buses.clear();
+    }
+    /// The bus a track belongs to: its hand-picked bus, else its group's built-in bus.
+    fn bus_id_for(&self, track: &str) -> String {
+        if let Some(id) = self.bus_of_track.get(&track.to_ascii_lowercase()) {
+            if self.bus_list.iter().any(|b| &b.id == id) {
+                return id.clone();
+            }
+        }
+        let c = songfile::stem_category(track);
+        DEFAULT_BUSES.iter().find(|d| d.2.contains(&c)).map_or("other", |d| d.0).to_string()
+    }
+    fn bus_for(&self, track: &str) -> Bus {
+        let id = self.bus_id_for(track);
+        self.bus_list.iter().find(|b| b.id == id).cloned().unwrap_or_default()
+    }
+    fn bus_mut(&mut self, id: &str) -> Option<&mut Bus> {
+        self.bus_list.iter_mut().find(|b| b.id == id)
     }
 }
 
 /// What the engine plays for a stem once its bus is applied: (gain, muted, route).
 fn effective(settings: &Settings, st: &songfile::StemFile) -> (f32, bool, Route) {
-    let b = settings.bus(songfile::stem_category(&st.name));
+    let b = settings.bus_for(&st.name);
     (st.gain * b.gain, st.muted || b.muted, b.route.unwrap_or(st.route))
 }
 
@@ -94,7 +140,7 @@ fn push_mix(core: &Core, settings: &Settings, file: &SongFile) {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings {
+        let mut s = Settings {
             output: None,
             midi: None,
             setlist: vec![],
@@ -108,7 +154,11 @@ impl Default for Settings {
             pad_level: 0.6,
             pad_route: None,
             buses: vec![],
-        }
+            bus_list: vec![],
+            bus_of_track: Default::default(),
+        };
+        s.ensure_buses();
+        s
     }
 }
 
@@ -342,10 +392,10 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
     let length = stems.iter().map(|s| s.frames()).max().unwrap_or(0);
     // Songs set up automatically get their grid lined up with the click you hear.
     let mut file = file;
-    if !file.grid_checked && matches!(file.markers_from.as_deref(), Some("ableton") | Some("guide")) {
+    if file.grid_version < songfile::GRID_VERSION && matches!(file.markers_from.as_deref(), Some("ableton") | Some("guide")) {
         if let Some(i) = file.stems.iter().position(|s| songfile::is_click(&s.name)) {
             guide::snap_grid_to_click(&mut file, &guide::to_mono(&stems[i]), sample_rate);
-            file.grid_checked = true;
+            file.grid_version = songfile::GRID_VERSION;
             let _ = file.save(folder);
         }
     }
@@ -511,7 +561,8 @@ struct AppView {
 
 #[derive(Serialize)]
 struct BusView {
-    cat: u8,
+    id: String,
+    custom: bool,
     name: String,
     gain: f32,
     muted: bool,
@@ -543,21 +594,25 @@ fn view(state: &AppState) -> AppView {
     // Take each lock on its own line: a guard inside the struct literal below would
     // live until the end of the whole expression, and locking the same mutex twice
     // there deadlocks (that froze 0.4.0 on launch).
-    let (song, song_key, stem_cats) = {
+    let (song, song_key, stem_names) = {
         let g = state.song.lock().unwrap();
-        let cats: Vec<u8> = g.as_ref().map(|l| l.file.stems.iter().map(|st| songfile::stem_category(&st.name)).collect()).unwrap_or_default();
-        (g.as_ref().map(SongView::from), g.as_ref().and_then(|l| song_key_pc(&l.file)).map(|pc| pads::NAMES[pc as usize].to_string()), cats)
+        let names: Vec<String> = g.as_ref().map(|l| l.file.stems.iter().map(|st| st.name.clone()).collect()).unwrap_or_default();
+        (g.as_ref().map(SongView::from), g.as_ref().and_then(|l| song_key_pc(&l.file)).map(|pc| pads::NAMES[pc as usize].to_string()), names)
     };
-    let mut buses: Vec<BusView> = vec![];
-    for (i, c) in stem_cats.iter().enumerate() {
-        match buses.iter_mut().find(|b| b.cat == *c) {
-            Some(b) => b.stems.push(i),
-            None => {
-                let b = s.bus(*c);
-                buses.push(BusView { cat: *c, name: BUS_NAMES[*c as usize].into(), gain: b.gain, muted: b.muted, route: b.route, stems: vec![i] });
-            }
+    // Buses in their own order, each with this song's tracks in track-list order.
+    // Built-in buses with no tracks in this song are hidden; your own always show.
+    let mut buses: Vec<BusView> = s
+        .bus_list
+        .iter()
+        .map(|b| BusView { id: b.id.clone(), custom: b.custom, name: b.name.clone(), gain: b.gain, muted: b.muted, route: b.route, stems: vec![] })
+        .collect();
+    for (i, n) in stem_names.iter().enumerate() {
+        let id = s.bus_id_for(n);
+        if let Some(b) = buses.iter_mut().find(|b| b.id == id) {
+            b.stems.push(i);
         }
     }
+    buses.retain(|b| b.custom || !b.stems.is_empty());
     let midi = state.midi.lock().unwrap().as_ref().map(|m| m.name.clone());
     let pad_on = *state.pad_on.lock().unwrap();
     AppView {
@@ -761,10 +816,10 @@ enum UiCmd {
     StemMute { stem: usize, muted: bool },
     /// Mute without saving (used for solo).
     StemMuteLive { stem: usize, muted: bool },
-    BusGain { cat: u8, gain: f32 },
-    BusMute { cat: u8, muted: bool },
+    BusGain { bus: String, gain: f32 },
+    BusMute { bus: String, muted: bool },
     /// None: the group's stems use their own outputs.
-    BusRoute { cat: u8, route: Option<Route> },
+    BusRoute { bus: String, route: Option<Route> },
     StemRoute { stem: usize, route: Route },
 }
 
@@ -854,22 +909,28 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 let bus_muted = song.as_ref().and_then(|l| l.file.stems.get(stem)).map_or(false, |st| effective(&s, st).1);
                 core.send(Command::SetStemMute(stem, muted || bus_muted));
             }
-            UiCmd::BusGain { cat, gain } => {
-                s.bus_mut(cat).gain = gain.clamp(0.0, 2.0);
+            UiCmd::BusGain { bus, gain } => {
+                if let Some(b) = s.bus_mut(&bus) {
+                    b.gain = gain.clamp(0.0, 2.0);
+                }
                 save_settings = true;
                 if let Some(l) = song.as_ref() {
                     push_mix(core, &s, &l.file);
                 }
             }
-            UiCmd::BusMute { cat, muted } => {
-                s.bus_mut(cat).muted = muted;
+            UiCmd::BusMute { bus, muted } => {
+                if let Some(b) = s.bus_mut(&bus) {
+                    b.muted = muted;
+                }
                 save_settings = true;
                 if let Some(l) = song.as_ref() {
                     push_mix(core, &s, &l.file);
                 }
             }
-            UiCmd::BusRoute { cat, route } => {
-                s.bus_mut(cat).route = route;
+            UiCmd::BusRoute { bus, route } => {
+                if let Some(b) = s.bus_mut(&bus) {
+                    b.route = route;
+                }
                 save_settings = true;
                 if let Some(l) = song.as_ref() {
                     push_mix(core, &s, &l.file);
@@ -975,6 +1036,158 @@ fn set_arrangement(state: State<'_, AppState>, blocks: Vec<Block>, keep: Option<
         l.file = file;
         l.file.save(&l.folder)?;
     }
+    Ok(view(&state))
+}
+
+/* ---------------- drag and drop ---------------- */
+
+#[derive(Serialize, Clone, Default)]
+struct DropResult {
+    songs_added: usize,
+    tracks_added: Vec<String>,
+    message: Option<String>,
+}
+
+/// Copies dropped audio files in next to the song's stems (the folder its first stem
+/// is in), renaming instead of overwriting. Returns the new tracks' names.
+fn copy_tracks(song_folder: &Path, first_stem: Option<&str>, files: &[PathBuf]) -> Result<Vec<String>, String> {
+    let rel_dir = first_stem.and_then(|f| Path::new(f).parent()).map(PathBuf::from).unwrap_or_default();
+    let dir = song_folder.join(&rel_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut names = vec![];
+    for src in files {
+        let stem = src.file_stem().and_then(|n| n.to_str()).unwrap_or("Track").to_string();
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("wav").to_string();
+        if src.parent() == Some(dir.as_path()) {
+            names.push(stem); // already there
+            continue;
+        }
+        let mut name = stem.clone();
+        let mut n = 2;
+        while dir.join(format!("{name}.{ext}")).exists() {
+            name = format!("{stem} {n}");
+            n += 1;
+        }
+        std::fs::copy(src, dir.join(format!("{name}.{ext}"))).map_err(|e| format!("Couldn't copy {}: {e}", src.display()))?;
+        names.push(name);
+    }
+    Ok(names)
+}
+
+/// Folders dropped on the window become songs in the set; audio files dropped while a
+/// song is loaded become new tracks of that song (starting at bar 1).
+async fn handle_drop(app: &AppHandle, paths: Vec<PathBuf>) -> DropResult {
+    let state = app.state::<AppState>();
+    let mut r = DropResult::default();
+    let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| p.is_dir());
+    let audio: Vec<PathBuf> = files.iter().filter(|p| decode::is_audio(p)).cloned().collect();
+    {
+        let mut s = state.settings.lock().unwrap();
+        for d in dirs {
+            if songfile::find_stems(&d).is_ok() && !s.setlist.contains(&d) {
+                s.setlist.push(d);
+                r.songs_added += 1;
+            }
+        }
+    }
+    if r.songs_added > 0 {
+        state.save_settings();
+    }
+    if audio.len() < files.len() {
+        r.message = Some("Some dropped files aren't audio, so they were skipped.".into());
+    }
+    if audio.is_empty() {
+        return r;
+    }
+    if state.core.playing() {
+        r.message = Some("Stop playback before adding tracks.".into());
+        return r;
+    }
+    let target = state.song.lock().unwrap().as_ref().map(|l| (l.folder.clone(), l.file.stems.first().map(|s| s.file.clone())));
+    let Some((folder, first)) = target else {
+        r.message = Some("Load a song first, then drop audio files on it to add them as tracks.".into());
+        return r;
+    };
+    let names = match copy_tracks(&folder, first.as_deref(), &audio) {
+        Ok(n) => n,
+        Err(e) => {
+            r.message = Some(e);
+            return r;
+        }
+    };
+    if let Err(e) = reload_current(&state).await {
+        r.message = Some(e);
+        return r;
+    }
+    r.tracks_added = names;
+    r
+}
+
+/// Bus management: make, rename and delete buses, and move a track to a bus.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum BusEdit {
+    Create { name: String },
+    Rename { bus: String, name: String },
+    Delete { bus: String },
+    /// Move every track with this name (in any song) to a bus; None = its default bus.
+    Assign { track: String, bus: Option<String> },
+}
+
+#[tauri::command]
+fn bus_edit(state: State<'_, AppState>, edit: BusEdit) -> Result<AppView, String> {
+    {
+        let mut s = state.settings.lock().unwrap();
+        s.ensure_buses();
+        match edit {
+            BusEdit::Create { name } => {
+                let name = name.trim();
+                let name = if name.is_empty() { "New bus" } else { name };
+                let mut n = 1;
+                let id = loop {
+                    let id = format!("bus-{n}");
+                    if !s.bus_list.iter().any(|b| b.id == id) {
+                        break id;
+                    }
+                    n += 1;
+                };
+                s.bus_list.push(Bus { id, name: name.to_string(), custom: true, ..Default::default() });
+            }
+            BusEdit::Rename { bus, name } => {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return Err("A bus needs a name.".into());
+                }
+                s.bus_mut(&bus).ok_or("That bus doesn't exist.")?.name = name;
+            }
+            BusEdit::Delete { bus } => {
+                let b = s.bus_list.iter().find(|b| b.id == bus).ok_or("That bus doesn't exist.")?;
+                if !b.custom {
+                    return Err("Built-in buses can't be deleted. You can rename them, or move their tracks elsewhere.".into());
+                }
+                s.bus_list.retain(|b| b.id != bus);
+                s.bus_of_track.retain(|_, v| *v != bus); // its tracks go back to their default bus
+            }
+            BusEdit::Assign { track, bus } => {
+                let key = track.trim().to_ascii_lowercase();
+                match bus {
+                    Some(id) if s.bus_list.iter().any(|b| b.id == id) => {
+                        s.bus_of_track.insert(key, id);
+                    }
+                    Some(_) => return Err("That bus doesn't exist.".into()),
+                    None => {
+                        s.bus_of_track.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+    // Settings and the song are locked one after the other, never together.
+    let s = state.settings.lock().unwrap().clone();
+    if let Some(l) = state.song.lock().unwrap().as_ref() {
+        push_mix(&state.core, &s, &l.file);
+    }
+    state.save_settings();
     Ok(view(&state))
 }
 
@@ -1155,7 +1368,9 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
             f.arrangement = vec![];
         }
         f.markers_from = Some(if analysis.markers.is_empty() { "manual" } else { "guide" }.into());
-        f.grid_checked = analysis.offset_ms.is_some(); // the guide reading already used the click
+        if analysis.offset_ms.is_some() {
+            f.grid_version = songfile::GRID_VERSION; // the guide reading already put bar 1 on the click
+        }
     })?;
     Ok(AnalysisResult { view, heard: analysis.heard, found_tempo, sections })
 }
@@ -1243,12 +1458,23 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let app = window.app_handle().clone();
+                let paths = paths.clone();
+                tauri::async_runtime::spawn(async move {
+                    let r = handle_drop(&app, paths).await;
+                    let _ = app.emit("dropped", r);
+                });
+            }
+        })
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&dir)?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let mut settings: Settings = read_json(&dir.join("settings.json"));
+            settings.ensure_buses();
             if settings.version < 1 {
                 settings.count_in = false; // count-in is now off unless asked for
                 settings.version = 1;
@@ -1302,6 +1528,7 @@ fn main() {
             set_key_tempo,
             choose_pads_folder,
             pad_set,
+            bus_edit,
             pad_mix,
             create_click_song,
             install_update,
@@ -1421,8 +1648,8 @@ mod tests {
         let m: Vec<(&str, u32)> = f.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
         assert_eq!(m, [("Intro", 3), ("Verse 1", 7), ("Chorus 1", 11), ("Chorus 2", 15)]);
         // grid snapped to the click you hear (first downbeat 0.05 s, not an eighth later)
-        assert!(f.grid_checked);
-        assert!((f.offset_ms - 50.0).abs() < 3.0, "offset {}", f.offset_ms);
+        assert_eq!(f.grid_version, songfile::GRID_VERSION);
+        assert!((f.offset_ms - 50.0).abs() < 3.0, "bar 1 is the first click: offset {}", f.offset_ms);
         // every section between the first and last is whole bars
         let bar = l.song.frames_per_bar();
         for s in &l.song.sections[1..l.song.sections.len() - 1] {
@@ -1439,9 +1666,12 @@ mod tests {
 
         // buses: the Guitars bus to Out 5-6 at half level, muted
         let mut st = Settings::default();
-        st.bus_mut(4).route = Some(Route::Pair(4));
-        st.bus_mut(4).gain = 0.5;
-        st.bus_mut(4).muted = true;
+        {
+            let g = st.bus_mut("guitars").unwrap();
+            g.route = Some(Route::Pair(4));
+            g.gain = 0.5;
+            g.muted = true;
+        }
         let eg = &f.stems[4];
         assert_eq!(effective(&st, eg), (0.5, true, Route::Pair(4)));
         assert_eq!(effective(&st, &f.stems[3]), (1.0, false, f.stems[3].route), "bass bus untouched");
@@ -1462,7 +1692,7 @@ mod tests {
         let t = load(&folder, sr, 10).unwrap();
         let ratio = t.song.sections[2].start as f64 / l.song.sections[2].start as f64;
         assert!((ratio - 77.5 / 85.25).abs() < 0.002, "ratio {ratio}");
-        assert!(t.file.grid_checked, "a tempo change doesn't redo the grid");
+        assert_eq!(t.file.grid_version, songfile::GRID_VERSION, "a tempo change doesn't redo the grid");
 
         // the app state works with this song loaded (no deadlock, pads report the key)
         let state = Arc::new(state());
@@ -1471,8 +1701,56 @@ mod tests {
         let v = finishes(move || view(&s2));
         assert_eq!(v.pads.song_key.as_deref(), Some("B"));
         let cats: Vec<&str> = v.buses.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(cats, ["Click & guide", "Drums", "Bass", "Guitars", "Vocals"]);
+        assert_eq!(cats, ["Click & guide", "Drums & percussion", "Bass", "Guitars", "Vocals"]);
         assert_eq!(v.buses[3].stems, vec![4, 5]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn settings_from_0_5_0_keep_the_set_and_carry_bus_settings_over() {
+        let old = r#"{"output":"UMC1820","setlist":["/songs/See a Victory"],"current":0,"quantize":"Bar","count_in":false,
+            "click_gain":0.8,"version":1,"pad_level":0.6,
+            "buses":[{"gain":1.0,"muted":false,"route":{"Pair":2}},{"gain":0.7,"muted":false,"route":{"Pair":4}}]}"#;
+        let mut s: Settings = serde_json::from_str(old).expect("0.5.0 settings must still load");
+        s.ensure_buses();
+        assert_eq!(s.setlist, vec![PathBuf::from("/songs/See a Victory")]);
+        assert_eq!(s.output.as_deref(), Some("UMC1820"));
+        let d = s.bus_list.iter().find(|b| b.id == "drums").unwrap();
+        assert_eq!((d.gain, d.route), (0.7, Some(Route::Pair(4))), "old Drums bus settings carried over");
+        assert_eq!(s.bus_list.len(), DEFAULT_BUSES.len());
+        // the old field is never written back
+        assert!(!serde_json::to_string(&s).unwrap().contains("\"buses\""));
+    }
+
+    #[test]
+    fn tracks_go_to_their_group_bus_unless_moved_and_come_back_when_a_bus_is_deleted() {
+        let mut s = Settings::default();
+        assert_eq!(s.bus_id_for("Perc Loop"), "drums", "percussion shares the drums bus");
+        assert_eq!(s.bus_id_for("Tambourine"), "drums");
+        assert_eq!(s.bus_id_for("Synth Bass"), "bass");
+        s.bus_list.push(Bus { id: "bus-1".into(), name: "Pads".into(), custom: true, ..Default::default() });
+        s.bus_of_track.insert("pad".into(), "bus-1".into());
+        assert_eq!(s.bus_id_for("Pad"), "bus-1", "moved by name, any song");
+        assert_eq!(s.bus_id_for("Keys 1"), "keys");
+        s.bus_list.retain(|b| b.id != "bus-1");
+        assert_eq!(s.bus_id_for("Pad"), "keys", "deleted bus: back to its default");
+    }
+
+    #[test]
+    fn dropped_tracks_join_the_song_without_overwriting() {
+        let root = std::env::temp_dir().join(format!("rig-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = multitracks_folder(&root);
+        let ext = root.join("exports");
+        std::fs::create_dir_all(&ext).unwrap();
+        write_wav(&ext.join("New Synth.wav"), &vec![0.1; 44_100], 44_100);
+        write_wav(&ext.join("Bass.wav"), &vec![0.1; 44_100], 44_100); // same name as an existing stem
+        let names = copy_tracks(&folder, Some("MultiTracks/Click Track.wav"), &[ext.join("New Synth.wav"), ext.join("Bass.wav")]).unwrap();
+        assert_eq!(names, ["New Synth", "Bass 2"]);
+        let l = load(&folder, 48_000, 10).unwrap();
+        let tracks: Vec<&str> = l.file.stems.iter().map(|s| s.name.as_str()).collect();
+        assert!(tracks.contains(&"New Synth") && tracks.contains(&"Bass 2") && tracks.contains(&"Bass"), "{tracks:?}");
+        assert_eq!(l.file.stems.iter().find(|s| s.name == "Bass 2").unwrap().file, "MultiTracks/Bass 2.wav");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1485,7 +1763,7 @@ mod tests {
         let (folder, _) = clicksong::create(&root, &spec, &voice).unwrap();
         let l = load(&folder, 48_000, 2).unwrap();
         assert_eq!(l.file.markers_from.as_deref(), Some("manual"));
-        assert!(!l.file.grid_checked, "hand-made grids are never moved");
+        assert_eq!(l.file.grid_version, 0, "hand-made grids are never moved");
         assert_eq!(l.song.sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Count", "Verse", "Chorus"]);
         assert_eq!(song_key_pc(&l.file), Some(8));
         std::fs::remove_dir_all(&root).ok();

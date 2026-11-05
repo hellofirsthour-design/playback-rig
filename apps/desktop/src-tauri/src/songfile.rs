@@ -60,13 +60,17 @@ pub struct SongFile {
     /// Version of the automatic setup that last ran (see SETUP_VERSION).
     #[serde(default)]
     pub setup: u32,
-    /// The bar grid has been lined up with the click stem.
+    /// Version of the click-grid rule last applied (see GRID_VERSION). Older values
+    /// get the grid lined up again on load; markers keep their bars.
     #[serde(default)]
-    pub grid_checked: bool,
+    pub grid_version: u32,
 }
 
 /// Raise to make songs set up automatically by an older version set up again.
 pub const SETUP_VERSION: u32 = 3;
+
+/// Raise to line up the grid of automatically set up songs with the click again.
+pub const GRID_VERSION: u32 = 2;
 
 /// Where a stem sits in the track list: click and guide first, then Drums,
 /// Percussion, Bass, Guitars, Keys, Other instruments, Vocals, FX.
@@ -251,7 +255,7 @@ impl SongFile {
                 transpose: 0,
                 target_bpm: None,
                 setup: SETUP_VERSION,
-                grid_checked: false,
+                grid_version: 0,
             },
         };
         // Songs set up automatically by an older version are set up again: the tempo
@@ -259,7 +263,7 @@ impl SongFile {
         if sf.setup < SETUP_VERSION {
             if matches!(sf.markers_from.as_deref(), None | Some("ableton") | Some("guide")) {
                 sf.markers_from = None;
-                sf.grid_checked = false;
+                sf.grid_version = 0;
                 if let Some(b) = folder_bpm {
                     sf.bpm = b;
                 }
@@ -520,7 +524,7 @@ mod tests {
                 transpose: 0,
                 target_bpm: None,
                 setup: SETUP_VERSION,
-                grid_checked: false,
+                grid_version: 0,
         };
         let (song, arr) = sf.build(1000, 20_000).unwrap();
         let names: Vec<&str> = song.sections.iter().map(|s| s.name.as_str()).collect();
