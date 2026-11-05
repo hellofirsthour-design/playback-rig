@@ -20,13 +20,14 @@ jobs:
   # Publishes a GitHub Release (and the update the app installs itself) whenever
   # the version in tauri.conf.json goes up. Same version = nothing is published.
   # The only Mac job: it runs the app tests on every push and, when the version is
-  # new, builds and publishes. One Mac machine per push, from the macos-15 pool
+  # new, builds and publishes. One Mac machine per push, from the macos-26 pool
   # (macos-latest was scarce; macos-14 jobs started being cancelled on 2026-11-05, as
-  # GitHub retires that image).
+  # GitHub retires that image; macos-15 jobs then waited 15 min for a machine and were
+  # cancelled, twice).
   release:
     name: Mac app tests and release
     needs: [engine]
-    runs-on: macos-15
+    runs-on: macos-26
     permissions:
       contents: write
     env:
