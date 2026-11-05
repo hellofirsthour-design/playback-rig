@@ -26,7 +26,19 @@
   const routeKey = r => (r.Pair !== undefined ? 'p:' + r.Pair : 'm:' + r.Mono);
   const keyRoute = k => { const [t, n] = k.split(':'); return t === 'p' ? { Pair: +n } : { Mono: +n }; };
   const fmt = s => { s = Math.max(0, s); const m = Math.floor(s / 60); return m + ':' + String(Math.floor(s % 60)).padStart(2, '0'); };
-  const barSec = () => (V && V.song ? 60 / V.song.bpm * V.song.beats_per_bar : 2);
+  const playBpm = () => (V && V.song ? V.song.play_bpm || V.song.bpm : 120);
+  const barSec = () => (V && V.song ? 60 / playBpm() * V.song.beats_per_bar : 2);
+  // Key spellings as worship charts write them.
+  const MAJOR = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+  const MINOR = ['Cm', 'C#m', 'Dm', 'Ebm', 'Em', 'Fm', 'F#m', 'Gm', 'G#m', 'Am', 'Bbm', 'Bm'];
+  const PC = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+  // "A" + 2 -> "B", "A" + 1 -> "Bb", "F#m" - 1 -> "Fm". Unknown key -> "+2".
+  function keyName(key, semis) {
+    const m = /^([A-G])([#b]?)(m?)$/.exec((key || '').trim());
+    if (!m) return semis ? (semis > 0 ? '+' : '') + semis : (key || '—');
+    const i = (((PC[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0) + semis) % 12) + 12) % 12;
+    return (m[3] ? MINOR : MAJOR)[i];
+  }
   const strip = bs => bs.map(b => ({ section: b.section, muted: [...b.muted] }));
   const withUid = bs => bs.map(b => ({ uid: uidSeq++, section: b.section, muted: [...b.muted] }));
 
@@ -115,7 +127,7 @@
   function renderBar() {
     const s = V.song;
     $('#songTitle').textContent = loading ? 'Loading…' : s ? s.name : (V.setlist.length ? 'Pick a song' : 'No songs yet');
-    $('#songMeta').textContent = s ? `${+s.bpm.toFixed(2)} BPM · ${s.beats_per_bar}/4${s.key ? ' · ' + s.key : ''}` : '';
+    $('#songMeta').textContent = s ? `${+playBpm().toFixed(2)} BPM · ${s.beats_per_bar}/4${s.key || s.transpose ? ' · ' + keyName(s.key, s.transpose) : ''}${s.transpose ? ` (${s.transpose > 0 ? '+' : ''}${s.transpose})` : ''}` : '';
     document.querySelectorAll('#quant button').forEach(b => b.classList.toggle('on', b.dataset.q === V.quantize));
     $('#clickBtn').classList.toggle('on', !!(s && s.click)); $('#clickBtn').disabled = !s;
     $('#countBtn').classList.toggle('on', V.count_in);
@@ -411,11 +423,11 @@
   function rulerTime(e) {
     const r = cvTop.getBoundingClientRect(), L = layout();
     let t = zoom.scroll + (e.clientX - r.left) / zoom.pps;
-    const beat = 60 / V.song.bpm;
+    const beat = 60 / playBpm();
     const o = L.find(o => t >= o.start && t < o.start + o.secs) || L[L.length - 1];
     if (!o) return null;
     // snap to the beat grid of the block's own audio
-    const src = o.sec.start_sec + (t - o.start), off = V.song.offset_ms / 1000;
+    const src = o.sec.start_sec + (t - o.start), off = V.song.offset_ms / 1000 * (V.song.bpm / playBpm());
     const snapped = off + Math.round((src - off) / beat) * beat;
     t = Math.max(o.start, Math.min(o.start + o.secs - 0.01, o.start + (snapped - o.sec.start_sec)));
     return Math.max(0, t);
@@ -544,7 +556,7 @@
     if (draftFor !== sig) { draftFor = sig; draftMarkers = s.markers.map(m => ({ ...m })); }
     $('#analyzeBtn').disabled = analyzing || !(s.has_guide || s.has_click);
     $('#analyzeBtn').textContent = analyzing ? 'Reading…' : 'Read guide';
-    $('#analyzeHint').textContent = !(s.has_guide || s.has_click) ? 'No Click or Guide stem in this song. Add sections by hand below.'
+    $('#analyzeHint').textContent = s.markers_from === 'ableton' ? 'Sections came from the Ableton set in this folder. Read guide replaces them with what the guide says.' : !(s.has_guide || s.has_click) ? 'No Click or Guide stem in this song. Add sections by hand below.'
       : `Reads the ${[s.has_click && 'Click (tempo)', s.has_guide && 'Guide (section cues)'].filter(Boolean).join(' and ')}. This replaces the markers below and resets the arrangement to the song as recorded.`;
     const hl = $('#heard'); hl.innerHTML = '';
     heard.forEach(([t, w]) => { const li = el('li'); li.append(fmt(t) + '  ', el('b', null, w || '…')); hl.append(li); });
@@ -552,6 +564,7 @@
       $('#f-name').value = s.name; $('#f-bpm').value = s.bpm; $('#f-bpb').value = s.beats_per_bar; $('#f-key').value = s.key; $('#f-off').value = Math.round(s.offset_ms);
     }
     renderMarkers();
+    renderKeyTempo();
     const rb = $('#routes'); rb.innerHTML = '';
     s.stems.forEach((st, i) => {
       const r = el('div', 'rt'); const sel = el('select'); sel.setAttribute('aria-label', `${st.name} output`); routeOptions(sel, st.route);
@@ -559,6 +572,36 @@
       r.append(el('span', null, st.name), sel); rb.append(r);
     });
   }
+  let kt = null; // { transpose, bpm } being edited
+  function renderKeyTempo() {
+    const s = V.song; if (!s) return;
+    if (!kt || kt.folder !== s.folder) kt = { folder: s.folder, transpose: s.transpose, bpm: playBpm() };
+    $('#keyVal').textContent = keyName(s.key, kt.transpose) + (kt.transpose ? ` (${kt.transpose > 0 ? '+' : ''}${kt.transpose})` : '');
+    $('#keyOrig').textContent = s.key ? `Recorded in ${s.key}` : 'Add the recorded key under Song details to see key names';
+    if (document.activeElement !== $('#bpmVal')) $('#bpmVal').value = +kt.bpm.toFixed(2);
+    $('#bpmOrig').textContent = `Recorded at ${+s.bpm.toFixed(2)}`;
+    const changed = kt.transpose !== s.transpose || Math.abs(kt.bpm - playBpm()) > 0.004;
+    $('#ktApply').disabled = !changed || applyingKt;
+    $('#ktApply').textContent = applyingKt ? 'Applying…' : 'Apply';
+  }
+  let applyingKt = false;
+  $('#keyDown').onclick = () => { kt.transpose = Math.max(-12, kt.transpose - 1); renderKeyTempo(); };
+  $('#keyUp').onclick = () => { kt.transpose = Math.min(12, kt.transpose + 1); renderKeyTempo(); };
+  $('#bpmDown').onclick = () => { kt.bpm = Math.max(30, Math.round((kt.bpm - 0.5) * 2) / 2); renderKeyTempo(); };
+  $('#bpmUp').onclick = () => { kt.bpm = Math.min(300, Math.round((kt.bpm + 0.5) * 2) / 2); renderKeyTempo(); };
+  $('#bpmVal').oninput = e => { const v = +e.target.value; if (v >= 30 && v <= 300) { kt.bpm = v; renderKeyTempo(); } };
+  $('#ktReset').onclick = () => { kt.transpose = 0; kt.bpm = V.song.bpm; renderKeyTempo(); };
+  $('#ktApply').onclick = async () => {
+    if (playing()) { toast('Stop playback before changing the key or tempo.'); return; }
+    applyingKt = true; renderKeyTempo(); showTask('Changing key and tempo', 0.3);
+    try {
+      const v = await invoke('set_key_tempo', { transpose: kt.transpose, bpm: kt.bpm });
+      songKey = null; // stems changed: reload waveforms
+      await refresh(v); kt = null;
+      const s = V.song; toast(`Now in ${keyName(s.key, s.transpose)} at ${+playBpm().toFixed(2)} BPM.`);
+    } catch (e) { err(e); } finally { applyingKt = false; hideTask(); renderKeyTempo(); }
+  };
+
   function renderMarkers() {
     const box = $('#markers'); if (box.contains(document.activeElement)) return;
     box.innerHTML = '';

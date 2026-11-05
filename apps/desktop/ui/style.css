@@ -167,3 +167,7 @@ input[type=range] { accent-color: var(--fg) }
 .upd { display: flex; align-items: center; gap: 8px; color: var(--fg) }
 .mini.accent { background: var(--go); border-color: var(--go); color: #1a0d04; font-weight: 700 }
 .mini[disabled] { opacity: .45; cursor: not-allowed }
+.kt { display: grid; grid-template-columns: 52px auto 92px auto 1fr; gap: 8px; align-items: center; margin-bottom: 8px }
+.kt .ktv { text-align: center; font: 800 18px var(--f-round) }
+.kt input { text-align: center; font: 700 15px var(--f-mono) }
+.kt .hint { margin: 0 }

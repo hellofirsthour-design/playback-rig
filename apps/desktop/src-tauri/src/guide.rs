@@ -209,21 +209,57 @@ pub fn label_for(text: &str) -> Option<String> {
     })
 }
 
-/// Places each recognised cue on the downbeat after it and makes names unique
-/// ("Chorus", "Chorus" -> "Chorus 1", "Chorus 2").
-pub fn markers_from_cues(cues: &[(f64, String)], tempo: Tempo, bpb: u32) -> Vec<Marker> {
+/// One burst of speech on the guide and what it said.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Heard {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    /// Section name, if the words name a section.
+    pub label: Option<String>,
+}
+
+/// A count ("1, 2, 3, 4", "and") rather than a cue. Unreadable short bursts count too.
+pub fn is_count(h: &Heard) -> bool {
+    let norm: String = h.text.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' }).collect();
+    let words: Vec<&str> = norm.split_whitespace().collect();
+    if words.is_empty() {
+        return h.end - h.start < 0.7;
+    }
+    words.iter().all(|w| matches!(*w, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "one" | "two" | "three" | "four" | "five" | "six" | "seven" | "eight" | "to" | "too" | "for" | "free" | "and"))
+}
+
+/// Places a marker for each section cue. MultiTracks guides usually say the section
+/// name and then count the next bar in ("Verse... 1, 2, 3, 4"): the section starts on
+/// the downbeat after the count. With no count after it, the section starts on the
+/// downbeat after the cue.
+pub fn place_markers(heard: &[Heard], tempo: Tempo, bpb: u32) -> Vec<Marker> {
     let beat = 60.0 / tempo.bpm;
     let bar = beat * bpb.max(1) as f64;
     let mut out: Vec<Marker> = vec![];
-    for (t, name) in cues {
-        let b = ((t + 0.5 * beat - tempo.offset) / bar).ceil().max(0.0) as u32 + 1;
+    for (i, h) in heard.iter().enumerate() {
+        let Some(name) = &h.label else { continue };
+        let mut end = h.end;
+        for f in &heard[i + 1..] {
+            if f.label.is_some() || f.start > h.end + 1.6 * bar || !is_count(f) {
+                break;
+            }
+            end = f.end;
+        }
+        let b = ((end - 0.35 * beat - tempo.offset) / bar).ceil().max(0.0) as u32 + 1;
         if out.last().map_or(false, |m| m.bar >= b) {
             continue; // two cues for the same bar: keep the first
         }
         out.push(Marker { name: name.clone(), bar: b });
     }
+    unique_names(&mut out);
+    out
+}
+
+/// "Chorus", "Chorus" -> "Chorus 1", "Chorus 2" (section names must be unique).
+pub fn unique_names(out: &mut [Marker]) {
     let mut total = std::collections::HashMap::<String, usize>::new();
-    for m in &out {
+    for m in out.iter() {
         *total.entry(m.name.clone()).or_default() += 1;
     }
     let mut seen = std::collections::HashMap::<String, usize>::new();
@@ -235,7 +271,6 @@ pub fn markers_from_cues(cues: &[(f64, String)], tempo: Tempo, bpb: u32) -> Vec<
             m.name = if has_num { format!("{} ({})", m.name, n) } else { format!("{} {}", m.name, n) };
         }
     }
-    out
 }
 
 /* ---------------- speech recognition ---------------- */
@@ -307,8 +342,7 @@ pub fn analyze(
     progress("Finding the tempo", 0.0);
     let tempo = click.and_then(|c| tempo_from_click(&to_mono(c), sr, bpb));
     let use_tempo = tempo.unwrap_or(Tempo { bpm: fallback_bpm, offset: 0.0 });
-    let mut heard = vec![];
-    let mut named = vec![];
+    let mut heard: Vec<Heard> = vec![];
     if let (Some(g), Some(model)) = (guide, model) {
         progress("Listening to the guide", 0.05);
         let mono = to_mono(g);
@@ -318,26 +352,22 @@ pub fn analyze(
             progress("Listening to the guide", 0.05 + 0.95 * i as f32 / cues.len().max(1) as f32);
             let s0 = ((c.start - 0.1).max(0.0) * sr as f64) as usize;
             let s1 = (((c.end + 0.15) * sr as f64) as usize).min(mono.len());
-            if s1 <= s0 || c.end - c.start > 6.0 {
-                continue;
+            let mut text = String::new();
+            if s1 > s0 && c.end - c.start <= 6.0 {
+                // One unreadable cue shouldn't stop the whole song.
+                if let Ok(clip) = crate::decode::resample(&[mono[s0..s1].to_vec()], sr, 16_000).map(|mut v| v.pop().unwrap_or_default()) {
+                    text = t.transcribe(&clip).unwrap_or_default();
+                }
             }
-            // One unreadable cue shouldn't stop the whole song.
-            let Ok(clip) = crate::decode::resample(&[mono[s0..s1].to_vec()], sr, 16_000).map(|mut v| v.pop().unwrap_or_default()) else {
-                continue;
-            };
-            let Ok(text) = t.transcribe(&clip) else { continue };
-            if let Some(name) = label_for(&text) {
-                named.push((c.start, name));
-            }
-            heard.push((c.start, text));
+            heard.push(Heard { start: c.start, end: c.end, label: label_for(&text), text });
         }
     }
     progress("Done", 1.0);
     Ok(Analysis {
         bpm: tempo.map(|t| t.bpm),
         offset_ms: tempo.map(|t| t.offset * 1000.0),
-        markers: markers_from_cues(&named, use_tempo, bpb),
-        heard,
+        markers: place_markers(&heard, use_tempo, bpb),
+        heard: heard.into_iter().map(|h| (h.start, h.text)).collect(),
     })
 }
 
@@ -409,18 +439,26 @@ mod tests {
         assert_eq!(label_for("Hits"), None);
     }
 
+    fn h(start: f64, end: f64, text: &str) -> Heard {
+        Heard { start, end, text: text.into(), label: label_for(text) }
+    }
+
     #[test]
-    fn markers_land_on_the_next_downbeat_with_unique_names() {
-        let tempo = Tempo { bpm: 60.0, offset: 1.0 }; // bar = 4 s, bar 1 at 1 s
-        let cues = vec![
-            (14.6, "Verse 1".to_string()),  // said in bar 4 -> bar 5 (17 s)
-            (30.9, "Chorus".to_string()),   // just before bar 9's downbeat -> bar 9
-            (46.5, "Chorus".to_string()),   // -> bar 13
-            (47.0, "Chorus".to_string()),   // same bar again -> dropped
+    fn section_starts_after_the_count_that_follows_the_cue() {
+        let tempo = Tempo { bpm: 60.0, offset: 1.0 }; // beat 1 s, bar 4 s, bar 1 at 1 s
+        let heard = vec![
+            h(1.0, 1.3, "1"), h(2.0, 2.3, "2"), h(3.0, 3.3, "3"), h(4.0, 4.3, "4"), // count-in: no marker
+            h(13.0, 13.8, "Verse one."),                                        // bar 4, beat 1
+            h(17.0, 17.3, "1"), h(18.0, 18.3, "2"), h(19.0, 19.3, "Free."), h(20.0, 20.3, "4."), // bar 5 count
+            h(30.0, 30.6, "Chorus"),                                             // bar 8, beat 2, no count
+            h(46.2, 46.6, "Chorus"), h(49.0, 49.3, ""), h(50.0, 50.3, "two"), h(51.0, 51.3, "3"), h(52.0, 52.2, "4"),
         ];
-        let m = markers_from_cues(&cues, tempo, 4);
-        let got: Vec<(String, u32)> = m.into_iter().map(|m| (m.name, m.bar)).collect();
-        assert_eq!(got, vec![("Verse 1".into(), 5), ("Chorus 1".into(), 9), ("Chorus 2".into(), 13)]);
+        let got: Vec<(String, u32)> = place_markers(&heard, tempo, 4).into_iter().map(|m| (m.name, m.bar)).collect();
+        assert_eq!(got, vec![
+            ("Verse 1".into(), 6),   // after the count in bar 5
+            ("Chorus 1".into(), 9),  // no count: next downbeat
+            ("Chorus 2".into(), 14), // count in bar 13 (one word unreadable) -> bar 14
+        ]);
     }
 
     /// Full run against a real guide file and model. Set RIG_GUIDE, RIG_MODEL, RIG_BPM.

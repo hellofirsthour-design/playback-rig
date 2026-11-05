@@ -25,7 +25,12 @@ It combines Ableton's arrangement view with MultiTracks Playback, in our own des
 - **Top bar:** the transport, plus a display showing the current section, bar and beat, and the queued call ("Going to Chorus 2 in 1.5 bars").
 - **Section rail** (MultiTracks-style): the arrangement as big colored blocks. Drag a block to reorder it, drag it off the rail to remove it, or use ⧉ to repeat it. Drag a section in from the palette below the rail. This works **while playing**. Cmd+Z undoes.
 - **Arrangement view** (Ableton-style): one lane per stem with its waveform, cut into section clips in arrangement order, with a bar ruler, the playhead and the queued jump. Double-click a clip, or select it and press 0, to switch that stem off for that section only. Each track header has level, mute and solo.
-- **Automatic setup:** the first time a song loads, the app reads its **Click** stem (tempo and first downbeat) and its **Guide** stem. It recognizes the spoken cues with an offline speech model (about 150 MB, downloaded once) and places a marker on the downbeat after each cue. Repeated names are numbered (Chorus 1, Chorus 2). "Read guide" in the Song panel runs it again.
+- **Automatic setup**, the first time a song loads:
+  1. **The Ableton set.** If the folder has a `.als` (MultiTracks downloads include `MultiTrack.als`), its locators become the section markers, and it supplies the tempo and meter. This is exact and instant.
+  2. **The folder name** gives the title, key and tempo ("See a Victory-At Midnight-A-77.50bpm").
+  3. **"Read guide"** (also the fallback) reads the **Click** for tempo and downbeat, and recognizes the **Guide**'s spoken cues with an offline speech model. MultiTracks guides say the section name and then count the next bar in ("Verse… 1, 2, 3, 4"), so the marker goes on the downbeat after the count. With no count, it goes on the downbeat after the cue. Repeated names are numbered.
+- **Stems can be in a subfolder:** the app looks in the chosen folder, then in its subfolders (`MultiTracks/` first). Picking the `MultiTracks` folder itself also works.
+- **Key and tempo** are in the Song panel, as in MultiTracks Playback. Each stem is time-stretched and pitch-shifted when the song loads (Signalsmith Stretch, comparable to Ableton's Complex Pro). Click and guide are only time-stretched. Section positions follow the new tempo.
 
 ## Live behaviour
 

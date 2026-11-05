@@ -1,12 +1,14 @@
 // Hide the console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod als;
 mod audio;
 mod decode;
 mod guide;
 mod midi_io;
 mod model;
 mod songfile;
+mod stretch;
 
 use audio::{OpenOutput, Output, OutputInfo, ToAudio};
 use rig_engine::midi::{Action, Binding, Event, MidiMap};
@@ -215,13 +217,17 @@ fn open_output(core: &Core, app: &AppHandle, name: Option<String>) -> Result<Ope
 
 fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, String> {
     let file = SongFile::scan(folder, channels)?;
+    // Key and tempo changes are rendered here, one thread per stem. Click and guide
+    // are only time-stretched, never pitch-shifted.
+    let length_factor = file.stretch();
     let results: Vec<Result<StemAudio, String>> = std::thread::scope(|s| {
         let hs: Vec<_> = file
             .stems
             .iter()
             .map(|st| {
                 let p = folder.join(&st.file);
-                s.spawn(move || decode::decode(&p, sample_rate))
+                let semis = if songfile::is_click(&st.name) || songfile::is_guide(&st.name) { 0.0 } else { file.transpose as f32 };
+                s.spawn(move || decode::decode(&p, sample_rate).map(|a| stretch::apply(&a, sample_rate, length_factor, semis)))
             })
             .collect();
         hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("A stem failed to load.".into()))).collect()
@@ -300,6 +306,11 @@ struct SongView {
     has_guide: bool,
     /// Markers haven't been set up yet (by the guide or by hand).
     needs_setup: bool,
+    /// "ableton", "guide", "manual" or None.
+    markers_from: Option<String>,
+    /// Key change in semitones; `bpm` is the recorded tempo, `play_bpm` what plays.
+    transpose: i32,
+    play_bpm: f64,
 }
 
 impl SongView {
@@ -343,6 +354,9 @@ impl SongView {
             has_click: l.file.stems.iter().any(|s| songfile::is_click(&s.name)),
             has_guide: l.file.stems.iter().any(|s| songfile::is_guide(&s.name)),
             needs_setup: l.file.markers_from.is_none(),
+            markers_from: l.file.markers_from.clone(),
+            transpose: l.file.transpose,
+            play_bpm: l.file.play_bpm(),
         }
     }
 }
@@ -753,6 +767,31 @@ fn set_arrangement(state: State<'_, AppState>, blocks: Vec<Block>, keep: Option<
     Ok(view(&state))
 }
 
+/// Changes the key (semitones) and/or tempo, then re-renders the stems.
+#[tauri::command]
+async fn set_key_tempo(app: AppHandle, state: State<'_, AppState>, transpose: i32, bpm: Option<f64>) -> Result<AppView, String> {
+    if state.core.playing() {
+        return Err("Stop playback before changing the key or tempo.".into());
+    }
+    let (folder, sr, ch) = {
+        let mut song = state.song.lock().unwrap();
+        let l = song.as_mut().ok_or("Load a song first.")?;
+        let mut f = l.file.clone();
+        f.transpose = transpose.clamp(-12, 12);
+        f.target_bpm = bpm.filter(|b| (b - f.bpm).abs() > 0.004).map(|b| b.clamp(f.bpm * 0.5, f.bpm * 2.0));
+        f.save(&l.folder)?;
+        let out = state.core.output.lock().unwrap();
+        let o = out.as_ref().ok_or("No audio output is open.")?;
+        (l.folder.clone(), o.info.sample_rate, o.info.channels)
+    };
+    let _ = app.emit("analysis", AnalysisProgress { stage: "Changing key and tempo".into(), progress: 0.4 });
+    let loaded = tauri::async_runtime::spawn_blocking(move || load(&folder, sr, ch)).await.map_err(|e| e.to_string())??;
+    let settings = state.settings.lock().unwrap().clone();
+    install(&state.core, &settings, &loaded)?;
+    *state.song.lock().unwrap() = Some(loaded);
+    Ok(view(&state))
+}
+
 #[derive(Serialize)]
 struct PeaksView {
     per_sec: u32,
@@ -785,15 +824,22 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
     if state.core.playing() {
         return Err("Stop playback before reading the guide.".into());
     }
-    let (click, guide, sr, bpb, bpm) = {
+    // Read the original recordings from disk, not the key/tempo-changed copies.
+    let (click_path, guide_path, sr, bpb, bpm) = {
         let song = state.song.lock().unwrap();
         let l = song.as_ref().ok_or("Load a song first.")?;
-        let find = |f: fn(&str) -> bool| l.file.stems.iter().position(|s| f(&s.name)).map(|i| l.stems[i].clone());
+        let find = |f: fn(&str) -> bool| l.file.stems.iter().find(|s| f(&s.name)).map(|s| l.folder.join(&s.file));
         (find(songfile::is_click), find(songfile::is_guide), l.sample_rate, l.file.beats_per_bar, l.file.bpm)
     };
-    if click.is_none() && guide.is_none() {
+    if click_path.is_none() && guide_path.is_none() {
         return Err("This song has no Click or Guide stem to read. Add sections by hand in the Song panel.".into());
     }
+    let (click, guide) = tauri::async_runtime::spawn_blocking(move || {
+        let read = |p: Option<PathBuf>| p.map(|p| decode::decode(&p, sr)).transpose();
+        Ok::<_, String>((read(click_path)?, read(guide_path)?))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     let data_dir = state.core.data_dir.clone();
     let h = app.clone();
     let analysis = tauri::async_runtime::spawn_blocking(move || {
@@ -960,6 +1006,7 @@ fn main() {
             song_peaks,
             analyze_song,
             check_update,
+            set_key_tempo,
             install_update,
             app_version,
             midi_learn,

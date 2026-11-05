@@ -79,17 +79,36 @@
   <div id="songEmpty" class="hint">Load a song first.</div>
   <div id="songBody">
     <div class="card">
+      <h3>Key &amp; tempo</h3>
+      <div class="kt">
+        <span class="lbl">Key</span>
+        <button class="ib" id="keyDown" aria-label="Key down a semitone">−</button>
+        <b class="ktv" id="keyVal">—</b>
+        <button class="ib" id="keyUp" aria-label="Key up a semitone">+</button>
+        <span class="hint" id="keyOrig"></span>
+      </div>
+      <div class="kt">
+        <span class="lbl">Tempo</span>
+        <button class="ib" id="bpmDown" aria-label="Tempo down">−</button>
+        <input id="bpmVal" type="number" min="30" max="300" step="0.5" aria-label="Tempo in BPM">
+        <button class="ib" id="bpmUp" aria-label="Tempo up">+</button>
+        <span class="hint" id="bpmOrig"></span>
+      </div>
+      <p class="hint">Click and guide keep their pitch. Changes of more than 3 semitones start to sound processed.</p>
+      <div class="row between"><button class="btn" id="ktReset">Original</button><button class="btn accent" id="ktApply">Apply</button></div>
+    </div>
+    <div class="card">
       <div class="row between"><h3>Sections from the guide</h3><button class="btn accent" id="analyzeBtn">Read guide</button></div>
       <p class="hint" id="analyzeHint"></p>
       <ol class="heard" id="heard"></ol>
     </div>
     <div class="card">
-      <h3>Tempo</h3>
+      <h3>Song details</h3>
       <div class="form">
         <label>Name<input id="f-name"></label>
-        <label>Tempo (BPM)<input id="f-bpm" type="number" min="30" max="300" step="0.01"></label>
+        <label>Recorded tempo (BPM)<input id="f-bpm" type="number" min="30" max="300" step="0.01"></label>
         <label>Beats per bar<input id="f-bpb" type="number" min="1" max="12"></label>
-        <label>Key<input id="f-key" maxlength="6"></label>
+        <label>Recorded key<input id="f-key" maxlength="6"></label>
         <label>First downbeat (ms)<input id="f-off" type="number" min="0" step="1"></label>
       </div>
     </div>

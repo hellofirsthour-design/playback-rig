@@ -32,7 +32,7 @@ pub struct Block {
     pub muted: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct SongFile {
     pub name: String,
     pub bpm: f64,
@@ -51,6 +51,12 @@ pub struct SongFile {
     /// Where the markers came from: None (not set up yet), "guide" or "manual".
     #[serde(default)]
     pub markers_from: Option<String>,
+    /// Key change in semitones (+2 = up a whole step). Click and guide keep their pitch.
+    #[serde(default)]
+    pub transpose: i32,
+    /// Playback tempo, when different from the recorded tempo (`bpm`).
+    #[serde(default)]
+    pub target_bpm: Option<f64>,
 }
 
 pub fn is_click(name: &str) -> bool {
@@ -88,8 +94,76 @@ pub fn bpm_in(name: &str) -> Option<f64> {
     after.parse::<f64>().ok().filter(|v| (30.0..=300.0).contains(v))
 }
 
-fn stem_name(file: &str) -> String {
+pub fn stem_name(file: &str) -> String {
     Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or(file).trim().to_string()
+}
+
+fn audio_in(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && is_audio(p))
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+                .filter(|n| !n.starts_with("._"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Stem files relative to the song folder. Looks in the folder itself, then in its
+/// subfolders (a "MultiTracks" folder first), as MultiTracks downloads are laid out.
+pub fn find_stems(folder: &Path) -> Result<Vec<String>, String> {
+    let mut files = audio_in(folder);
+    if files.is_empty() {
+        let mut subs: Vec<PathBuf> = std::fs::read_dir(folder)
+            .map_err(|e| format!("Can't open {}: {e}", folder.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .filter(|p| !p.file_name().and_then(|n| n.to_str()).map_or(true, |n| n.starts_with('.') || n.eq_ignore_ascii_case("Ableton Project Info")))
+            .collect();
+        subs.sort_by_key(|p| (!p.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.to_ascii_lowercase().contains("multitrack")), p.clone()));
+        for d in subs {
+            let found = audio_in(&d);
+            if !found.is_empty() {
+                let rel = d.file_name().unwrap().to_string_lossy().to_string();
+                files = found.into_iter().map(|f| format!("{rel}/{f}")).collect();
+                break;
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err(format!("No audio files in {} or its subfolders. Pick the song's folder (the one with the stems or a MultiTracks folder inside).", folder.display()));
+    }
+    files.sort_by_key(|f| (!is_cue(&stem_name(f)), stem_name(f).to_ascii_lowercase()));
+    Ok(files)
+}
+
+/// The song's name as shown in folders: the folder's own name, or its parent's
+/// when the chosen folder is the "MultiTracks" stems folder itself.
+pub fn song_title(folder: &Path) -> String {
+    let own = folder.file_name().and_then(|n| n.to_str()).unwrap_or("Untitled");
+    if own.eq_ignore_ascii_case("multitracks") || own.eq_ignore_ascii_case("stems") {
+        if let Some(p) = folder.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+            return p.to_string();
+        }
+    }
+    own.to_string()
+}
+
+/// "See a Victory-At Midnight-A-77.50bpm" -> ("See a Victory", Some("A"), Some(77.5)).
+pub fn parse_folder_name(title: &str) -> (String, Option<String>, Option<f64>) {
+    let parts: Vec<&str> = title.split('-').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let bpm = bpm_in(title);
+    let is_key = |p: &str| {
+        let p = p.trim();
+        let mut c = p.chars();
+        matches!(c.next(), Some('A'..='G')) && c.as_str().chars().all(|ch| matches!(ch, '#' | 'b' | 'm')) && p.len() <= 4
+    };
+    let key = parts.iter().rev().find(|p| is_key(p)).map(|p| p.to_string());
+    let name = parts.first().map(|p| p.to_string()).filter(|p| bpm_in(p).is_none() && !is_key(p)).unwrap_or_else(|| title.to_string());
+    (name, key, bpm)
 }
 
 impl SongFile {
@@ -100,33 +174,33 @@ impl SongFile {
     /// Reads `rig-song.json` if present, then reconciles it with the audio files actually
     /// in the folder (new files are added, missing ones dropped).
     pub fn scan(folder: &Path, channels: usize) -> Result<SongFile, String> {
-        let mut files: Vec<String> = std::fs::read_dir(folder)
-            .map_err(|e| format!("Can't open {}: {e}", folder.display()))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_file() && is_audio(p))
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
-            .collect();
-        files.sort_by_key(|f| (!is_cue(f), f.to_ascii_lowercase()));
-        if files.is_empty() {
-            return Err(format!("No audio files in {}. Pick the folder that holds the stems.", folder.display()));
-        }
-        let folder_name = folder.file_name().and_then(|n| n.to_str()).unwrap_or("Untitled").to_string();
-        let mut sf = match std::fs::read_to_string(Self::path(folder)) {
-            Ok(text) => serde_json::from_str::<SongFile>(&text).map_err(|e| format!("{FILE_NAME} is damaged: {e}"))?,
-            Err(_) => SongFile {
-                name: folder_name.clone(),
-                bpm: std::iter::once(folder_name.as_str()).chain(files.iter().map(String::as_str)).find_map(bpm_in).unwrap_or(120.0),
+        let files = find_stems(folder)?;
+        let title = song_title(folder);
+        let (name, key, folder_bpm) = parse_folder_name(&title);
+        let existing = std::fs::read_to_string(Self::path(folder)).ok();
+        let mut sf = match existing {
+            Some(text) => serde_json::from_str::<SongFile>(&text).map_err(|e| format!("{FILE_NAME} is damaged: {e}"))?,
+            None => SongFile {
+                name,
+                bpm: folder_bpm.or_else(|| files.iter().find_map(|f| bpm_in(f))).unwrap_or(120.0),
                 beats_per_bar: 4,
                 offset_ms: 0.0,
-                key: String::new(),
-                click: !files.iter().any(|f| f.to_ascii_lowercase().contains("click")),
+                key: key.unwrap_or_default(),
+                click: !files.iter().any(|f| is_click(&stem_name(f))),
                 markers: vec![Marker { name: "Top".into(), bar: 1 }],
                 stems: vec![],
                 arrangement: vec![],
                 markers_from: None,
+                transpose: 0,
+                target_bpm: None,
             },
         };
+        // A MultiTracks download includes an Ableton set with the exact section markers.
+        if sf.markers_from.is_none() {
+            if let Some(info) = crate::als::find(folder).and_then(|p| crate::als::read(&p).ok()) {
+                sf.apply_ableton(&info);
+            }
+        }
         sf.stems.retain(|s| files.contains(&s.file));
         for f in &files {
             if !sf.stems.iter().any(|s| &s.file == f) {
@@ -135,6 +209,45 @@ impl SongFile {
             }
         }
         Ok(sf)
+    }
+
+    /// Takes tempo, meter and locators from an Ableton set.
+    pub fn apply_ableton(&mut self, info: &crate::als::AlsInfo) -> bool {
+        if let Some(b) = info.bpm {
+            self.bpm = b;
+        }
+        if let Some(n) = info.beats_per_bar {
+            self.beats_per_bar = n;
+        }
+        if info.locators.is_empty() {
+            return false;
+        }
+        let bpb = self.beats_per_bar.max(1) as f64;
+        let mut markers: Vec<Marker> = vec![];
+        for (i, (beats, name)) in info.locators.iter().enumerate() {
+            let bar = (beats / bpb).round().max(0.0) as u32 + 1;
+            if markers.last().map_or(false, |m| m.bar >= bar) {
+                continue;
+            }
+            let name = if name.is_empty() { format!("Section {}", i + 1) } else { name.clone() };
+            markers.push(Marker { name, bar });
+        }
+        crate::guide::unique_names(&mut markers);
+        self.markers = markers;
+        self.offset_ms = 0.0;
+        self.arrangement = vec![];
+        self.markers_from = Some("ableton".into());
+        true
+    }
+
+    /// Tempo the song plays at.
+    pub fn play_bpm(&self) -> f64 {
+        self.target_bpm.filter(|b| *b > 0.0).unwrap_or(self.bpm)
+    }
+
+    /// Output length / recorded length (1.0 = no tempo change).
+    pub fn stretch(&self) -> f64 {
+        self.bpm / self.play_bpm()
     }
 
     pub fn save(&self, folder: &Path) -> Result<(), String> {
@@ -147,9 +260,10 @@ impl SongFile {
         if !(self.bpm > 0.0) {
             return Err("Tempo must be above 0 BPM".into());
         }
+        let bpm = self.play_bpm();
         let bpb = self.beats_per_bar.max(1);
-        let offset = (self.offset_ms.max(0.0) / 1000.0 * sample_rate as f64).round() as u64;
-        let bar = sample_rate as f64 * 60.0 / self.bpm * bpb as f64;
+        let offset = (self.offset_ms.max(0.0) * self.stretch() / 1000.0 * sample_rate as f64).round() as u64;
+        let bar = sample_rate as f64 * 60.0 / bpm * bpb as f64;
         let mut marks: Vec<(String, u64)> = self
             .markers
             .iter()
@@ -169,7 +283,7 @@ impl SongFile {
         let song = Song {
             name: self.name.clone(),
             sample_rate,
-            bpm: self.bpm,
+            bpm,
             beats_per_bar: bpb,
             offset,
             length,
@@ -201,6 +315,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reads_multitracks_folder_names() {
+        assert_eq!(parse_folder_name("See a Victory-At Midnight-A-77.50bpm"), ("See a Victory".into(), Some("A".into()), Some(77.5)));
+        assert_eq!(parse_folder_name("Way Maker-Bb-68bpm"), ("Way Maker".into(), Some("Bb".into()), Some(68.0)));
+        assert_eq!(parse_folder_name("Goodness of God"), ("Goodness of God".into(), None, None));
+    }
+
+    #[test]
+    fn finds_stems_in_a_multitracks_subfolder_and_reads_the_ableton_set() {
+        let dir = std::env::temp_dir().join(format!("rig-mt-{}", std::process::id())).join("See a Victory-At Midnight-A-77.50bpm");
+        std::fs::create_dir_all(dir.join("MultiTracks")).unwrap();
+        std::fs::create_dir_all(dir.join("Ableton Project Info")).unwrap();
+        for f in ["Drums.wav", "Click.wav", "Guide.wav", "._Drums.wav"] {
+            std::fs::write(dir.join("MultiTracks").join(f), b"x").unwrap();
+        }
+        std::fs::write(dir.join("Album.jpg"), b"x").unwrap();
+        std::fs::write(dir.join("MultiTrack.als"), r#"<Ableton><LiveSet><Locators><Locators>
+            <Locator Id="0"><Time Value="0" /><Name Value="Intro" /></Locator>
+            <Locator Id="1"><Time Value="16" /><Name Value="Verse" /></Locator>
+            <Locator Id="2"><Time Value="48" /><Name Value="Chorus" /></Locator>
+            <Locator Id="3"><Time Value="80" /><Name Value="Chorus" /></Locator>
+            </Locators></Locators><Tempo><LomId Value="0" /><Manual Value="77.5" /></Tempo><Numerator Value="4" /></LiveSet></Ableton>"#).unwrap();
+        let sf = SongFile::scan(&dir, 10).unwrap();
+        assert_eq!(sf.name, "See a Victory");
+        assert_eq!(sf.key, "A");
+        assert_eq!(sf.bpm, 77.5);
+        let files: Vec<&str> = sf.stems.iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(files, ["MultiTracks/Click.wav", "MultiTracks/Guide.wav", "MultiTracks/Drums.wav"]);
+        assert_eq!(sf.markers_from.as_deref(), Some("ableton"));
+        let m: Vec<(&str, u32)> = sf.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
+        assert_eq!(m, [("Intro", 1), ("Verse", 5), ("Chorus 1", 13), ("Chorus 2", 21)]);
+        // picking the MultiTracks folder itself works too
+        let sf2 = SongFile::scan(&dir.join("MultiTracks"), 10).unwrap();
+        assert_eq!(sf2.name, "See a Victory");
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn tempo_change_scales_section_positions() {
+        let mut sf = SongFile { name: "S".into(), bpm: 60.0, beats_per_bar: 4, offset_ms: 1000.0, markers: vec![Marker { name: "A".into(), bar: 1 }, Marker { name: "B".into(), bar: 3 }], ..Default::default() };
+        sf.target_bpm = Some(120.0); // twice as fast: half the length
+        let (song, _) = sf.build(1000, 9000).unwrap();
+        assert_eq!(song.bpm, 120.0);
+        assert_eq!(song.sections[1].start, 500, "downbeat moves from 1.0 s to 0.5 s");
+        assert_eq!(song.sections[2].start, 500 + 4000);
+    }
+
+    #[test]
     fn finds_bpm_in_names() {
         assert_eq!(bpm_in("Way Maker 68 BPM"), Some(68.0));
         assert_eq!(bpm_in("click_72bpm.wav"), Some(72.0));
@@ -225,6 +386,8 @@ mod tests {
                 Block { section: "Missing".into(), muted: vec![] },
             ],
             markers_from: None,
+                transpose: 0,
+                target_bpm: None,
         };
         let (song, arr) = sf.build(1000, 20_000).unwrap();
         let names: Vec<&str> = song.sections.iter().map(|s| s.name.as_str()).collect();
