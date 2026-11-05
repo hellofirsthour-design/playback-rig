@@ -15,28 +15,15 @@ jobs:
       - run: cargo test --workspace
       - run: cargo run --release -p rig-render -- --arrangement "Intro,Chorus,Verse 1,Chorus,Bridge,Outro" --mute "Verse 1=Drums" --channels 10 --out render.wav
 
-  mac-app:
-    name: Mac app tests
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: apps/desktop/src-tauri
-      - name: App tests
-        working-directory: apps/desktop/src-tauri
-        run: cargo test
-
   # Publishes a GitHub Release (and the update the app installs itself) whenever
   # the version in tauri.conf.json goes up. Same version = nothing is published.
-  # Needs only the quick Linux tests, so a release waits for one Mac machine, not
-  # two in a row. It runs the app tests itself before building.
+  # The only Mac job: it runs the app tests on every push and, when the version is
+  # new, builds and publishes. One Mac machine per push, from the macos-14 pool
+  # (macos-latest runners were scarce enough that jobs were cancelled in the queue).
   release:
-    name: Release
+    name: Mac app tests and release
     needs: [engine]
-    if: github.event_name != 'pull_request'
-    runs-on: macos-latest
+    runs-on: macos-14
     permissions:
       contents: write
     steps:
@@ -55,19 +42,16 @@ jobs:
             echo "new=true" >> "$GITHUB_OUTPUT"
           fi
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.ver.outputs.new == 'true'
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-        if: steps.ver.outputs.new == 'true'
         with:
           workspaces: apps/desktop/src-tauri
       - name: App tests
-        if: steps.ver.outputs.new == 'true'
         working-directory: apps/desktop/src-tauri
         run: cargo test
       - name: Build, sign and publish
-        if: steps.ver.outputs.new == 'true'
+        if: steps.ver.outputs.new == 'true' && github.event_name != 'pull_request'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
