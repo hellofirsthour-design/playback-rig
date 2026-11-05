@@ -464,11 +464,20 @@ fn view(state: &AppState) -> AppView {
         let map = state.core.map.lock().unwrap();
         (map.bindings.clone(), map.is_learning())
     };
+    // Take each lock on its own line: a guard inside the struct literal below would
+    // live until the end of the whole expression, and locking the same mutex twice
+    // there deadlocks (that froze 0.4.0 on launch).
+    let (song, song_key) = {
+        let g = state.song.lock().unwrap();
+        (g.as_ref().map(SongView::from), g.as_ref().and_then(|l| song_key_pc(&l.file)).map(|pc| pads::NAMES[pc as usize].to_string()))
+    };
+    let midi = state.midi.lock().unwrap().as_ref().map(|m| m.name.clone());
+    let pad_on = *state.pad_on.lock().unwrap();
     AppView {
         outputs: audio::list_outputs(),
         output,
         midi_inputs: midi_io::inputs(),
-        midi: state.midi.lock().unwrap().as_ref().map(|m| m.name.clone()),
+        midi,
         setlist: s
             .setlist
             .iter()
@@ -483,7 +492,7 @@ fn view(state: &AppState) -> AppView {
             })
             .collect(),
         current: s.current,
-        song: state.song.lock().unwrap().as_ref().map(SongView::from),
+        song,
         quantize: s.quantize,
         count_in: s.count_in,
         click_gain: s.click_gain,
@@ -493,10 +502,10 @@ fn view(state: &AppState) -> AppView {
         pads: PadsView {
             folder: s.pads_folder.as_ref().map(|p| p.display().to_string()),
             keys: s.pads_folder.as_ref().map(|f| pads::scan(f).iter().enumerate().filter(|(_, p)| p.is_some()).map(|(i, _)| pads::NAMES[i].to_string()).collect()).unwrap_or_default(),
-            on: *state.pad_on.lock().unwrap(),
+            on: pad_on,
             level: s.pad_level,
             route: s.pad_route.unwrap_or(Route::Pair(0)),
-            song_key: state.song.lock().unwrap().as_ref().and_then(|l| song_key_pc(&l.file)).map(|pc| pads::NAMES[pc as usize].to_string()),
+            song_key,
         },
     }
 }
@@ -1182,4 +1191,62 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playback Rig");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> AppState {
+        let dir = std::env::temp_dir().join(format!("rig-state-{}", std::process::id()));
+        AppState {
+            core: Arc::new(Core {
+                output: Mutex::new(None),
+                status: Arc::new(Mutex::new(None)),
+                map: Mutex::new(MidiMap::default()),
+                config_dir: dir.clone(),
+                data_dir: dir,
+                start: Instant::now(),
+            }),
+            song: Mutex::new(None),
+            settings: Mutex::new(Settings::default()),
+            midi: Mutex::new(None),
+            pad_on: Mutex::new(false),
+            pad_key: Mutex::new(None),
+        }
+    }
+
+    /// Runs `f` on another thread and fails if it doesn't finish (a deadlock).
+    fn finishes<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(10)).expect("timed out: deadlock")
+    }
+
+    #[test]
+    fn app_state_never_deadlocks() {
+        let st = Arc::new(state());
+        // with and without a song, pad on and off
+        for on in [false, true] {
+            *st.pad_on.lock().unwrap() = on;
+            let s2 = st.clone();
+            let v = finishes(move || view(&s2));
+            assert!(v.song.is_none());
+            let s3 = st.clone();
+            finishes(move || pad_update(&s3).ok());
+        }
+        // with a song loaded
+        let folder = std::env::temp_dir().join(format!("rig-state-song-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut f = SongFile { name: "S".into(), bpm: 120.0, beats_per_bar: 4, key: "A".into(), markers: vec![songfile::Marker { name: "Top".into(), bar: 1 }], ..Default::default() };
+        f.stems = vec![];
+        let (song, arr) = f.build(48_000, 48_000 * 10).unwrap();
+        *st.song.lock().unwrap() = Some(Loaded { folder, file: f, song, arr, stems: vec![], sample_rate: 48_000, length: 48_000 * 10, peaks: vec![] });
+        let s4 = st.clone();
+        let v = finishes(move || view(&s4));
+        assert_eq!(v.pads.song_key.as_deref(), Some("A"));
+        assert!(v.song.is_some());
+    }
 }
