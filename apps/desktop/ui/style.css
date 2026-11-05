@@ -339,3 +339,13 @@ body.live-mode .bar .lcd { display: none }
 .conn { position: fixed; left: 0; right: 0; top: var(--bar-b, 64px); z-index: 60; background: #5a1717; color: #ffd9d9; border-bottom: 1px solid #a33; padding: 8px 16px; font-weight: 700; font-size: 14px }
 .mixhead { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 12px; color: var(--muted) }
 .mixhead .btn { padding: 4px 10px; font-size: 12px }
+
+.typearr { flex: 1 1 520px; min-width: 260px }
+.typearr input { font: 13px var(--f-ui); padding: 7px 11px }
+.proposal { margin: 6px 0 4px; padding: 10px 12px; background: var(--raised); border: 1px solid var(--cue); border-radius: 10px; display: flex; flex-direction: column; gap: 8px }
+.proposal .pmsg { font-weight: 700 }
+.proposal .pchips { display: flex; flex-wrap: wrap; gap: 5px }
+.proposal .pchips span { padding: 3px 8px; border-radius: 6px; font: 700 12px var(--f-round); text-transform: uppercase; background: var(--c); color: #0b0b0c }
+.proposal .pchips span.new { outline: 2px solid var(--cue); outline-offset: 1px }
+.proposal .prow2 { display: flex; gap: 8px; align-items: center }
+.proposal.busy { border-color: var(--line-2); color: var(--muted) }

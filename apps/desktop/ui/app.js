@@ -447,21 +447,57 @@
     }
     return { names: out, bad };
   }
-  const arrText = () => blocks.map(b => b.section).join(', ');
-  function renderTypeArr() { const i = $('#arrText'); if (i && document.activeElement !== i) i.value = V && V.song ? arrText() : ''; }
-  function applyTyped() {
+  function renderTypeArr() { /* the box stays empty: you say what to change */ }
+  // Plain words go to Claude (with a preview to apply); a plain list is applied right away, offline.
+  async function applyTyped() {
     if (!V.song) return;
-    const { names, bad } = parseArrangement($('#arrText').value, V.song.sections.map(s => s.name));
-    if (bad.length) { toast(`Didn't recognise: ${bad.join(', ')}. Sections here: ${V.song.sections.map(s => s.name).join(', ')}.`, 6000); return; }
-    if (!names.length) { toast('Type at least one section.'); return; }
-    // Keep each section's per-block edits (muted tracks, trims) in order of use.
-    const pool = blocks.map(b => ({ ...b, muted: [...b.muted], trims: copyTrims(b) }));
-    const nb = names.map(n => { const k = pool.findIndex(b => b.section === n); return k >= 0 ? pool.splice(k, 1)[0] : { uid: uidSeq++, section: n, muted: [], trims: [] }; });
-    $('#arrText').blur();
-    commit(nb);
+    const text = $('#arrText').value.trim(); if (!text) return;
+    const looksLikeList = /,|→|->/.test(text) && !/\b(double|repeat|remove|cut|drop|add|after|before|instead|then go|go straight|move|swap|take out|skip)\b/i.test(text);
+    if (looksLikeList) {
+      const { names, bad } = parseArrangement(text, V.song.sections.map(s => s.name));
+      if (!bad.length && names.length) {
+        // Keep each section's per-block edits (muted tracks, trims, notes) in order of use.
+        const pool = blocks.map(b => ({ ...b, muted: [...b.muted], trims: copyTrims(b) }));
+        const nb = names.map(n => { const k = pool.findIndex(b => b.section === n); return k >= 0 ? pool.splice(k, 1)[0] : { uid: uidSeq++, section: n, muted: [], trims: [], note: '' }; });
+        $('#arrText').value = ''; $('#arrText').blur();
+        commit(nb); return;
+      }
+    }
+    const box = $('#proposal');
+    box.hidden = false; box.className = 'proposal busy'; box.textContent = 'Working out the new arrangement…';
+    $('#arrApply').disabled = true;
+    try {
+      const p = await invoke('ask_arrangement', { request: text, blocks: blocks.map(b => ({ section: b.section, note: b.note || '', muted: [...b.muted] })) });
+      showProposal(p);
+    } catch (e) { box.hidden = true; err(e); }
+    finally { $('#arrApply').disabled = false; }
+  }
+  function showProposal(p) {
+    const box = $('#proposal'); box.className = 'proposal'; box.innerHTML = ''; box.hidden = false;
+    box.append(el('div', 'pmsg', p.message || 'Here is the new arrangement.'));
+    const chips = el('div', 'pchips');
+    p.blocks.forEach(b => { const c = el('span', b.from == null ? 'new' : null, b.section); c.style.setProperty('--c', secColor(b.section)); chips.append(c); });
+    const row = el('div', 'prow2');
+    const ok = el('button', 'btn accent', 'Apply'), no = el('button', 'btn', 'Cancel');
+    no.onclick = () => { box.hidden = true; };
+    ok.onclick = () => {
+      // Each block keeps the edits of the block it came from; a block's first copy keeps its identity
+      // (so a live change carries on from the block that's playing).
+      const used = new Set();
+      const nb = p.blocks.map(b => {
+        const src = b.from != null ? blocks[b.from] : null;
+        if (!src) return { uid: uidSeq++, section: b.section, muted: [], trims: [], note: '' };
+        const first = !used.has(b.from); used.add(b.from);
+        return { ...src, uid: first ? src.uid : uidSeq++, section: b.section, muted: [...src.muted], trims: copyTrims(src), note: first ? (src.note || '') : '' };
+      });
+      box.hidden = true; $('#arrText').value = '';
+      commit(nb);
+    };
+    row.append(ok, no, el('span', 'hint', 'Cmd+Z undoes it after.'));
+    box.append(chips, row);
   }
   $('#arrApply').onclick = applyTyped;
-  $('#arrText').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); applyTyped(); } else if (e.key === 'Escape') { e.target.value = arrText(); e.target.blur(); } e.stopPropagation(); });
+  $('#arrText').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); applyTyped(); } else if (e.key === 'Escape') { e.target.value = ''; $('#proposal').hidden = true; e.target.blur(); } e.stopPropagation(); });
 
   /* ---------- fades: ending and the way into the next song ---------- */
   function setTransition(tr, ending) {
@@ -1216,6 +1252,8 @@
     V.outputs.forEach(o => os.append(new Option(`${o.name} (${o.channels} outputs)${o.is_default ? ' · default' : ''}`, o.name)));
     if (V.output) os.value = V.output.name;
     routeOptions($('#clickRoute'), V.click_route);
+    $('#apiKeyState').textContent = V.has_api_key ? 'A key is saved on this computer. Plain-words changes are on.' : 'No key saved: plain-words changes are off; lists still work.';
+    $('#apiKeyDel').hidden = !V.has_api_key;
     // Outputs: every bus, one master setting (per interface).
     const br = $('#busRoutes'); br.innerHTML = '';
     (V.all_buses || []).forEach(b => {
@@ -1409,6 +1447,8 @@
     catch (e) { err(e); updating = false; hideTask(); renderUpdate(); }
   };
   $('#checkUpd').onclick = () => checkUpdate(true);
+  $('#apiKeySave').onclick = () => { const k = $('#apiKey').value.trim(); if (!k) { toast('Paste your key first.'); return; } invoke('set_api_key', { key: k }).then(v => { $('#apiKey').value = ''; refresh(v); toast('Key saved.'); }).catch(err); };
+  $('#apiKeyDel').onclick = () => invoke('set_api_key', { key: '' }).then(v => { refresh(v); toast('Key removed.'); }).catch(err);
   T.event.listen('update-progress', e => showTask('Downloading update', e.payload));
   invoke('app_version').then(v => { $('#verText').textContent = `Playback Rig ${v}. Updates install only when playback is stopped.`; }).catch(() => {});
   setTimeout(() => checkUpdate(false), 4000);

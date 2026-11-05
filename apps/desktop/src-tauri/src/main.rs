@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod als;
+mod assistant;
 mod audio;
 mod clicksong;
 mod decode;
@@ -1032,6 +1033,8 @@ struct AppView {
     song_mix: bool,
     /// Every bus and where it goes on the interface in use (Setup → Outputs).
     all_buses: Vec<BusOut>,
+    /// An Anthropic API key is saved (the arrangement assistant can be used).
+    has_api_key: bool,
 }
 
 #[derive(Serialize)]
@@ -1153,6 +1156,7 @@ fn view(state: &AppState) -> AppView {
         free_click,
         song_mix: !bus_mix.is_empty(),
         all_buses,
+        has_api_key: read_key(&state.core).is_some(),
     }
 }
 
@@ -1628,6 +1632,51 @@ fn update_song(state: State<'_, AppState>, meta: SongMeta) -> Result<AppView, St
         m.sort_by_key(|x| x.bar);
         f.markers = m;
     })
+}
+
+/// Where the Anthropic API key for the arrangement assistant is kept: its own file in
+/// the app's settings folder, readable only by you (never in settings.json or a song).
+fn key_path(core: &Core) -> PathBuf {
+    core.config_dir.join("anthropic-key")
+}
+
+fn read_key(core: &Core) -> Option<String> {
+    std::fs::read_to_string(key_path(core)).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+}
+
+/// Saves (or, with an empty key, removes) the API key.
+#[tauri::command]
+fn set_api_key(state: State<'_, AppState>, key: String) -> Result<AppView, String> {
+    let p = key_path(&state.core);
+    let key = key.trim();
+    if key.is_empty() {
+        let _ = std::fs::remove_file(&p);
+    } else {
+        std::fs::write(&p, key).map_err(|e| format!("Couldn't save the key: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    Ok(view(&state))
+}
+
+/// Plain-words arrangement change: returns a proposal; nothing changes until the UI
+/// applies it with set_arrangement.
+#[tauri::command]
+async fn ask_arrangement(state: State<'_, AppState>, request: String, blocks: Vec<assistant::BlockIn>) -> Result<assistant::Proposal, String> {
+    let key = read_key(&state.core).ok_or("Add your Anthropic API key in Setup → Arrangement assistant to type changes in plain words. A plain list (I, V1, C1 x2, B) works without it.")?;
+    let sections: Vec<(String, f64)> = {
+        let g = state.song.lock().unwrap();
+        let l = g.as_ref().ok_or("Load a song first.")?;
+        let bar = l.song.frames_per_bar();
+        l.song.sections.iter().filter(|s| s.len() as f64 > bar * 0.05).map(|s| (s.name.clone(), s.len() as f64 / bar)).collect()
+    };
+    if request.trim().is_empty() {
+        return Err("Type what you want to change.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || assistant::ask(&key, &sections, &blocks, &request)).await.map_err(|e| e.to_string())?
 }
 
 /// The song's transition into the next one, and its ending. The transition can change
@@ -2238,6 +2287,8 @@ fn main() {
             update_song,
             set_arrangement,
             set_transition,
+            set_api_key,
+            ask_arrangement,
             pad_key,
             free_click,
             song_mix,
