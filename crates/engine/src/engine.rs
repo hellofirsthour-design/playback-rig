@@ -23,6 +23,9 @@ pub enum Command {
     Stop,
     /// While stopped: move the playhead to the start of a block.
     Locate(usize),
+    /// Move the playhead to a frame inside a block (scrubbing). While playing it
+    /// jumps there immediately, with the usual short fades.
+    Seek(usize, u64),
     /// Queue the next block. Pressing again while a jump is queued moves the target one further.
     Next,
     /// Play the current block again after it ends.
@@ -62,6 +65,8 @@ pub struct Snapshot {
 struct Pending {
     target: usize,
     at: u64,
+    /// Frame inside the target block to start from (0 = its start).
+    from: u64,
 }
 
 #[derive(Default)]
@@ -214,6 +219,18 @@ impl Engine {
                     self.finished = false;
                 }
             }
+            Command::Seek(i, frame) => {
+                if i < self.arr.items.len() {
+                    let frame = frame.min(self.section(i).len().saturating_sub(1));
+                    if self.playing && self.count_left == 0 {
+                        self.pending = Some(Pending { target: i, at: self.abs + self.fade, from: frame });
+                    } else if !self.playing {
+                        self.item = i;
+                        self.fpos = frame;
+                        self.finished = false;
+                    }
+                }
+            }
             Command::Next => {
                 let base = self.pending.as_ref().map(|p| p.target).unwrap_or(self.item);
                 self.queue(base + 1, self.quant);
@@ -297,7 +314,7 @@ impl Engine {
             return;
         }
         let at = self.boundary(q);
-        self.pending = Some(Pending { target, at });
+        self.pending = Some(Pending { target, at, from: 0 });
     }
 
     fn section(&self, item: usize) -> &Section {
@@ -455,11 +472,12 @@ impl Engine {
             }
 
             // Jumps and block changes.
-            let due = self.pending.as_ref().filter(|p| self.abs >= p.at).map(|p| p.target);
-            if let Some(t) = due {
-                let cut = !(self.fpos == self.section(self.item).len() && self.contiguous(self.item, t));
+            let due = self.pending.as_ref().filter(|p| self.abs >= p.at).map(|p| (p.target, p.from));
+            if let Some((t, from)) = due {
+                let cut = from > 0 || !(self.fpos == self.section(self.item).len() && self.contiguous(self.item, t));
                 self.pending = None;
                 self.enter(t, cut);
+                self.fpos = from.min(self.section(t).len().saturating_sub(1));
             }
             if self.fpos >= self.section(self.item).len() {
                 match self.natural_next() {
@@ -748,6 +766,19 @@ mod tests {
         e.handle(Command::Stop);
         assert_eq!(e.snapshot().item, 0);
         assert_eq!(e.snapshot().frame_in_section, 0);
+    }
+
+    #[test]
+    fn seek_moves_the_playhead_inside_a_block() {
+        let mut e = rig(None);
+        e.handle(Command::Seek(1, 2500)); // stopped: B at 2500
+        assert_eq!((e.snapshot().item, e.snapshot().frame_in_section), (1, 2500));
+        e.handle(Command::Play);
+        let out = run(&mut e, 100);
+        assert_eq!(out[0][50], 8000.0 + 2500.0 + 50.0, "plays from the seek point");
+        e.handle(Command::Seek(2, 4000)); // playing: C at 4000, after a 5 ms fade
+        let out = run(&mut e, 100);
+        assert_eq!(out[0][50], 16000.0 + 4000.0 + 45.0);
     }
 
     #[test]

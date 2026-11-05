@@ -321,8 +321,11 @@ pub fn analyze(
             if s1 <= s0 || c.end - c.start > 6.0 {
                 continue;
             }
-            let clip = crate::decode::resample(&[mono[s0..s1].to_vec()], sr, 16_000)?.pop().unwrap_or_default();
-            let text = t.transcribe(&clip)?;
+            // One unreadable cue shouldn't stop the whole song.
+            let Ok(clip) = crate::decode::resample(&[mono[s0..s1].to_vec()], sr, 16_000).map(|mut v| v.pop().unwrap_or_default()) else {
+                continue;
+            };
+            let Ok(text) = t.transcribe(&clip) else { continue };
             if let Some(name) = label_for(&text) {
                 named.push((c.start, name));
             }

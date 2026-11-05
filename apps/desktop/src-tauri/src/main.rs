@@ -558,6 +558,7 @@ enum UiCmd {
     Vamp,
     CancelJump,
     Goto { block: usize },
+    Seek { block: usize, frame: u64 },
     Quantize { q: Quantize },
     CountIn { on: bool },
     Click { on: bool },
@@ -603,6 +604,9 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
             }
             UiCmd::Goto { block } => {
                 core.send(Command::Goto(block));
+            }
+            UiCmd::Seek { block, frame } => {
+                core.send(Command::Seek(block, frame));
             }
             UiCmd::Quantize { q } => {
                 s.quantize = q;

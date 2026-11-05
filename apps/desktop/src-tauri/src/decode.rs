@@ -124,9 +124,12 @@ pub fn resample(planar: &[Vec<f32>], from: u32, to: u32) -> Result<Vec<Vec<f32>>
         push(o, &mut out);
         pos += k;
     }
-    let tail: Vec<&[f32]> = planar.iter().map(|c| &c[pos..]).collect();
-    let o = r.process_partial(Some(tail.as_slice()), None).map_err(|e| e.to_string())?;
-    push(o, &mut out);
+    // rubato rejects an empty partial chunk, so only send a tail when there is one.
+    if pos < n {
+        let tail: Vec<&[f32]> = planar.iter().map(|c| &c[pos..]).collect();
+        let o = r.process_partial(Some(tail.as_slice()), None).map_err(|e| e.to_string())?;
+        push(o, &mut out);
+    }
     while out[0].len() < want + delay {
         let o = r.process_partial(None::<&[&[f32]]>, None).map_err(|e| e.to_string())?;
         if o[0].is_empty() {
@@ -156,6 +159,16 @@ mod tests {
         let mid = &out[0][4800..43200];
         let rising = mid.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
         assert!((rising as i64 - 353).abs() <= 2, "got {rising}"); // 0.8 s * 441
+    }
+
+    #[test]
+    fn resample_handles_lengths_that_end_on_a_chunk_boundary() {
+        // 44.1 kHz -> 16 kHz uses 1323-frame chunks; these lengths used to fail.
+        for n in [1323usize, 1323 * 7, 1323 * 40, 1, 1322, 1324] {
+            let sig: Vec<f32> = (0..n).map(|i| (i as f32 * 0.01).sin()).collect();
+            let out = resample(&[sig], 44_100, 16_000).unwrap_or_else(|e| panic!("length {n}: {e}"));
+            assert_eq!(out[0].len(), (n as f64 * 16_000.0 / 44_100.0).round() as usize);
+        }
     }
 
     #[test]

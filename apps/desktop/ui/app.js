@@ -386,12 +386,17 @@
       const jx = X(now + snap.frames_to_jump / s.sample_rate);
       [g, h].forEach((c, k) => { c.strokeStyle = '#ffd23f'; c.setLineDash([4, 3]); c.lineWidth = 1.5; c.beginPath(); c.moveTo(jx, k ? 0 : RULER_H); c.lineTo(jx, k ? nStems * LANE_H : 50); c.stroke(); c.setLineDash([]); });
     }
+    if (scrub != null) {
+      const sx = X(scrub);
+      g.fillStyle = h.fillStyle = 'rgba(255,255,255,.55)';
+      g.fillRect(sx - 1, 0, 2, 50); h.fillRect(sx - 1, 0, 2, nStems * LANE_H);
+    }
     const px = X(now);
     g.fillStyle = h.fillStyle = p ? '#ff6a1a' : '#ececec';
     g.fillRect(px - 1, 0, 2, 50); h.fillRect(px - 1, 0, 2, nStems * LANE_H);
     g.beginPath(); g.moveTo(px - 6, 0); g.lineTo(px + 6, 0); g.lineTo(px, 8); g.fill();
   }
-  function loop() { if (V && (dirty || playing() || (snap && snap.pending != null))) { draw(); dirty = false; } requestAnimationFrame(loop); }
+  function loop() { if (V && (dirty || playing() || scrub != null || (snap && snap.pending != null))) { draw(); dirty = false; } requestAnimationFrame(loop); }
   requestAnimationFrame(loop);
   window.addEventListener('resize', () => { dirty = true; });
 
@@ -400,8 +405,61 @@
     const L = layout(); const o = L.find(o => t >= o.start && t < o.start + o.secs);
     return { o, y: e.clientY - r.top };
   }
-  cvTop.addEventListener('click', e => { const { o } = hit(e, cvTop); if (o) send({ type: 'Goto', block: o.i }); });
+  // Ruler (bar numbers): click or drag to move the playhead, snapped to the beat.
+  // Section strip below it: click to jump to that section (using the Jump timing).
+  let scrub = null; // arrangement time being dragged to
+  function rulerTime(e) {
+    const r = cvTop.getBoundingClientRect(), L = layout();
+    let t = zoom.scroll + (e.clientX - r.left) / zoom.pps;
+    const beat = 60 / V.song.bpm;
+    const o = L.find(o => t >= o.start && t < o.start + o.secs) || L[L.length - 1];
+    if (!o) return null;
+    // snap to the beat grid of the block's own audio
+    const src = o.sec.start_sec + (t - o.start), off = V.song.offset_ms / 1000;
+    const snapped = off + Math.round((src - off) / beat) * beat;
+    t = Math.max(o.start, Math.min(o.start + o.secs - 0.01, o.start + (snapped - o.sec.start_sec)));
+    return Math.max(0, t);
+  }
+  function seekTo(t) {
+    const L = layout(); const o = L.find(o => t >= o.start && t < o.start + o.secs); if (!o) return;
+    send({ type: 'Seek', block: o.i, frame: Math.max(0, Math.round((t - o.start) * V.song.sample_rate)) });
+  }
+  cvTop.addEventListener('pointerdown', e => {
+    if (!V || !V.song || e.button !== 0) return;
+    const y = e.clientY - cvTop.getBoundingClientRect().top;
+    if (y > RULER_H) { const { o } = hit(e, cvTop); if (o) send({ type: 'Goto', block: o.i }); return; }
+    cvTop.setPointerCapture(e.pointerId);
+    scrub = rulerTime(e); zoom.follow = false; dirty = true;
+    if (!playing()) seekTo(scrub);
+  });
+  cvTop.addEventListener('pointermove', e => {
+    const y = e.clientY - cvTop.getBoundingClientRect().top;
+    cvTop.style.cursor = scrub != null ? 'ew-resize' : y <= RULER_H ? 'ew-resize' : 'pointer';
+    if (scrub == null) return;
+    scrub = rulerTime(e); dirty = true;
+    if (!playing()) seekTo(scrub);
+  });
+  const endScrub = () => { if (scrub == null) return; const t = scrub; scrub = null; seekTo(t); zoom.follow = true; renderStatus(); dirty = true; };
+  cvTop.addEventListener('pointerup', endScrub);
+  cvTop.addEventListener('pointercancel', () => { scrub = null; dirty = true; });
+  // Grab the playhead line itself anywhere in the lanes and drag it.
+  cvLanes.addEventListener('pointerdown', e => {
+    if (!V || !V.song || e.button !== 0) return;
+    const r = cvLanes.getBoundingClientRect();
+    if (Math.abs(e.clientX - r.left - X(playTime(layout()))) > 6) return;
+    e.preventDefault(); cvLanes.setPointerCapture(e.pointerId);
+    scrub = rulerTime(e); zoom.follow = false; dirty = true; lanesScrub = true;
+  });
+  let lanesScrub = false;
+  cvLanes.addEventListener('pointermove', e => {
+    const r = cvLanes.getBoundingClientRect();
+    if (lanesScrub) { scrub = rulerTime(e); dirty = true; if (!playing()) seekTo(scrub); return; }
+    cvLanes.style.cursor = V && V.song && Math.abs(e.clientX - r.left - X(playTime(layout()))) <= 6 ? 'ew-resize' : 'default';
+  });
+  cvLanes.addEventListener('pointerup', () => { if (lanesScrub) { lanesScrub = false; endScrub(); suppressClick = true; } });
+  let suppressClick = false;
   cvLanes.addEventListener('click', e => {
+    if (suppressClick) { suppressClick = false; return; }
     const { o, y } = hit(e, cvLanes); if (!o) return;
     sel = { block: o.i, stem: Math.floor(y / LANE_H) }; dirty = true;
   });
