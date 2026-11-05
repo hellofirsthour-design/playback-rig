@@ -10,6 +10,21 @@ pub fn inputs() -> Vec<String> {
     m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect()
 }
 
+/// Lists MIDI inputs again and again without making a new MIDI client each time.
+pub struct Watcher(Option<MidiInput>);
+
+impl Watcher {
+    pub fn new() -> Self {
+        Watcher(MidiInput::new("Playback Rig watch").ok())
+    }
+    pub fn names(&self) -> Vec<String> {
+        match &self.0 {
+            Some(m) => m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect(),
+            None => inputs(),
+        }
+    }
+}
+
 /// Closes the port when dropped.
 pub struct MidiPort {
     pub name: String,

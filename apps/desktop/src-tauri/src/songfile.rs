@@ -33,6 +33,16 @@ pub struct Block {
     /// Tracks that play only part of this block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trims: Vec<TrimSpec>,
+    /// A note for whoever runs it ("WL repeats 2x", "drums out"), shown on the Live page.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// A bus's level in one song's own mix.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct BusLevel {
+    pub gain: f32,
+    pub muted: bool,
 }
 
 /// A track trimmed inside a block, in beats from the block's start.
@@ -132,6 +142,14 @@ pub struct SongFile {
     /// Empty = one steady tempo (`bpm` from `offset_ms`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub beat_times: Vec<f64>,
+    /// This song's own bus levels (bus id -> level and mute). Buses not listed use the
+    /// default mix in Settings.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bus_mix: std::collections::BTreeMap<String, BusLevel>,
+    /// Track outputs chosen on a particular audio interface: interface name -> track
+    /// name -> output. Tracks not listed use their `route`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub device_routes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Route>>,
 }
 
 /// Raise to make songs set up automatically by an older version set up again.
@@ -327,6 +345,8 @@ impl SongFile {
                 transition: Transition::default(),
                 ending: None,
                 beat_times: vec![],
+                bus_mix: Default::default(),
+                device_routes: Default::default(),
             },
         };
         // Songs set up automatically by an older version are set up again: the tempo
@@ -508,6 +528,22 @@ impl SongFile {
     pub fn save(&self, folder: &Path) -> Result<(), String> {
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(Self::path(folder), text).map_err(|e| format!("Couldn't save {FILE_NAME}: {e}"))
+    }
+
+    /// Each arrangement block's note, in the same order as the blocks `build` makes.
+    pub fn block_notes(&self, song: &Song) -> Vec<String> {
+        let lead = song.sections.first().map(|s| s.name.as_str()).filter(|n| *n == "Count-in" || *n == "Top");
+        let notes: Vec<String> = self
+            .arrangement
+            .iter()
+            .filter(|b| song.section_index(&b.section).is_some() || (lead.is_some() && (b.section == "Top" || b.section == "Count-in")))
+            .map(|b| b.note.clone())
+            .collect();
+        if notes.is_empty() {
+            vec![String::new(); song.sections.len()]
+        } else {
+            notes
+        }
     }
 
     /// Turns bar-based markers and named blocks into engine data.
@@ -704,9 +740,9 @@ mod tests {
             markers: vec![Marker { name: "Verse".into(), bar: 1 }, Marker { name: "Chorus".into(), bar: 3 }],
             stems: vec![StemFile { file: "Drums.wav".into(), name: "Drums".into(), route: Route::Pair(0), gain: 1.0, muted: false }],
             arrangement: vec![
-                Block { section: "Chorus".into(), muted: vec![], trims: vec![] },
-                Block { section: "Verse".into(), muted: vec!["Drums".into()], trims: vec![] },
-                Block { section: "Missing".into(), muted: vec![], trims: vec![] },
+                Block { section: "Chorus".into(), muted: vec![], trims: vec![], note: String::new() },
+                Block { section: "Verse".into(), muted: vec!["Drums".into()], trims: vec![], note: String::new() },
+                Block { section: "Missing".into(), muted: vec![], trims: vec![], note: String::new() },
             ],
             markers_from: None,
                 transpose: 0,
@@ -716,6 +752,8 @@ mod tests {
                 transition: Transition::default(),
                 ending: None,
                 beat_times: vec![],
+                bus_mix: Default::default(),
+                device_routes: Default::default(),
         };
         let (song, arr) = sf.build(1000, 20_000).unwrap();
         let names: Vec<&str> = song.sections.iter().map(|s| s.name.as_str()).collect();

@@ -327,3 +327,14 @@ body.live-mode .bar .lcd { display: none }
 .typearr input { flex: 1 1 auto; min-width: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px; font: 12px var(--f-mono) }
 .typearr .btn { padding: 5px 10px }
 @media (max-width: 900px) { .lhead { grid-template-columns: 1fr } }
+
+/* Notes on blocks: big on the Live page */
+.lnote { font: 700 clamp(15px, 1.6vw, 20px)/1.25 var(--f-ui); color: var(--cue); margin: -2px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.lnext .lnote { margin: 2px 0 0; font-size: 15px }
+.blk .note { position: relative; font: italic 11px var(--f-ui); color: var(--cue); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.blk .noteedit { position: relative; width: 100%; font: 12px var(--f-ui); background: var(--bg); border: 1px solid var(--cue); border-radius: 5px; padding: 2px 5px }
+.ltile .tnote { display: block; font: italic 11px var(--f-ui); color: var(--cue); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px }
+/* Disconnected banner: shows on both pages, under the top bar */
+.conn { position: fixed; left: 0; right: 0; top: var(--bar-b, 64px); z-index: 60; background: #5a1717; color: #ffd9d9; border-bottom: 1px solid #a33; padding: 8px 16px; font-weight: 700; font-size: 14px }
+.mixhead { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 12px; color: var(--muted) }
+.mixhead .btn { padding: 4px 10px; font-size: 12px }

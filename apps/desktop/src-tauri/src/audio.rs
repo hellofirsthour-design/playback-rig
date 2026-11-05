@@ -167,7 +167,7 @@ pub fn list_outputs() -> Vec<OutputInfo> {
 }
 
 /// Opens an output (by name, or the system default) using all of its channels.
-pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, on_error: impl Fn(String) + Send + 'static) -> Result<Output, String> {
+pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, on_error: impl Fn(String, bool) + Send + 'static) -> Result<Output, String> {
     let (tx, mut rx) = rtrb::RingBuffer::<ToAudio>::new(1024);
     let (mut gtx, garbage) = rtrb::RingBuffer::<Garbage>::new(32);
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -284,7 +284,10 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                         let _ = gtx.push(Garbage::Pad(done));
                     }
                 },
-                move |err| on_error(err.to_string()),
+                move |err| {
+                    let gone = matches!(err, cpal::StreamError::DeviceNotAvailable);
+                    on_error(err.to_string(), gone)
+                },
                 None,
             );
             let stream = match stream {

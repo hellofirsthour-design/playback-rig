@@ -42,6 +42,7 @@
   </div>
 </header>
 
+<div class="conn" id="conn" role="alert" hidden></div>
 <section class="railwrap">
   <div class="rail" id="rail" aria-label="Arrangement"></div>
   <div class="palette"><span class="lbl">Sections</span><div class="chips" id="palette"></div><span class="typearr"><input id="arrText" spellcheck="false" autocomplete="off" aria-label="Type the arrangement" title="Type the arrangement and press Enter. Abbreviations work: I V1 PC C B T O, and x2 to repeat." placeholder="Type: I, V1, C1, V2, C2 x2, B, O"><button class="btn" id="arrApply">Set</button></span></div>
@@ -65,13 +66,14 @@
       <div class="lnow">
         <div class="lnrow"><span class="lbl">Now</span><span class="lpos" id="lvPos"></span></div>
         <div class="lsec" id="lvSec">—</div>
+        <div class="lnote" id="lvNote" hidden></div>
         <div class="lrow2">
           <div class="lbars"><b id="lvBars">–</b><span id="lvBarsLbl">bars left</span></div>
           <div class="lbeats" id="lvBeats"></div>
         </div>
         <div class="lprog"><i id="lvProg"></i></div>
       </div>
-      <div class="lnext" id="lvNext"><div class="lbl" id="lvNextLbl">Next</div><div class="lnsec" id="lvNextSec">—</div></div>
+      <div class="lnext" id="lvNext"><div class="lbl" id="lvNextLbl">Next</div><div class="lnsec" id="lvNextSec">—</div><div class="lnote" id="lvNextNote" hidden></div></div>
     </div>
     <div class="lstrip">
       <div class="lblocks" id="lvBlocks" aria-label="Arrangement: tap a section to go there"></div>

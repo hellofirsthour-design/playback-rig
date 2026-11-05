@@ -96,6 +96,17 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
   - **Fade out now:** fades the song over 2 bars and stops (also a learnable MIDI button).
 - **The next song is always loaded in the background,** so a segue is instant and switching songs after a stop doesn't wait.
 
+## Staying connected
+
+- **Unplugged interface:** the set stays loaded; a red banner says so; the app checks every 1.5 s and reconnects when it's back (or when the interface you chose appears after starting on a stand-in like the laptop speakers, but never in the middle of a song). Playback waits, stopped at the block that was playing. It never falls back to the laptop speakers on its own, so front of house never gets the in-ear mix.
+- **Unplugged MIDI controller:** same: banner, reconnect when it's back. The Live page Mixer covers the faders meanwhile.
+- **Routing per interface:** click, pad and bus outputs, and track outputs changed in Song → Outputs, are remembered for each interface by name. A new interface starts from defaults for its number of outputs (4+: click and guide on 3-4, the rest on 1-2; 2: everything on 1-2).
+
+## Mixes and notes
+
+- **Each song remembers its mix:** bus levels and mutes (Live → Mixer or the Edit page bus headers) are saved with the song. A song you haven't mixed uses the default mix. "Reset to default" and "Make default" are in Live → Mixer.
+- **Notes per block** (✎ on a rail block): "WL repeats 2x", "drums out". The Live page shows the current block's note under its name and the next block's under Next.
+
 ## Rig
 
 - **Computer:** Mac.

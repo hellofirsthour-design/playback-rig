@@ -57,8 +57,8 @@
     return (m[3] ? MINOR : MAJOR)[i];
   }
   const copyTrims = b => (b.trims || []).map(t => ({ ...t }));
-  const strip = bs => bs.map(b => ({ section: b.section, muted: [...b.muted], trims: copyTrims(b) }));
-  const withUid = bs => bs.map(b => ({ uid: uidSeq++, section: b.section, muted: [...b.muted], trims: copyTrims(b), fade_out: b.fade_out || null }));
+  const strip = bs => bs.map(b => ({ section: b.section, muted: [...b.muted], trims: copyTrims(b), note: b.note || '' }));
+  const withUid = bs => bs.map(b => ({ uid: uidSeq++, section: b.section, muted: [...b.muted], trims: copyTrims(b), fade_out: b.fade_out || null, note: b.note || '' }));
 
   function secColor(name) {
     const n = name.toLowerCase();
@@ -255,6 +255,7 @@
       if (o.b.fade_out) { const f = el('i', 'tfade'); f.style.width = Math.min(100, o.b.fade_out[1] / bars * 100) + '%'; t.append(f); }
       const tags = (o.b.trims && o.b.trims.length ? '✂' : '') + (o.b.fade_out ? ' fade' : '');
       if (tags) t.append(el('span', 'tags', tags.trim()));
+      if (o.b.note) t.append(el('span', 'tnote', o.b.note));
       t.append(el('i', 'tprog'));
       t.onclick = () => send({ type: 'Goto', block: o.i });
       box.append(t);
@@ -291,8 +292,18 @@
     const box = $('#lvTab'); if (!box || box.contains(document.activeElement) && document.activeElement.type === 'range') return;
     box.innerHTML = '';
     if (liveTab === 'mix') {
+      if (V.song) {
+        const h = el('div', 'mixhead');
+        h.append(el('span', null, V.song_mix ? `Bus levels saved with ${V.song.name}.` : 'Bus levels are saved with each song. This one uses the default mix.'));
+        if (V.song_mix) {
+          const r = el('button', 'btn', 'Reset to default'); r.title = 'Use the default mix for this song'; r.onclick = () => invoke('song_mix', { action: 'reset' }).then(refresh).catch(err);
+          const d = el('button', 'btn', 'Make default'); d.title = "Use this song's levels for songs you haven't mixed"; d.onclick = () => invoke('song_mix', { action: 'default' }).then(v => { refresh(v); toast('Default mix updated.'); }).catch(err);
+          h.append(r, d);
+        }
+        box.append(h);
+      }
       const g = el('div', 'strips');
-      (V.buses || []).forEach(b => g.append(faderStrip(b.name, b.gain, 1.5, x => { b.gain = x; send({ type: 'BusGain', bus: b.id, gain: x }); }, b.muted,
+      (V.buses || []).forEach(b => g.append(faderStrip(b.name, b.gain, 1.5, x => { b.gain = x; send({ type: 'BusGain', bus: b.id, gain: x }); if (V.song && !V.song_mix) { V.song_mix = true; } }, b.muted,
         async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; })));
       g.append(faderStrip('Click (built-in)', V.click_gain, 1.5, x => { V.click_gain = x; send({ type: 'ClickGain', gain: x }); }, null, null));
       g.append(faderStrip('Pad', V.pads.level, 1.5, x => { V.pads.level = x; invoke('pad_mix', { level: x, route: null }).catch(err); }, !V.pads.on, () => togglePad()));
@@ -360,6 +371,8 @@
     const s = V.song, now = $('.lnow');
     const o = cur >= 0 ? L[cur] : null;
     $('#lvSec').textContent = o ? o.b.section : (s ? s.name : 'No song');
+    const setNote = (id, txt) => { const n = $(id); n.hidden = !txt; if (n.textContent !== (txt || '')) n.textContent = txt || ''; };
+    setNote('#lvNote', o && o.b.note);
     now.style.setProperty('--c', o ? secColor(o.b.section) : 'var(--go)');
     const left = o && snap ? barsLeft(snap) : 0;
     const counting = snap && snap.counting_in;
@@ -382,6 +395,8 @@
       else { lbl = 'Then'; const ns = V.setlist[V.current + 1]; name = snap && snap.finished ? 'Finished' : ns ? ns.name : 'End of set'; }
     }
     $('#lvNextLbl').textContent = lbl; $('#lvNextSec').textContent = name;
+    const nxi = snap && snap.pending != null ? snap.pending : (snap && snap.vamp ? cur : cur + 1);
+    setNote('#lvNextNote', o && L[nxi] && L[nxi].b.note);
     document.querySelectorAll('#lvBlocks .ltile').forEach(t => {
       const i = +t.dataset.i;
       t.classList.toggle('cur', i === cur); t.classList.toggle('done', p && i < cur); t.classList.toggle('queued', !!snap && snap.pending === i);
@@ -517,20 +532,43 @@
       const d = el('div', 'blk'); d.dataset.i = o.i; d.style.setProperty('--c', secColor(o.b.section));
       d.style.width = Math.max(96, o.b.section.length * 11 + 28, Math.min(220, o.sec.bars * 7)) + 'px';
       d.append(el('div', 'prog'), el('div', 'nm', o.b.section));
+      if (o.b.note) d.append(el('div', 'note', o.b.note));
       d.append(el('div', 'sub', `${o.sec.bars < 0.95 ? 'pickup' : Math.round(o.sec.bars) + ' bars'}${o.b.muted.length ? ' · no ' + o.b.muted.join(', ') : ''}`));
       d.append(el('span', 'num', String(o.i + 1)));
       const tools = el('div', 'tools');
       const dup = el('button', null, '⧉'); dup.title = 'Play this section twice'; dup.setAttribute('aria-label', 'Duplicate');
       dup.onpointerdown = e => e.stopPropagation();
-      dup.onclick = e => { e.stopPropagation(); const nb = blocks.slice(); nb.splice(o.i + 1, 0, { uid: uidSeq++, section: o.b.section, muted: [...o.b.muted], trims: copyTrims(o.b) }); commit(nb); };
+      dup.onclick = e => { e.stopPropagation(); const nb = blocks.slice(); nb.splice(o.i + 1, 0, { uid: uidSeq++, section: o.b.section, muted: [...o.b.muted], trims: copyTrims(o.b), note: '' }); commit(nb); };
       const x = el('button', null, '✕'); x.title = 'Remove from the arrangement'; x.setAttribute('aria-label', 'Remove');
       x.onpointerdown = e => e.stopPropagation();
       x.onclick = e => { e.stopPropagation(); commit(blocks.filter((_, j) => j !== o.i)); };
-      tools.append(dup, x); d.append(tools);
+      const nt = el('button', null, '✎'); nt.title = 'Note for this block (shows on the Live page)'; nt.setAttribute('aria-label', 'Note');
+      nt.onpointerdown = e => e.stopPropagation();
+      nt.onclick = e => { e.stopPropagation(); editNote(d, o.i); };
+      tools.append(nt, dup, x); d.append(tools);
       d.onpointerdown = e => startDrag(e, { kind: 'block', from: o.i, el: d, onClick: () => send({ type: 'Goto', block: o.i }) });
       rail.append(d);
     });
     tick();
+  }
+  // Inline note editor on a rail block: Enter saves, Escape cancels.
+  function editNote(d, i) {
+    const inp = el('input', 'noteedit'); inp.value = blocks[i].note || ''; inp.placeholder = 'e.g. WL repeats 2x · drums out';
+    inp.setAttribute('aria-label', 'Note for ' + blocks[i].section);
+    const old = d.querySelector('.note'); if (old) old.remove();
+    d.querySelector('.nm').after(inp);
+    inp.onpointerdown = e => e.stopPropagation();
+    let done = false;
+    const finish = save => {
+      if (done) return; done = true;
+      if (save && inp.value.trim() !== (blocks[i].note || '')) {
+        const nb = blocks.map(b => ({ ...b, muted: [...b.muted], trims: copyTrims(b) }));
+        nb[i].note = inp.value.trim().slice(0, 120); commit(nb);
+      } else renderRail();
+    };
+    inp.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') finish(true); else if (e.key === 'Escape') finish(false); };
+    inp.onblur = () => finish(true);
+    inp.focus();
   }
   function renderPalette() {
     const box = $('#palette'); box.innerHTML = '';
@@ -1186,7 +1224,8 @@
     if (V.output) os.value = V.output.name;
     routeOptions($('#clickRoute'), V.click_route);
     if (document.activeElement !== $('#clickGain')) $('#clickGain').value = V.click_gain;
-    $('#outHint').textContent = (V.output && V.output.channels >= 4) ? 'Stems start on Out 1-2 (front of house); click and guide on Out 3-4 (in-ears). Change any stem in Song → Outputs.' : 'Only 2 outputs. Pick your audio interface to send click and guide to the in-ears separately.';
+    $('#outHint').textContent = ((V.output && V.output.channels >= 4) ? 'Stems start on Out 1-2 (front of house); click and guide on Out 3-4 (in-ears). Change any stem in Song → Outputs.' : 'Only 2 outputs. Pick your audio interface to send click and guide to the in-ears separately.')
+      + ' Outputs are remembered for each interface: plug in another one and it gets its own routing; plug this one back in and yours comes back. If it is unplugged mid-service, the set stays loaded and it reconnects by itself.';
     renderPads();
     const ms = $('#midiSel'); ms.innerHTML = ''; ms.append(new Option('None', '')); V.midi_inputs.forEach(m => ms.append(new Option(m, m))); ms.value = V.midi || '';
     const rows = [...LEARN, ...(V.song ? V.song.stems.map((st, i) => ({ label: `${st.name} fader`, tap: { StemLevel: i } })) : [])];
@@ -1311,6 +1350,21 @@
   T.event.listen('click-level', e => { if (V) V.click_gain = e.payload; });
   T.event.listen('midi-learned', () => { learnWait = null; refresh().then(() => toast('Control assigned.')); });
   T.event.listen('audio-error', e => toast('Audio problem: ' + e.payload));
+  // Unplugged and plugged back in: the app reconnects by itself.
+  let connWas = '';
+  function renderConn(s) {
+    const msgs = [];
+    if (s.audio_lost) msgs.push(`Audio interface disconnected${V && V.output ? '' : ''}. Your set is still loaded; plug it back in and it reconnects by itself.`);
+    if (s.midi_lost) msgs.push(`MIDI controller${V && V.midi ? ' (' + V.midi + ')' : ''} disconnected. It reconnects when plugged back in; use the Live page Mixer meanwhile.`);
+    const txt = msgs.join(' ');
+    if (txt === connWas) return;
+    connWas = txt;
+    $('#conn').hidden = !txt; $('#conn').textContent = txt;
+  }
+  T.event.listen('connection', e => {
+    if (e.payload === 'audio-back') { toast('Audio interface reconnected. Press play to carry on.'); songKey = null; refresh(); }
+    else if (e.payload === 'midi-back') toast('MIDI controller reconnected.');
+  });
   T.event.listen('dropped', e => {
     const r = e.payload;
     songKey = null; // stems may have changed: reload waveforms
@@ -1366,6 +1420,7 @@
       const s = await invoke('status'); snap = s.snapshot;
       if (s.song_changed) { toast('Next song: ' + ((V.setlist[(V.current || 0) + 1] || {}).name || '')); await refresh(); return; }
       if (s.pad_changed) { await refresh(); return; }
+      renderConn(s);
       if (V && V.free_click && s.free_click !== V.free_click.on) { V.free_click.on = s.free_click; if (page === 'live') renderLiveTab(); }
       // The next song loads in the background: show when it's ready.
       if (V && V.song && !V.next_ready && V.current != null && V.setlist[V.current + 1] && ++readyPoll % 50 === 0) await refresh();
