@@ -27,14 +27,16 @@
     bases.forEach(b => { if (b.endsWith('s') === false) words.set(b + 's', b); });
     Object.entries(SHORT).forEach(([k, v]) => { if (!words.has(k)) words.set(k, v); });
     const keys = [...words.keys()].sort((a, b) => b.length - a.length).map(k => k.replace(/[-]/g, '\\-'));
-    const re = new RegExp(`(?:\\b(last|first|second|third|final|other)\\s+)?\\b(${keys.join('|')})(?![a-z])\\s*(?:(\\d+)\\b|\\b(one|two|three|four|five|six)\\b)?`, 'g');
+    const re = new RegExp(`(?:\\b(all(?: the)?|every|both(?: the)?|any|last|first|second|third|final|other)\\s+)?\\b(${keys.join('|')})(?![a-z])\\s*(?:(\\d+)\\b|\\b(one|two|three|four|five|six)\\b)?`, 'g');
     const out = [];
     let m;
     while ((m = re.exec(t))) {
       const word = m[2], base = words.get(word);
       const num = m[3] ? +m[3] : m[4] ? NUMW[m[4]] : null;
       if (word.length <= 2 && !SHORT_OK(word, num)) continue; // "i want", "a tag" are not sections
-      out.push({ base, num, pos: m.index, which: m[1] || null });
+      // "all instrumentals", "every tag", "both bridges", or a plural with no number: every one of that kind
+      const every = /^(all|every|both|any)/.test(m[1] || '') || (num == null && word !== base && word === base + 's');
+      out.push({ base, num, pos: m.index, which: every ? null : m[1] || null, every });
     }
     return out;
   }
@@ -125,8 +127,9 @@
         // "the second chorus" removes that one block; "the instrumental" removes it everywhere.
         const one = ms.filter(m => m.which && m.idx >= 0).map(m => m.idx).sort((a, b) => b - a);
         one.forEach(i => arr.splice(i, 1));
-        ms.filter(m => !m.which).forEach(m => { arr = arr.filter(b => b.section !== m.sec); });
-        did.push(`removed ${secs.join(', ')}`); understood++; continue;
+        ms.filter(m => !m.which && !m.every).forEach(m => { arr = arr.filter(b => b.section !== m.sec); });
+        ms.filter(m => m.every).forEach(m => { arr = arr.filter(b => baseOf(b.section) !== m.base); });
+        did.push(`removed ${ms.map(m => (m.every ? 'every ' + m.base : m.sec)).join(', ')}`); understood++; continue;
       }
       // "after X ..." starts a run of sections
       if (RX.after.test(c) && !RX.add.test(c) && !RX.move.test(c) && secs.length && c.indexOf('after') < (ms[0].pos + 2)) {

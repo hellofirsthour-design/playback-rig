@@ -47,5 +47,19 @@ for (const text of ['double verse 7', 'make it sound better', 'add a key change'
 // edits carry over: a doubled block comes from the original
 const d = interpret('double verse 2', names, cur);
 if (d.blocks[4].from !== 4 || d.blocks[5].from !== 4) { bad++; console.log('FAIL  doubled block should come from the original', d.blocks.slice(3, 7)); }
+// "all" / plurals remove every numbered version
+{
+  const n2 = ['Intro', 'Verse 1', 'Instrumental 1', 'Chorus 1', 'Interlude', 'Verse 2', 'Instrumental 2', 'Chorus 2', 'Tag', 'Bridge', 'Outro'];
+  const c2 = ['Intro', 'Verse 1', 'Instrumental 1', 'Chorus 1', 'Interlude', 'Verse 2', 'Instrumental 2', 'Chorus 2', 'Tag', 'Bridge', 'Interlude', 'Tag', 'Outro'].map(section => ({ section }));
+  const all = [
+    ['cut all instrumentals', 'Intro, Verse 1, Chorus 1, Interlude, Verse 2, Chorus 2, Tag, Bridge, Interlude, Tag, Outro'],
+    ['drop the instrumentals', 'Intro, Verse 1, Chorus 1, Interlude, Verse 2, Chorus 2, Tag, Bridge, Interlude, Tag, Outro'],
+    ['cut all interludes', 'Intro, Verse 1, Instrumental 1, Chorus 1, Verse 2, Instrumental 2, Chorus 2, Tag, Bridge, Tag, Outro'],
+    ['cut all tags', 'Intro, Verse 1, Instrumental 1, Chorus 1, Interlude, Verse 2, Instrumental 2, Chorus 2, Bridge, Interlude, Outro'],
+    ['no tags and no interludes', 'Intro, Verse 1, Instrumental 1, Chorus 1, Verse 2, Instrumental 2, Chorus 2, Bridge, Outro'],
+    ['cut instrumental 2', 'Intro, Verse 1, Instrumental 1, Chorus 1, Interlude, Verse 2, Chorus 2, Tag, Bridge, Interlude, Tag, Outro'],
+  ];
+  for (const [text, want] of all) { const got = order(interpret(text, n2, c2)); if (got !== want) { bad++; console.log(`FAIL  "${text}"\n  got:  ${got}\n  want: ${want}`); } }
+}
 if (bad) { console.log(`${bad} arrangement case(s) failed`); process.exit(1); }
-console.log(`arrange.js OK (${cases.length + 5} cases)`);
+console.log(`arrange.js OK (${cases.length + 11} cases)`);
