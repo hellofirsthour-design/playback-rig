@@ -143,7 +143,7 @@
     render();
   }
   function render() {
-    renderBar(); renderRail(); renderPalette(); renderHeads(); renderSetlist(); renderSongDrawer(); renderSetup(); renderStatus();
+    renderBar(); renderRail(); renderLive(); renderPalette(); renderHeads(); renderSetlist(); renderSongDrawer(); renderSetup(); renderStatus();
     $('#emptyArr').hidden = !!(V && V.song);
     dirty = true; tick();
   }
@@ -193,6 +193,7 @@
       pr.style.width = i === cur && snap ? Math.min(100, snap.frame_in_section / Math.max(1, snap.section_frames) * 100) + '%' : '0';
     });
     followRail(cur, p);
+    tickLive(L, cur, p);
   }
 
   // The rail follows the playhead: the playing block (and the one before it) stay in
@@ -212,6 +213,71 @@
     if (Math.abs(rail.scrollLeft - want) > 2) rail.scrollTo({ left: want, behavior: 'smooth' });
   }
   document.addEventListener('wheel', e => { if (e.target.closest && e.target.closest('#rail')) railHandScroll = Date.now(); }, { passive: true });
+
+  /* ---------- Live page / Edit page ---------- */
+  let page = 'edit';
+  try { page = localStorage.getItem('rig.page') === 'live' ? 'live' : 'edit'; } catch (e) { /* storage off */ }
+  function setPage(pg) {
+    page = pg;
+    try { localStorage.setItem('rig.page', pg); } catch (e) { /* storage off */ }
+    document.body.classList.toggle('live-mode', pg === 'live');
+    $('#live').hidden = pg !== 'live';
+    document.querySelectorAll('#viewSeg button').forEach(b => b.classList.toggle('on', b.dataset.view === pg));
+    if (pg === 'edit') requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+    tick();
+  }
+  document.querySelectorAll('#viewSeg button').forEach(b => { b.onclick = () => setPage(b.dataset.view); });
+  function renderLive() {
+    const box = $('#lvBlocks'); box.innerHTML = '';
+    layout().forEach(o => {
+      const t = el('button', 'ltile'); t.dataset.i = o.i; t.style.setProperty('--c', secColor(o.b.section));
+      t.append(el('b', null, o.b.section), el('small', null, `${o.i + 1} · ${o.sec.bars < 0.95 ? 'pickup' : Math.round(o.sec.bars) + ' bars'}${o.b.muted.length ? ' · no ' + o.b.muted.join(', ') : ''}`));
+      t.onclick = () => send({ type: 'Goto', block: o.i });
+      box.append(t);
+    });
+    const set = $('#lvSet'); set.innerHTML = '';
+    (V ? V.setlist : []).forEach((s, i) => {
+      const li = el('li', (i === V.current ? 'cur' : i === V.current + 1 ? 'next' : '') + (s.found ? '' : ' missing'), s.name);
+      li.onclick = () => { if (playing()) { toast('Stop the song to switch.'); return; } selectSong(i); };
+      set.append(li);
+    });
+  }
+  function tickLive(L, cur, p) {
+    if (page !== 'live') return;
+    const s = V.song, now = $('.lnow');
+    const o = cur >= 0 ? L[cur] : null;
+    $('#lvSec').textContent = o ? o.b.section : (s ? s.name : 'No song');
+    now.style.setProperty('--c', o ? secColor(o.b.section) : 'var(--go)');
+    const left = o && snap ? (snap.section_frames - snap.frame_in_section) / s.sample_rate / barSec() : 0;
+    const counting = snap && snap.counting_in;
+    $('#lvBars').textContent = !p ? '–' : counting ? 'Count' : String(Math.max(0, Math.ceil(left - 0.001)));
+    $('#lvBarsLbl').textContent = p && !counting ? (Math.ceil(left - 0.001) === 1 ? 'bar left' : 'bars left') : '';
+    $('#lvProg').style.width = o && snap ? Math.min(100, snap.frame_in_section / Math.max(1, snap.section_frames) * 100) + '%' : '0';
+    const bpb = s ? s.beats_per_bar : 4, beats = $('#lvBeats');
+    if (beats.children.length !== bpb) { beats.innerHTML = ''; for (let i = 0; i < bpb; i++) beats.append(el('i')); }
+    [...beats.children].forEach((d, i) => { d.className = (p && snap && snap.beat === i + 1 ? 'on' : '') + (i === 0 ? ' one' : ''); });
+    $('#lvPos').textContent = s ? `${p && snap && !counting ? snap.bar + '.' + snap.beat + ' · ' : ''}${+playBpm().toFixed(2)} BPM${s.key ? ' · ' + keyName(s.key, s.transpose) : ''}` : '';
+    const nx = $('#lvNext'); let lbl = 'Next', name = '—'; nx.className = 'lnext';
+    if (s && o) {
+      if (snap && snap.pending != null && L[snap.pending]) {
+        const bars = snap.frames_to_jump / s.sample_rate / barSec();
+        const bt = Math.max(1, Math.round(bars * bpb));
+        lbl = bars < 0.05 ? 'Going to' : `In ${bars < 1 ? bt + (bt === 1 ? ' beat' : ' beats') : bars.toFixed(1) + ' bars'}`;
+        name = L[snap.pending].b.section; nx.classList.add('going');
+      } else if (snap && snap.vamp) { lbl = 'Vamping'; name = o.b.section; nx.classList.add('vamp'); }
+      else if (L[cur + 1]) name = L[cur + 1].b.section;
+      else { lbl = 'Then'; const ns = V.setlist[V.current + 1]; name = snap && snap.finished ? 'Finished' : ns ? ns.name : 'End of set'; }
+    }
+    $('#lvNextLbl').textContent = lbl; $('#lvNextSec').textContent = name;
+    document.querySelectorAll('#lvBlocks .ltile').forEach(t => {
+      const i = +t.dataset.i;
+      t.classList.toggle('cur', i === cur); t.classList.toggle('done', p && i < cur); t.classList.toggle('queued', !!snap && snap.pending === i);
+    });
+    const ct = document.querySelector(`#lvBlocks .ltile[data-i="${cur}"]`);
+    if (p && ct && cur !== liveFollowed) { liveFollowed = cur; ct.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+    if (!p) liveFollowed = -1;
+  }
+  let liveFollowed = -1;
 
   /* ---------- section rail (drag to arrange) ---------- */
   function renderRail() {
@@ -770,10 +836,11 @@
     { label: 'Pedal 4', tap: 'NextSong', hold: 'PadOnly', desc: 'Tap: next song · Hold: pad only' },
     { label: 'Play / stop button', tap: 'PlayStop' }, { label: 'Next button', tap: 'Next' }, { label: 'Repeat button', tap: 'Repeat' },
     { label: 'Vamp button', tap: 'ToggleVamp' }, { label: 'Next song button', tap: 'NextSong' }, { label: 'Click fader', tap: 'ClickLevel' },
+    { label: 'Live / Edit page button', tap: 'ToggleView' },
   ];
   function actionLabel(a) {
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
-    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader' })[a] || String(a);
+    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', ToggleView: 'Live / Edit page' })[a] || String(a);
   }
   const controlLabel = c => (c.Note ? `Note ${c.Note.key} · ch ${c.Note.ch + 1}` : c.Cc ? `CC ${c.Cc.num} · ch ${c.Cc.ch + 1}` : '?');
   function renderSetup() {
@@ -892,6 +959,7 @@
     else if (k === 'n' || k === 'N' || k === 'ArrowRight') send({ type: 'Next' });
     else if (k === 'r' || k === 'R') send({ type: 'Repeat' });
     else if (k === 'v' || k === 'V') send({ type: 'Vamp' });
+    else if (k === 'l' || k === 'L') setPage(page === 'live' ? 'edit' : 'live');
     else if (k === 'f' || k === 'F') { zoom.follow = !zoom.follow; renderStatus(); }
     else if (k === '=' || k === '+') zoomBy(1.5);
     else if (k === '-') zoomBy(1 / 1.5);
@@ -920,6 +988,7 @@
   T.event.listen('pedal', e => {
     if (e.payload === 'next-song') { if (playing()) { toast('Next song loads when this one stops.'); return; } if (V && V.current != null && V.current + 1 < V.setlist.length) selectSong(V.current + 1); }
     else if (e.payload === 'pad-only') togglePad();
+    else if (e.payload === 'toggle-view') setPage(page === 'live' ? 'edit' : 'live');
   });
 
   /* ---------- updates ---------- */
@@ -961,6 +1030,7 @@
   }, 40);
 
   (async () => {
+    setPage(page);
     await refresh();
     if (V.current != null && !V.song && V.setlist[V.current] && V.setlist[V.current].found) selectSong(V.current);
   })();

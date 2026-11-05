@@ -36,6 +36,7 @@
     <button class="tog pad" id="padBtn" title="Sustained pad in the song's key (pedal 4, hold)">Pad</button>
   </div>
   <div class="right">
+    <div class="seg" id="viewSeg" role="group" aria-label="Page" title="Live page or Edit page (L)"><button data-view="live">Live</button><button data-view="edit">Edit</button></div>
     <button class="ib" id="songBtn">Song</button>
     <button class="ib" id="setupBtn">Setup</button>
   </div>
@@ -56,6 +57,27 @@
     <div class="tl"><canvas id="cvLanes"></canvas></div>
   </div>
   <div class="empty-arr" id="emptyArr">Open the Set and add a song folder to begin.</div>
+</section>
+
+<section class="live" id="live" hidden>
+  <div class="lmain">
+    <div class="lnow">
+      <div class="lbl">Now</div>
+      <div class="lsec" id="lvSec">—</div>
+      <div class="lrow2">
+        <div class="lbars"><b id="lvBars">–</b><span id="lvBarsLbl">bars left</span></div>
+        <div class="lbeats" id="lvBeats"></div>
+        <div class="lpos" id="lvPos"></div>
+      </div>
+      <div class="lprog"><i id="lvProg"></i></div>
+    </div>
+    <div class="lnext" id="lvNext"><div class="lbl" id="lvNextLbl">Next</div><div class="lnsec" id="lvNextSec">—</div></div>
+    <div class="lblocks" id="lvBlocks" aria-label="Arrangement: tap a section to go there"></div>
+  </div>
+  <aside class="lset">
+    <div class="lbl">Set</div>
+    <ol id="lvSet"></ol>
+  </aside>
 </section>
 
 <footer class="status">

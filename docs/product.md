@@ -18,6 +18,13 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
 | Screen | Timeline, mixer, editing | Current section, next section, bars left, queued call |
 | Editing | Everything | None. You can't change the arrangement mid-song |
 
+## Live page and Edit page
+
+**Live / Edit** in the top bar (or L, or a learned MIDI button) switches pages; the app remembers the last one. The top bar (transport, display, Song, Setup) is the same on both.
+
+- **Live page** (Playback-style, readable from the keys): the current section huge, bars left, beat lights, a progress bar, then what's next ("Next", "In 2 bars → Chorus 2" when a jump is queued, "Vamping"). Below, every block as a big tile: tap one to go there. On the right, the set; the next song is highlighted.
+- **Edit page:** the section rail and the arrangement view below.
+
 ## The main screen
 
 It combines Ableton's arrangement view with MultiTracks Playback, in our own design.
@@ -110,7 +117,7 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 1. Confirm the grid is right on real MultiTracks songs (needs See a Victory's MultiTrack.als).
 2. **Song transitions:** crossfade or segue into the next song, with pads carrying across.
 3. ~~Dynamic guide cues~~ *Done in 0.6.0.*
-4. **Live page and Edit page:** a Playback-style live screen (big current/next, bars left, the set) and the arrangement view for editing.
+4. ~~Live page and Edit page~~ *Done in 0.6.1.*
 5. **Transitions per song:** crossfade or overlap into the next song, auto fade-out of long endings.
 6. **Clip trimming and automation:** trim a clip's start or end in a lane (e.g. vocals off for the first half), volume automation.
 7. Song and key changes stay instant: preload the next song in the set, so switching never waits.

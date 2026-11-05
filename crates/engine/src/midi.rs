@@ -42,6 +42,8 @@ pub enum Action {
     ToggleVamp,
     NextSong,
     PadOnly,
+    /// Switch between the Live page and the Edit page.
+    ToggleView,
     /// Continuous: a fader sets this stem's level.
     StemLevel(usize),
     /// Continuous: a fader sets the click level.

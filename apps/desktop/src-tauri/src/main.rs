@@ -341,6 +341,9 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
             Action::PadOnly => {
                 let _ = app.emit("pedal", "pad-only");
             }
+            Action::ToggleView => {
+                let _ = app.emit("pedal", "toggle-view");
+            }
             Action::StemLevel(_) | Action::ClickLevel => {}
         },
     }
