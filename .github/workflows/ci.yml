@@ -30,9 +30,11 @@ jobs:
 
   # Publishes a GitHub Release (and the update the app installs itself) whenever
   # the version in tauri.conf.json goes up. Same version = nothing is published.
+  # Needs only the quick Linux tests, so a release waits for one Mac machine, not
+  # two in a row. It runs the app tests itself before building.
   release:
     name: Release
-    needs: [engine, mac-app]
+    needs: [engine]
     if: github.event_name != 'pull_request'
     runs-on: macos-latest
     permissions:
@@ -60,6 +62,10 @@ jobs:
         if: steps.ver.outputs.new == 'true'
         with:
           workspaces: apps/desktop/src-tauri
+      - name: App tests
+        if: steps.ver.outputs.new == 'true'
+        working-directory: apps/desktop/src-tauri
+        run: cargo test
       - name: Build, sign and publish
         if: steps.ver.outputs.new == 'true'
         uses: tauri-apps/tauri-action@v0
