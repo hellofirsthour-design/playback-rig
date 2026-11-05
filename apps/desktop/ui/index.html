@@ -192,8 +192,8 @@
     <p class="hint" id="outHint"></p>
   </div>
   <div class="card">
-    <h3>Arrangement assistant</h3>
-    <p class="hint">Type arrangement changes in plain words on the Edit page ("double verse 2, then go straight to the bridge"). Claude reads the request, the section names and the current order (no audio) and proposes the new order; nothing changes until you press Apply. It needs the internet and an Anthropic API key (from console.anthropic.com; each request costs a fraction of a cent). Typing a plain list (I, V1, C1 x2, B) always works, offline.</p>
+    <h3>Arrangement assistant (optional)</h3>
+    <p class="hint">Plain-words changes on the Edit page ("double verse 2", "cut the instrumental", "after verse 2 do chorus 2 twice then the bridge") are worked out by the app itself: free, offline, instant. You don't need a key. If you add an Anthropic API key, Claude also handles requests the app doesn't understand (about a cent each, needs the internet; it sees section names and the order, never audio).</p>
     <div class="row"><input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" aria-label="Anthropic API key" style="flex:1;min-width:0"><button class="btn" id="apiKeySave">Save</button><button class="btn" id="apiKeyDel" hidden>Remove</button></div>
     <p class="hint" id="apiKeyState"></p>
   </div>
@@ -241,6 +241,7 @@
   </form>
 </div>
 <div class="toast" id="toast" role="status" hidden></div>
+<script src="arrange.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

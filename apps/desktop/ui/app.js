@@ -463,6 +463,11 @@
         commit(nb); return;
       }
     }
+    // Plain words: worked out right here (free, offline, instant)…
+    const local = window.interpretArrangement ? window.interpretArrangement(text, V.song.sections.filter(s => s.secs > 0.05).map(s => s.name), blocks) : { error: '' };
+    if (!local.error) { showProposal(local); return; }
+    // …and only if that didn't understand it, Claude, when you've added a key.
+    if (!V.has_api_key) { toast(local.error, 7000); return; }
     const box = $('#proposal');
     box.hidden = false; box.className = 'proposal busy'; box.textContent = 'Working out the new arrangement…';
     $('#arrApply').disabled = true;
@@ -1252,7 +1257,7 @@
     V.outputs.forEach(o => os.append(new Option(`${o.name} (${o.channels} outputs)${o.is_default ? ' · default' : ''}`, o.name)));
     if (V.output) os.value = V.output.name;
     routeOptions($('#clickRoute'), V.click_route);
-    $('#apiKeyState').textContent = V.has_api_key ? 'A key is saved on this computer. Plain-words changes are on.' : 'No key saved: plain-words changes are off; lists still work.';
+    $('#apiKeyState').textContent = V.has_api_key ? 'A key is saved on this computer: Claude helps with requests the app does not understand.' : 'No key: everything works; the app reads common requests itself.';
     $('#apiKeyDel').hidden = !V.has_api_key;
     // Outputs: every bus, one master setting (per interface).
     const br = $('#busRoutes'); br.innerHTML = '';

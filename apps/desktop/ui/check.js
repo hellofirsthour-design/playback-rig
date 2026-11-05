@@ -15,3 +15,4 @@ src.split('\n').forEach((line, i) => {
 });
 if (bad) process.exit(1);
 console.log(`app.js OK (${seen.size} functions)`);
+require('./arrange.test.js'); // the offline plain-words arrangement reader
