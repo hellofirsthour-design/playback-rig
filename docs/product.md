@@ -32,6 +32,11 @@ It combines Ableton's arrangement view with MultiTracks Playback, in our own des
 - **Stems can be in a subfolder:** the app looks in the chosen folder, then in its subfolders (`MultiTracks/` first). Picking the `MultiTracks` folder itself also works.
 - **Key and tempo** are in the Song panel, as in MultiTracks Playback. Each stem is time-stretched and pitch-shifted when the song loads (Signalsmith Stretch, comparable to Ableton's Complex Pro). Click and guide are only time-stretched. Section positions follow the new tempo.
 
+- **The grid is the song's real downbeats.** The ruler draws them as they are, so every bar is the same length. The folder name's tempo is the authority: MultiTracks clicks and Ableton sets often run at double time with eighth-note clicks, and that's detected and corrected. The guide's spoken "one"s pick the true downbeat. If a song is still off, Song → Grid moves the downbeat by a beat or 10 ms and can halve or double the tempo.
+- **Count-in is off by default.** The Count-in button turns it on.
+- **Pads:** Setup → Pads takes a folder with one sustained pad per key (MultiTracks pad packs). The Pad button (or pedal 4 hold) fades in the pad for the current song's key, including any key change. It crossfades when the next song is in a different key and keeps playing between songs.
+- **Click songs:** Set → New click song builds a song with no tracks from a tempo, key and a list of sections. It generates a Click stem and a spoken Guide (the Mac's voice counts in and calls each section in the bar before it), saved under Music → Playback Rig → Click Songs.
+
 ## Live behaviour
 
 The plan is set, but you make live calls during the song:

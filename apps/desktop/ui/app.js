@@ -79,13 +79,21 @@
   }
 
   /* ---------- layout of the arrangement in time ---------- */
+  // The song's real downbeats (seconds in the audio as it plays) inside [a, b).
+  function downbeats(a, b) {
+    const bs = barSec(), off = V.song.offset_ms / 1000 * (V.song.bpm / playBpm());
+    const out = [];
+    for (let n = Math.ceil((a - off) / bs - 1e-6); off + n * bs < b - 1e-6; n++) out.push(off + n * bs);
+    return out;
+  }
   function layout() {
     if (!V || !V.song) return [];
     let t = 0, bar = 1;
     return blocks.map((b, i) => {
       const sec = V.song.sections.find(x => x.name === b.section) || { start_sec: 0, secs: 0, bars: 0, bar: 1 };
-      const o = { i, b, sec, start: t, secs: sec.secs, bar };
-      t += sec.secs; bar += Math.round(sec.bars);
+      const beats = downbeats(sec.start_sec, sec.start_sec + sec.secs);
+      const o = { i, b, sec, start: t, secs: sec.secs, bar, beats };
+      t += sec.secs; bar += beats.length;
       return o;
     });
   }
@@ -131,6 +139,9 @@
     document.querySelectorAll('#quant button').forEach(b => b.classList.toggle('on', b.dataset.q === V.quantize));
     $('#clickBtn').classList.toggle('on', !!(s && s.click)); $('#clickBtn').disabled = !s;
     $('#countBtn').classList.toggle('on', V.count_in);
+    const pd = V.pads;
+    $('#padBtn').classList.toggle('on', pd.on);
+    $('#padBtn').textContent = pd.on && pd.song_key ? `Pad · ${pd.song_key}` : 'Pad';
   }
   function tick() {
     if (!V) return;
@@ -341,10 +352,11 @@
     // ruler
     const step = [1, 2, 4, 8, 16, 32, 64].find(n => n * bs * zoom.pps >= 34) || 64;
     g.font = '10px ui-monospace, Menlo, monospace'; g.textBaseline = 'middle';
+    // Bar lines sit on the audio's own downbeats, so every bar is the same length
+    // and a section that doesn't start on a downbeat shows up instead of hiding.
     L.forEach(o => {
-      const n = Math.round(o.sec.bars);
-      for (let k = 0; k < n; k++) {
-        const x = X(o.start + k * bs); if (x < -2 || x > w + 2) continue;
+      for (let k = 0; k < o.beats.length; k++) {
+        const x = X(o.start + (o.beats[k] - o.sec.start_sec)); if (x < -2 || x > w + 2) continue;
         const bar = o.bar + k;
         g.fillStyle = (bar - 1) % step === 0 ? '#555a62' : '#2c2f35';
         g.fillRect(Math.round(x), (bar - 1) % step === 0 ? 4 : 13, 1, (bar - 1) % step === 0 ? 16 : 7);
@@ -615,6 +627,24 @@
   }
   $('#analyzeBtn').onclick = () => analyze(false);
   $('#addMarker').onclick = () => { const last = draftMarkers.reduce((m, x) => Math.max(m, x.bar), 0); draftMarkers.push({ name: 'Section ' + (draftMarkers.length + 1), bar: last + 8 }); renderMarkers(); };
+  // Grid tools: save straight away, keeping each section on the same bar number.
+  function saveGrid(patch, msg) {
+    if (playing()) { toast('Stop playback before moving the grid.'); return; }
+    const s = V.song;
+    const meta = { name: s.name, bpm: s.bpm, beats_per_bar: s.beats_per_bar, offset_ms: s.offset_ms, key: s.key, markers: s.markers.map(m => ({ ...m })) };
+    patch(meta);
+    meta.offset_ms = Math.max(0, meta.offset_ms);
+    invoke('update_song', { meta }).then(v => { refresh(v); toast(msg(meta)); }).catch(err);
+  }
+  const beatMs = () => 60000 / V.song.bpm;
+  $('#gBeatL').onclick = () => saveGrid(m => { m.offset_ms -= beatMs(); }, m => `Grid moved a beat earlier (first downbeat ${Math.round(m.offset_ms)} ms).`);
+  $('#gBeatR').onclick = () => saveGrid(m => { m.offset_ms += beatMs(); }, m => `Grid moved a beat later (first downbeat ${Math.round(m.offset_ms)} ms).`);
+  $('#gMsL').onclick = () => saveGrid(m => { m.offset_ms -= 10; }, m => `First downbeat ${Math.round(m.offset_ms)} ms.`);
+  $('#gMsR').onclick = () => saveGrid(m => { m.offset_ms += 10; }, m => `First downbeat ${Math.round(m.offset_ms)} ms.`);
+  // Halving the tempo makes bars twice as long: section N bars in becomes N/2 bars in.
+  $('#gHalf').onclick = () => saveGrid(m => { m.bpm = m.bpm / 2; m.markers.forEach(x => { x.bar = Math.round((x.bar - 1) / 2) + 1; }); }, m => `Tempo is now ${+m.bpm.toFixed(2)} BPM.`);
+  $('#gDouble').onclick = () => saveGrid(m => { m.bpm = m.bpm * 2; m.markers.forEach(x => { x.bar = (x.bar - 1) * 2 + 1; }); }, m => `Tempo is now ${+m.bpm.toFixed(2)} BPM.`);
+
   $('#songSave').onclick = () => {
     const names = draftMarkers.map(m => m.name.trim().toLowerCase()).filter(Boolean);
     if (new Set(names).size !== names.length) { toast('Two sections have the same name. Give each its own (e.g. Chorus 1, Chorus 2).'); return; }
@@ -643,6 +673,7 @@
     routeOptions($('#clickRoute'), V.click_route);
     if (document.activeElement !== $('#clickGain')) $('#clickGain').value = V.click_gain;
     $('#outHint').textContent = (V.output && V.output.channels >= 4) ? 'Stems start on Out 1-2 (front of house); click and guide on Out 3-4 (in-ears). Change any stem in Song → Outputs.' : 'Only 2 outputs. Pick your audio interface to send click and guide to the in-ears separately.';
+    renderPads();
     const ms = $('#midiSel'); ms.innerHTML = ''; ms.append(new Option('None', '')); V.midi_inputs.forEach(m => ms.append(new Option(m, m))); ms.value = V.midi || '';
     const rows = [...LEARN, ...(V.song ? V.song.stems.map((st, i) => ({ label: `${st.name} fader`, tap: { StemLevel: i } })) : [])];
     const box = $('#learn'); box.innerHTML = '';
@@ -664,6 +695,17 @@
       r.append(t, x); bl.append(r);
     });
   }
+  function renderPads() {
+    const p = V.pads;
+    $('#padHint').textContent = p.folder ? `${p.folder} · keys: ${p.keys.join(', ') || 'none found'}` : 'Pads are sustained tonic drones, one audio file per key (like MultiTracks pad packs). The key goes in each file\'s name, e.g. "A Pad.wav".';
+    $('#padFolder').textContent = p.folder ? 'Change pads folder' : 'Choose pads folder';
+    if (document.activeElement !== $('#padLevel')) $('#padLevel').value = p.level;
+    routeOptions($('#padRoute'), p.route);
+  }
+  $('#padFolder').onclick = () => invoke('choose_pads_folder').then(v => { refresh(v); toast('Pads folder set.'); }).catch(err);
+  $('#padLevel').oninput = e => { V.pads.level = +e.target.value; invoke('pad_mix', { level: V.pads.level, route: null }).catch(err); };
+  $('#padRoute').onchange = e => { V.pads.route = keyRoute(e.target.value); invoke('pad_mix', { level: null, route: V.pads.route }).catch(err); };
+
   $('#outSel').onchange = e => { if (playing()) { toast('Stop playback before changing the audio output.'); renderSetup(); return; } invoke('choose_output', { name: e.target.value }).then(v => { refresh(v); toast('Audio output changed.'); }).catch(err); };
   $('#clickRoute').onchange = e => { V.click_route = keyRoute(e.target.value); send({ type: 'ClickRoute', route: V.click_route }); };
   $('#clickGain').oninput = e => { V.click_gain = +e.target.value; send({ type: 'ClickGain', gain: V.click_gain }); };
@@ -681,10 +723,53 @@
   document.querySelectorAll('[data-cmd]').forEach(b => { b.onclick = () => send({ type: b.dataset.cmd }); });
   $('#quant').onclick = e => { const b = e.target.closest('[data-q]'); if (!b) return; V.quantize = b.dataset.q; send({ type: 'Quantize', q: V.quantize }); renderBar(); };
   $('#clickBtn').onclick = () => { if (!V.song) return; V.song.click = !V.song.click; send({ type: 'Click', on: V.song.click }); renderBar(); };
+  async function togglePad() {
+    try { await refresh(await invoke('pad_set', { on: !V.pads.on })); }
+    catch (e) { err(e); if (!V.pads.folder) openDrawer('#setupDrawer'); }
+  }
+  $('#padBtn').onclick = togglePad;
   $('#countBtn').onclick = () => { V.count_in = !V.count_in; send({ type: 'CountIn', on: V.count_in }); renderBar(); };
   $('#prevSong').onclick = () => V.current != null && selectSong(V.current - 1);
   $('#nextSong').onclick = () => V.current != null && selectSong(V.current + 1);
   $('#addSongs').onclick = () => invoke('add_songs').then(refresh).catch(err);
+
+  /* ---------- new click song ---------- */
+  let cSecs = [];
+  function renderClickSecs() {
+    const box = $('#c-secs'); box.innerHTML = '';
+    cSecs.forEach((sec, i) => {
+      const r = el('div', 'cs');
+      const n = el('input'); n.value = sec[0]; n.id = 'cs-n-' + i; n.setAttribute('aria-label', 'Section name'); n.oninput = () => { sec[0] = n.value; };
+      const b = el('input'); b.type = 'number'; b.min = 1; b.value = sec[1]; b.id = 'cs-b-' + i; b.setAttribute('aria-label', 'Bars'); b.oninput = () => { sec[1] = Math.max(1, Math.round(+b.value || 1)); total(); };
+      const x = el('button', 'btn danger', '✕'); x.type = 'button'; x.setAttribute('aria-label', 'Remove section'); x.onclick = () => { cSecs.splice(i, 1); renderClickSecs(); };
+      r.append(n, b, el('span', null, 'bars'), x); box.append(r);
+    });
+    total();
+  }
+  function total() {
+    const bars = cSecs.reduce((a, s) => a + s[1], 0), bpm = +$('#c-bpm').value || 72, bpb = +$('#c-bpb').value || 4;
+    $('#c-total').textContent = `${bars} bars + 1 count bar · ${fmt((bars + 1) * bpb * 60 / bpm)}`;
+  }
+  $('#newClick').onclick = () => {
+    cSecs = [['Intro', 4], ['Verse 1', 8], ['Chorus', 8], ['Verse 2', 8], ['Chorus', 8], ['Bridge', 8], ['Chorus', 8], ['Outro', 4]];
+    $('#c-name').value = ''; renderClickSecs(); $('#clickModal').hidden = false; $('#c-name').focus();
+  };
+  $('#c-add').onclick = () => { cSecs.push(['Section', 8]); renderClickSecs(); };
+  $('#clickCancel').onclick = () => { $('#clickModal').hidden = true; };
+  $('#c-bpm').oninput = total; $('#c-bpb').oninput = total;
+  $('#clickForm').onsubmit = async e => {
+    e.preventDefault();
+    const spec = { name: $('#c-name').value.trim(), bpm: +$('#c-bpm').value, beats_per_bar: Math.round(+$('#c-bpb').value), key: $('#c-key').value.trim(),
+      sections: cSecs.filter(s => s[0].trim()).map(s => [s[0].trim(), s[1]]), guide: $('#c-guide').checked };
+    if (!spec.name) { toast('Give the song a name.'); return; }
+    $('#c-go').disabled = true; $('#c-go').textContent = 'Creating…';
+    try {
+      const i = await invoke('create_click_song', { spec });
+      $('#clickModal').hidden = true; await refresh();
+      if (!playing()) await selectSong(i);
+      toast(`${spec.name} is ready. It's in Music → Playback Rig → Click Songs.`);
+    } catch (e2) { err(e2); } finally { $('#c-go').disabled = false; $('#c-go').textContent = 'Create song'; }
+  };
   document.addEventListener('keydown', e => {
     if (e.target.closest('input,select,textarea')) return;
     const k = e.key;
@@ -709,7 +794,7 @@
   T.event.listen('audio-error', e => toast('Audio problem: ' + e.payload));
   T.event.listen('pedal', e => {
     if (e.payload === 'next-song') { if (playing()) { toast('Next song loads when this one stops.'); return; } if (V && V.current != null && V.current + 1 < V.setlist.length) selectSong(V.current + 1); }
-    else if (e.payload === 'pad-only') toast('Pads arrive in a later update.');
+    else if (e.payload === 'pad-only') togglePad();
   });
 
   /* ---------- updates ---------- */

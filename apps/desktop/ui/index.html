@@ -33,6 +33,7 @@
     <div class="seg" id="quant" role="group" aria-label="Jump timing"><button data-q="Now">Now</button><button data-q="Bar">Bar</button><button data-q="SectionEnd">End</button></div>
     <button class="tog" id="clickBtn" title="Built-in click">Click</button>
     <button class="tog" id="countBtn" title="One bar of click before the song">Count-in</button>
+    <button class="tog pad" id="padBtn" title="Sustained pad in the song's key (pedal 4, hold)">Pad</button>
   </div>
   <div class="right">
     <button class="ib" id="songBtn">Song</button>
@@ -69,7 +70,7 @@
 <aside class="drawer left" id="setDrawer" hidden>
   <div class="dhead"><h2>Set</h2><button class="ib" data-close>Close</button></div>
   <ol class="songs" id="songs"></ol>
-  <button class="btn" id="addSongs">Add song folders</button>
+  <div class="row"><button class="btn" id="addSongs">Add song folders</button><button class="btn" id="newClick">New click song</button></div>
   <p class="hint">Each song is a folder of stems, like an unzipped MultiTracks download. The app reads the Click and Guide to set up tempo and sections.</p>
 </aside>
 
@@ -111,6 +112,16 @@
         <label>Recorded key<input id="f-key" maxlength="6"></label>
         <label>First downbeat (ms)<input id="f-off" type="number" min="0" step="1"></label>
       </div>
+      <h3 class="gap">Grid</h3>
+      <p class="hint">If every section starts early or late by the same amount, move the grid. Sections move with it.</p>
+      <div class="row">
+        <button class="btn" id="gBeatL">− 1 beat</button><button class="btn" id="gMsL">− 10 ms</button>
+        <button class="btn" id="gMsR">+ 10 ms</button><button class="btn" id="gBeatR">+ 1 beat</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button class="btn" id="gHalf" title="The click counts eighth notes: halve the tempo">Half time (÷2)</button>
+        <button class="btn" id="gDouble">Double time (×2)</button>
+      </div>
     </div>
     <div class="card">
       <h3>Section markers</h3>
@@ -143,6 +154,15 @@
     <button class="btn" id="checkUpd">Check for updates</button>
   </div>
   <div class="card">
+    <h3>Pads</h3>
+    <p class="hint" id="padHint">Pads are sustained tonic drones, one audio file per key (like MultiTracks pad packs). The key goes in each file's name, e.g. "A Pad.wav".</p>
+    <div class="row"><button class="btn" id="padFolder">Choose pads folder</button></div>
+    <div class="form one" style="margin-top:8px">
+      <label>Pad level<input id="padLevel" type="range" min="0" max="1.5" step="0.01"></label>
+      <label>Pad goes to<select id="padRoute"></select></label>
+    </div>
+  </div>
+  <div class="card">
     <h3>Pedals and controller</h3>
     <div class="form one"><label>MIDI input<select id="midiSel"></select></label></div>
     <p class="hint">Press <b>Learn</b>, then the pedal or button (or move the fader). Pedal rows: tap does the first action, hold does the second.</p>
@@ -152,6 +172,25 @@
   </div>
 </aside>
 
+<div class="modal" id="clickModal" hidden>
+  <form class="card dialog" id="clickForm">
+    <div class="dhead"><h2>New click song</h2><button type="button" class="ib" id="clickCancel">Cancel</button></div>
+    <p class="hint">For a song without tracks: a click, plus a guide that counts you in and calls each section in the bar before it.</p>
+    <div class="form">
+      <label>Song name<input id="c-name" required></label>
+      <label>Tempo (BPM)<input id="c-bpm" type="number" min="30" max="300" step="0.5" value="72" required></label>
+      <label>Beats per bar<input id="c-bpb" type="number" min="2" max="12" value="4" required></label>
+      <label>Key<input id="c-key" maxlength="4" placeholder="e.g. A"></label>
+    </div>
+    <h3 class="gap">Sections, in order</h3>
+    <div class="markers" id="c-secs"></div>
+    <div class="row between">
+      <button type="button" class="btn" id="c-add">Add section</button>
+      <label class="row hint"><input type="checkbox" id="c-guide" checked> Spoken guide</label>
+    </div>
+    <div class="row between"><span class="hint" id="c-total"></span><button class="btn accent" id="c-go">Create song</button></div>
+  </form>
+</div>
 <div class="toast" id="toast" role="status" hidden></div>
 <script src="app.js"></script>
 </body>

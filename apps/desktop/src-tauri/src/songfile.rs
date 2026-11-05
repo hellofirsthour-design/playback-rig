@@ -57,7 +57,13 @@ pub struct SongFile {
     /// Playback tempo, when different from the recorded tempo (`bpm`).
     #[serde(default)]
     pub target_bpm: Option<f64>,
+    /// Version of the automatic setup that last ran (see SETUP_VERSION).
+    #[serde(default)]
+    pub setup: u32,
 }
+
+/// Raise to make songs set up automatically by an older version set up again.
+pub const SETUP_VERSION: u32 = 2;
 
 pub fn is_click(name: &str) -> bool {
     name.to_ascii_lowercase().contains("click")
@@ -193,12 +199,24 @@ impl SongFile {
                 markers_from: None,
                 transpose: 0,
                 target_bpm: None,
+                setup: SETUP_VERSION,
             },
         };
+        // Songs set up automatically by an older version are set up again: the tempo
+        // could come out at double time and markers could miss the bar grid.
+        if sf.setup < SETUP_VERSION {
+            if matches!(sf.markers_from.as_deref(), None | Some("ableton") | Some("guide")) {
+                sf.markers_from = None;
+                if let Some(b) = folder_bpm {
+                    sf.bpm = b;
+                }
+            }
+            sf.setup = SETUP_VERSION;
+        }
         // A MultiTracks download includes an Ableton set with the exact section markers.
         if sf.markers_from.is_none() {
             if let Some(info) = crate::als::find(folder).and_then(|p| crate::als::read(&p).ok()) {
-                sf.apply_ableton(&info);
+                sf.apply_ableton(&info, folder_bpm);
             }
         }
         sf.stems.retain(|s| files.contains(&s.file));
@@ -211,11 +229,14 @@ impl SongFile {
         Ok(sf)
     }
 
-    /// Takes tempo, meter and locators from an Ableton set.
-    pub fn apply_ableton(&mut self, info: &crate::als::AlsInfo) -> bool {
-        if let Some(b) = info.bpm {
-            self.bpm = b;
-        }
+    /// Takes the meter and section locators from an Ableton set. Locators are turned
+    /// into seconds through the clip's own timing (start and warp markers), then
+    /// snapped to the song's bar grid. `known_bpm` (from the folder name) wins over
+    /// the set's tempo, which MultiTracks often runs at double time (eighth-note click).
+    pub fn apply_ableton(&mut self, info: &crate::als::AlsInfo, known_bpm: Option<f64>) -> bool {
+        let live_bpm = info.bpm.or(known_bpm).unwrap_or(self.bpm);
+        let bpm = known_bpm.unwrap_or(live_bpm);
+        self.bpm = bpm;
         if let Some(n) = info.beats_per_bar {
             self.beats_per_bar = n;
         }
@@ -223,18 +244,38 @@ impl SongFile {
             return false;
         }
         let bpb = self.beats_per_bar.max(1) as f64;
+        let beat = 60.0 / bpm;
+        let bar = beat * bpb;
+        let secs: Vec<(f64, &String)> = info.locators.iter().map(|(b, n)| (info.beat_to_sec(*b), n)).collect();
+        // The arrangement starts on a downbeat; choose the beat phase that puts the
+        // locators closest to bar lines (matters when the set runs at double time).
+        let start = info.beat_to_sec(0.0);
+        let off_err = |o: f64| -> f64 {
+            secs.iter().map(|(t, _)| { let r = (t - o).rem_euclid(bar); r.min(bar - r) }).sum()
+        };
+        let mut offset = start;
+        let mut best = off_err(start);
+        for k in 1..bpb as i64 {
+            let o = start + k as f64 * beat;
+            let e = off_err(o);
+            if e < best - 1e-6 {
+                best = e;
+                offset = o;
+            }
+        }
+        let offset = offset.rem_euclid(bar);
         let mut markers: Vec<Marker> = vec![];
-        for (i, (beats, name)) in info.locators.iter().enumerate() {
-            let bar = (beats / bpb).round().max(0.0) as u32 + 1;
-            if markers.last().map_or(false, |m| m.bar >= bar) {
+        for (i, (t, name)) in secs.iter().enumerate() {
+            let b = ((t - offset) / bar).round().max(0.0) as u32 + 1;
+            if markers.last().map_or(false, |m| m.bar >= b) {
                 continue;
             }
-            let name = if name.is_empty() { format!("Section {}", i + 1) } else { name.clone() };
-            markers.push(Marker { name, bar });
+            let name = if name.is_empty() { format!("Section {}", i + 1) } else { (*name).clone() };
+            markers.push(Marker { name, bar: b });
         }
         crate::guide::unique_names(&mut markers);
         self.markers = markers;
-        self.offset_ms = 0.0;
+        self.offset_ms = offset * 1000.0;
         self.arrangement = vec![];
         self.markers_from = Some("ableton".into());
         true
@@ -352,6 +393,31 @@ mod tests {
     }
 
     #[test]
+    fn double_time_ableton_set_lands_on_the_real_bar_grid() {
+        // Live runs at 155 (eighth-note click) for a 77.5 BPM song. The clip starts at
+        // arrangement beat 0, 0.1 s into the audio.
+        let info = crate::als::AlsInfo {
+            bpm: Some(155.0),
+            beats_per_bar: Some(4),
+            locators: vec![(16.0, "Intro".into()), (48.0, "Verse".into()), (112.0, "Chorus".into())],
+            clip: Some(crate::als::ClipTiming { time: 0.0, start: 0.0, warped: true, warp: vec![(0.0, 0.1), (155.0, 60.1)] }),
+        };
+        let mut sf = SongFile { name: "S".into(), bpm: 120.0, beats_per_bar: 4, ..Default::default() };
+        sf.apply_ableton(&info, Some(77.5));
+        assert_eq!(sf.bpm, 77.5);
+        assert!((sf.offset_ms - 100.0).abs() < 0.5, "offset {}", sf.offset_ms);
+        let m: Vec<(&str, u32)> = sf.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
+        assert_eq!(m, [("Intro", 3), ("Verse", 7), ("Chorus", 15)]);
+        // every section is a whole number of bars on the 77.5 grid
+        let (song, _) = sf.build(48_000, 48_000 * 60).unwrap();
+        let bar = song.frames_per_bar();
+        for s in &song.sections[1..song.sections.len() - 1] {
+            let bars = s.len() as f64 / bar;
+            assert!((bars - bars.round()).abs() * bar < 1.5, "{} is {bars} bars (more than a sample off)", s.name);
+        }
+    }
+
+    #[test]
     fn tempo_change_scales_section_positions() {
         let mut sf = SongFile { name: "S".into(), bpm: 60.0, beats_per_bar: 4, offset_ms: 1000.0, markers: vec![Marker { name: "A".into(), bar: 1 }, Marker { name: "B".into(), bar: 3 }], ..Default::default() };
         sf.target_bpm = Some(120.0); // twice as fast: half the length
@@ -388,6 +454,7 @@ mod tests {
             markers_from: None,
                 transpose: 0,
                 target_bpm: None,
+                setup: SETUP_VERSION,
         };
         let (song, arr) = sf.build(1000, 20_000).unwrap();
         let names: Vec<&str> = song.sections.iter().map(|s| s.name.as_str()).collect();

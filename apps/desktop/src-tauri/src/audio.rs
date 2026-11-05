@@ -13,6 +13,11 @@ pub enum ToAudio {
     Swap(Box<Engine>),
     /// A new arrangement while playing, and the new index of the block playing now.
     Arrange(Box<Arrangement>, usize),
+    /// Crossfade to this pad.
+    Pad(Box<crate::pads::PadVoice>),
+    PadOn(bool),
+    PadLevel(f32),
+    PadRoute(rig_engine::Route),
 }
 
 /// Things the audio thread hands back to be freed elsewhere. Only ever dropped.
@@ -20,6 +25,7 @@ pub enum ToAudio {
 pub enum Garbage {
     Engine(Box<Engine>),
     Arrangement(Box<Arrangement>),
+    Pad(Box<crate::pads::PadVoice>),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -121,6 +127,7 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, on_error
             let sample_rate = config.sample_rate.0;
 
             let mut engine: Option<Box<Engine>> = None;
+            let mut pads = crate::pads::PadPlayer::new(sample_rate);
             let stream = dev.build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
@@ -142,6 +149,14 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, on_error
                                 }
                                 let _ = gtx.push(Garbage::Arrangement(arr));
                             }
+                            ToAudio::Pad(v) => {
+                                if let Some(old) = pads.swap(v) {
+                                    let _ = gtx.push(Garbage::Pad(old));
+                                }
+                            }
+                            ToAudio::PadOn(on) => pads.on = on,
+                            ToAudio::PadLevel(l) => pads.level = l.clamp(0.0, 2.0),
+                            ToAudio::PadRoute(r) => pads.route = r,
                         }
                     }
                     match engine.as_mut() {
@@ -152,6 +167,9 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, on_error
                             }
                         }
                         None => data.fill(0.0),
+                    }
+                    if let Some(done) = pads.process(data, channels) {
+                        let _ = gtx.push(Garbage::Pad(done));
                     }
                 },
                 move |err| on_error(err.to_string()),

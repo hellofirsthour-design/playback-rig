@@ -330,18 +330,64 @@ pub struct Analysis {
     pub heard: Vec<(f64, String)>,
 }
 
+/// The click's tempo, reconciled with a tempo known from the folder name: an
+/// eighth-note click reads as double time, so it is counted in eighths instead.
+pub fn tempo_with_known(x: &[f32], sr: u32, bpb: u32, known: Option<f64>) -> Option<Tempo> {
+    let t = tempo_from_click(x, sr, bpb)?;
+    let Some(k) = known.filter(|k| *k > 0.0) else { return Some(t) };
+    let r = t.bpm / k;
+    if (r - 2.0).abs() < 0.06 {
+        let t2 = tempo_from_click(x, sr, bpb * 2).unwrap_or(t);
+        return Some(Tempo { bpm: k, offset: t2.offset });
+    }
+    if (r - 1.0).abs() < 0.03 || (r - 0.5).abs() < 0.02 {
+        return Some(Tempo { bpm: k, offset: t.offset });
+    }
+    Some(t)
+}
+
+/// Guides count bars in ("one, two, three, four"): every "one" is on a downbeat.
+/// Shifts the downbeat by whole beats so the spoken "one"s line up with it.
+pub fn align_to_counts(tempo: Tempo, heard: &[Heard], bpb: u32) -> Tempo {
+    let ones: Vec<f64> = heard
+        .iter()
+        .filter(|h| {
+            let w: String = h.text.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+            w == "1" || w == "one"
+        })
+        .map(|h| h.start)
+        .collect();
+    if ones.is_empty() {
+        return tempo;
+    }
+    let beat = 60.0 / tempo.bpm;
+    let bar = beat * bpb.max(1) as f64;
+    let err = |o: f64| -> f64 { ones.iter().map(|t| { let r = (t - o).rem_euclid(bar); r.min(bar - r) }).sum() };
+    let mut best = (err(tempo.offset), tempo.offset);
+    for k in 1..bpb.max(1) {
+        let o = tempo.offset + k as f64 * beat;
+        let e = err(o);
+        if e < best.0 - 0.02 {
+            best = (e, o);
+        }
+    }
+    Tempo { bpm: tempo.bpm, offset: best.1.rem_euclid(bar) }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn analyze(
     click: Option<&StemAudio>,
     guide: Option<&StemAudio>,
     sr: u32,
     bpb: u32,
     fallback_bpm: f64,
+    known_bpm: Option<f64>,
     model: Option<&Path>,
     mut progress: impl FnMut(&str, f32),
 ) -> Result<Analysis, String> {
     progress("Finding the tempo", 0.0);
-    let tempo = click.and_then(|c| tempo_from_click(&to_mono(c), sr, bpb));
-    let use_tempo = tempo.unwrap_or(Tempo { bpm: fallback_bpm, offset: 0.0 });
+    let tempo = click.and_then(|c| tempo_with_known(&to_mono(c), sr, bpb, known_bpm));
+    let mut use_tempo = tempo.unwrap_or(Tempo { bpm: known_bpm.unwrap_or(fallback_bpm), offset: 0.0 });
     let mut heard: Vec<Heard> = vec![];
     if let (Some(g), Some(model)) = (guide, model) {
         progress("Listening to the guide", 0.05);
@@ -362,10 +408,12 @@ pub fn analyze(
             heard.push(Heard { start: c.start, end: c.end, label: label_for(&text), text });
         }
     }
+    use_tempo = align_to_counts(use_tempo, &heard, bpb);
     progress("Done", 1.0);
+    let found = tempo.is_some() || known_bpm.is_some();
     Ok(Analysis {
-        bpm: tempo.map(|t| t.bpm),
-        offset_ms: tempo.map(|t| t.offset * 1000.0),
+        bpm: found.then_some(use_tempo.bpm),
+        offset_ms: found.then_some(use_tempo.offset * 1000.0),
         markers: place_markers(&heard, use_tempo, bpb),
         heard: heard.into_iter().map(|h| (h.start, h.text)).collect(),
     })
@@ -404,6 +452,22 @@ mod tests {
         let t = tempo_from_click(&x, sr, 4).unwrap();
         assert_eq!(t.bpm, 72.0);
         assert!((t.offset - (0.5 + 2.0 * beat)).abs() < 0.003, "offset {}", t.offset);
+    }
+
+    #[test]
+    fn eighth_note_click_is_read_at_the_folder_tempo() {
+        // 77.5 BPM song, click on every eighth (155/min), accents every 4 eighths
+        // (twice a bar). Bar 1 starts at 0.5 s.
+        let sr = 48_000;
+        let x = click_track(sr, 155.0, 0.5, 64, true);
+        let t = tempo_with_known(&x, sr, 4, Some(77.5)).unwrap();
+        assert_eq!(t.bpm, 77.5);
+        let bar = 60.0 / 77.5 * 4.0;
+        // accents can't tell the two half-bars apart; the guide's "one"s can
+        let heard = vec![h(0.5 + bar, 0.8 + bar, "One."), h(0.5 + 2.0 * bar, 0.8 + 2.0 * bar, "1")];
+        let fixed = align_to_counts(t, &heard, 4);
+        let d = (fixed.offset - 0.5).rem_euclid(bar);
+        assert!(d.min(bar - d) < 0.01, "downbeat at {} (bar {bar})", fixed.offset);
     }
 
     #[test]
@@ -469,7 +533,8 @@ mod tests {
         let bpm: f64 = std::env::var("RIG_BPM").ok().and_then(|v| v.parse().ok()).unwrap_or(120.0);
         let click = std::env::var("RIG_CLICK").ok().map(|p| crate::decode::decode(Path::new(&p), 48_000).unwrap());
         let guide = crate::decode::decode(Path::new(&g), 48_000).unwrap();
-        let a = analyze(click.as_ref(), Some(&guide), 48_000, 4, bpm, Some(Path::new(&m)), |_, _| {}).unwrap();
+        let known: Option<f64> = std::env::var("RIG_KNOWN").ok().and_then(|v| v.parse().ok());
+        let a = analyze(click.as_ref(), Some(&guide), 48_000, 4, bpm, known, Some(Path::new(&m)), |_, _| {}).unwrap();
         println!("{a:#?}");
     }
 }

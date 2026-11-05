@@ -3,10 +3,12 @@
 
 mod als;
 mod audio;
+mod clicksong;
 mod decode;
 mod guide;
 mod midi_io;
 mod model;
+mod pads;
 mod songfile;
 mod stretch;
 
@@ -35,6 +37,12 @@ struct Settings {
     count_in: bool,
     click_gain: f32,
     click_route: Option<Route>,
+    /// Settings format; older settings are migrated on load.
+    version: u32,
+    /// Folder of pad files, one per key.
+    pads_folder: Option<PathBuf>,
+    pad_level: f32,
+    pad_route: Option<Route>,
 }
 
 impl Default for Settings {
@@ -45,9 +53,13 @@ impl Default for Settings {
             setlist: vec![],
             current: None,
             quantize: Quantize::Bar,
-            count_in: true,
+            count_in: false,
             click_gain: 0.8,
             click_route: None,
+            version: 1,
+            pads_folder: None,
+            pad_level: 0.6,
+            pad_route: None,
         }
     }
 }
@@ -116,6 +128,52 @@ struct AppState {
     song: Mutex<Option<Loaded>>,
     settings: Mutex<Settings>,
     midi: Mutex<Option<midi_io::MidiPort>>,
+    pad_on: Mutex<bool>,
+    /// Pitch class of the pad loaded on the audio thread.
+    pad_key: Mutex<Option<u8>>,
+}
+
+/// The song's key as played (recorded key + key change), as a pitch class.
+fn song_key_pc(f: &SongFile) -> Option<u8> {
+    pads::pitch_class(&f.key).map(|pc| ((pc as i32 + f.transpose).rem_euclid(12)) as u8)
+}
+
+/// Brings the pad in line with the switch and the song's key: fades in/out, or
+/// crossfades to the pad for a new key (decoded on a worker thread).
+fn pad_update(state: &AppState) -> Result<(), String> {
+    let on = *state.pad_on.lock().unwrap();
+    let s = state.settings.lock().unwrap().clone();
+    if let Some(o) = state.core.output.lock().unwrap().as_mut() {
+        o.send(ToAudio::PadLevel(s.pad_level));
+        o.send(ToAudio::PadRoute(s.pad_route.unwrap_or(Route::Pair(0))));
+        o.send(ToAudio::PadOn(on));
+    }
+    if !on {
+        return Ok(());
+    }
+    let folder = s.pads_folder.clone().ok_or("Choose your pads folder in Setup → Pads first.")?;
+    let pc = state
+        .song
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|l| song_key_pc(&l.file))
+        .ok_or("This song has no key, so there's no pad to play. Set its key in Song → Song details.")?;
+    if *state.pad_key.lock().unwrap() == Some(pc) {
+        return Ok(());
+    }
+    let file = pads::scan(&folder)[pc as usize].clone().ok_or(format!("There's no {} pad in your pads folder.", pads::NAMES[pc as usize]))?;
+    let sr = state.core.output.lock().unwrap().as_ref().map(|o| o.info.sample_rate).ok_or("No audio output is open.")?;
+    *state.pad_key.lock().unwrap() = Some(pc);
+    let core = state.core.clone();
+    std::thread::spawn(move || {
+        if let Ok(v) = decode::decode(&file, sr).and_then(|a| pads::make_voice(&a, sr)) {
+            if let Some(o) = core.output.lock().unwrap().as_mut() {
+                o.send(ToAudio::Pad(Box::new(v)));
+            }
+        }
+    });
+    Ok(())
 }
 
 impl AppState {
@@ -383,6 +441,19 @@ struct AppView {
     click_route: Route,
     bindings: Vec<Binding>,
     learning: bool,
+    pads: PadsView,
+}
+
+#[derive(Serialize)]
+struct PadsView {
+    folder: Option<String>,
+    /// Keys with a pad file, e.g. ["C", "D", "A"].
+    keys: Vec<String>,
+    on: bool,
+    level: f32,
+    route: Route,
+    /// The key the pad plays for the current song.
+    song_key: Option<String>,
 }
 
 fn view(state: &AppState) -> AppView {
@@ -419,6 +490,14 @@ fn view(state: &AppState) -> AppView {
         click_route: s.click_route.unwrap_or(songfile::default_route("click", ch)),
         bindings,
         learning,
+        pads: PadsView {
+            folder: s.pads_folder.as_ref().map(|p| p.display().to_string()),
+            keys: s.pads_folder.as_ref().map(|f| pads::scan(f).iter().enumerate().filter(|(_, p)| p.is_some()).map(|(i, _)| pads::NAMES[i].to_string()).collect()).unwrap_or_default(),
+            on: *state.pad_on.lock().unwrap(),
+            level: s.pad_level,
+            route: s.pad_route.unwrap_or(Route::Pair(0)),
+            song_key: state.song.lock().unwrap().as_ref().and_then(|l| song_key_pc(&l.file)).map(|pc| pads::NAMES[pc as usize].to_string()),
+        },
     }
 }
 
@@ -466,7 +545,9 @@ async fn choose_output(app: AppHandle, state: State<'_, AppState>, name: Option<
     let info = open_output(&state.core, &app, name)?;
     state.settings.lock().unwrap().output = Some(info.name.clone());
     state.save_settings();
+    *state.pad_key.lock().unwrap() = None; // the new output starts without a pad
     reload_current(&state).await?;
+    let _ = pad_update(&state);
     Ok(view(&state))
 }
 
@@ -558,6 +639,7 @@ async fn select_song(state: State<'_, AppState>, index: usize) -> Result<AppView
     *state.song.lock().unwrap() = Some(loaded);
     state.settings.lock().unwrap().current = Some(index);
     state.save_settings();
+    let _ = pad_update(&state); // pad follows the new song's key
     Ok(view(&state))
 }
 
@@ -767,6 +849,80 @@ fn set_arrangement(state: State<'_, AppState>, blocks: Vec<Block>, keep: Option<
     Ok(view(&state))
 }
 
+#[tauri::command]
+async fn choose_pads_folder(app: AppHandle, state: State<'_, AppState>) -> Result<AppView, String> {
+    let picked = app.dialog().file().set_title("Choose your pads folder (one audio file per key)").blocking_pick_folder();
+    if let Some(p) = picked.and_then(|f| f.into_path().ok()) {
+        if pads::scan(&p).iter().all(|f| f.is_none()) {
+            return Err("No pad files found there. Each file's name needs its key in it, like \"A Pad.wav\" or \"Pad - Bb.m4a\".".into());
+        }
+        state.settings.lock().unwrap().pads_folder = Some(p);
+        state.save_settings();
+        *state.pad_key.lock().unwrap() = None;
+        let _ = pad_update(&state);
+    }
+    Ok(view(&state))
+}
+
+#[tauri::command]
+fn pad_set(state: State<'_, AppState>, on: bool) -> Result<AppView, String> {
+    *state.pad_on.lock().unwrap() = on;
+    if let Err(e) = pad_update(&state) {
+        *state.pad_on.lock().unwrap() = false;
+        let _ = pad_update(&state);
+        return Err(e);
+    }
+    Ok(view(&state))
+}
+
+#[tauri::command]
+fn pad_mix(state: State<'_, AppState>, level: Option<f32>, route: Option<Route>) -> Result<(), String> {
+    {
+        let mut s = state.settings.lock().unwrap();
+        if let Some(l) = level {
+            s.pad_level = l.clamp(0.0, 1.5);
+        }
+        if let Some(r) = route {
+            s.pad_route = Some(r);
+        }
+    }
+    state.save_settings();
+    let s = state.settings.lock().unwrap().clone();
+    if let Some(o) = state.core.output.lock().unwrap().as_mut() {
+        o.send(ToAudio::PadLevel(s.pad_level));
+        o.send(ToAudio::PadRoute(s.pad_route.unwrap_or(Route::Pair(0))));
+    }
+    Ok(())
+}
+
+/// Makes a click (and spoken guide) song, adds it to the end of the set and returns
+/// its position in the set.
+#[tauri::command]
+async fn create_click_song(app: AppHandle, state: State<'_, AppState>, spec: clicksong::Spec) -> Result<usize, String> {
+    let root = app
+        .path()
+        .audio_dir()
+        .or_else(|_| app.path().document_dir())
+        .map_err(|e| e.to_string())?
+        .join("Playback Rig")
+        .join("Click Songs");
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let work = state.core.data_dir.join("voice");
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let (folder, _guide) = tauri::async_runtime::spawn_blocking(move || {
+        let voice = clicksong::mac_voice(work);
+        clicksong::create(&root, &spec, &voice)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let mut s = state.settings.lock().unwrap();
+    s.setlist.push(folder);
+    let i = s.setlist.len() - 1;
+    drop(s);
+    state.save_settings();
+    Ok(i)
+}
+
 /// Changes the key (semitones) and/or tempo, then re-renders the stems.
 #[tauri::command]
 async fn set_key_tempo(app: AppHandle, state: State<'_, AppState>, transpose: i32, bpm: Option<f64>) -> Result<AppView, String> {
@@ -789,6 +945,7 @@ async fn set_key_tempo(app: AppHandle, state: State<'_, AppState>, transpose: i3
     let settings = state.settings.lock().unwrap().clone();
     install(&state.core, &settings, &loaded)?;
     *state.song.lock().unwrap() = Some(loaded);
+    let _ = pad_update(&state);
     Ok(view(&state))
 }
 
@@ -825,11 +982,12 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
         return Err("Stop playback before reading the guide.".into());
     }
     // Read the original recordings from disk, not the key/tempo-changed copies.
-    let (click_path, guide_path, sr, bpb, bpm) = {
+    let (click_path, guide_path, sr, bpb, bpm, known_bpm) = {
         let song = state.song.lock().unwrap();
         let l = song.as_ref().ok_or("Load a song first.")?;
+        let known_bpm = songfile::parse_folder_name(&songfile::song_title(&l.folder)).2;
         let find = |f: fn(&str) -> bool| l.file.stems.iter().find(|s| f(&s.name)).map(|s| l.folder.join(&s.file));
-        (find(songfile::is_click), find(songfile::is_guide), l.sample_rate, l.file.beats_per_bar, l.file.bpm)
+        (find(songfile::is_click), find(songfile::is_guide), l.sample_rate, l.file.beats_per_bar, l.file.bpm, known_bpm)
     };
     if click_path.is_none() && guide_path.is_none() {
         return Err("This song has no Click or Guide stem to read. Add sections by hand in the Song panel.".into());
@@ -850,7 +1008,7 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
             Some(_) => Some(model::ensure(&data_dir, |p| emit("Downloading the speech model (one time, about 150 MB)", p))?),
             None => None,
         };
-        guide::analyze(click.as_ref(), guide.as_ref(), sr, bpb, bpm, model.as_deref(), |s, p| emit(s, p))
+        guide::analyze(click.as_ref(), guide.as_ref(), sr, bpb, bpm, known_bpm, model.as_deref(), |s, p| emit(s, p))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -960,7 +1118,12 @@ fn main() {
             std::fs::create_dir_all(&dir)?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let settings: Settings = read_json(&dir.join("settings.json"));
+            let mut settings: Settings = read_json(&dir.join("settings.json"));
+            if settings.version < 1 {
+                settings.count_in = false; // count-in is now off unless asked for
+                settings.version = 1;
+                write_json(&dir.join("settings.json"), &settings);
+            }
             let map: MidiMap = read_json(&dir.join("midi.json"));
             let core = Arc::new(Core {
                 output: Mutex::new(None),
@@ -988,7 +1151,7 @@ fn main() {
                     }
                 })?;
             }
-            app.manage(AppState { core, song: Mutex::new(None), settings: Mutex::new(settings), midi: Mutex::new(midi) });
+            app.manage(AppState { core, song: Mutex::new(None), settings: Mutex::new(settings), midi: Mutex::new(midi), pad_on: Mutex::new(false), pad_key: Mutex::new(None) });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1007,6 +1170,10 @@ fn main() {
             analyze_song,
             check_update,
             set_key_tempo,
+            choose_pads_folder,
+            pad_set,
+            pad_mix,
+            create_click_song,
             install_update,
             app_version,
             midi_learn,
