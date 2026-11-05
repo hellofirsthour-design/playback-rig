@@ -430,6 +430,82 @@ pub fn snap_grid_to_click(f: &mut crate::songfile::SongFile, x: &[f32], sr: u32)
     true
 }
 
+/// Where the guide says sections start, without needing to understand the words: each
+/// "call" (a cue, plus any count after it) is followed by its section on the next
+/// downbeat. Bursts of speech less than ~3/4 of a bar apart belong to the same call.
+/// Returns 1-based bar numbers on the song's grid (bpm, bar 1 at `offset` seconds).
+pub fn call_starts(guide: &[f32], sr: u32, bpm: f64, bpb: u32, offset: f64) -> Vec<u32> {
+    let beat = 60.0 / bpm;
+    let bar = beat * bpb.max(1) as f64;
+    let cues = find_cues(guide, sr);
+    let mut ends: Vec<f64> = vec![];
+    let mut last_end = f64::NEG_INFINITY;
+    for c in &cues {
+        if c.start - last_end > 0.75 * bar {
+            ends.push(c.end);
+        } else if let Some(e) = ends.last_mut() {
+            *e = c.end;
+        }
+        last_end = c.end;
+    }
+    let mut out: Vec<u32> = ends.iter().map(|e| ((e - 0.35 * beat - offset) / bar).ceil().max(0.0) as u32 + 1).collect();
+    out.dedup();
+    out
+}
+
+/// Moves each section marker onto the guide's section start beside it: a marker that
+/// sits on the cue's own bar (one early) or one bar late moves to where the guide
+/// says the section starts. Markers already on a start, or with no call nearby, stay.
+pub fn align_markers_to_calls(markers: &mut Vec<Marker>, starts: &[u32]) -> bool {
+    let mut changed = false;
+    for m in markers.iter_mut() {
+        if starts.contains(&m.bar) {
+            continue;
+        }
+        if starts.contains(&(m.bar + 1)) {
+            m.bar += 1;
+            changed = true;
+        } else if m.bar > 1 && starts.contains(&(m.bar - 1)) {
+            m.bar -= 1;
+            changed = true;
+        }
+    }
+    markers.sort_by_key(|m| m.bar);
+    markers.dedup_by_key(|m| m.bar);
+    changed
+}
+
+/// Drops numbers the app added that aren't needed any more ("Intro 2" when there's
+/// only one Intro). Returns (old name, new name) for each rename.
+pub fn tidy_names(markers: &mut [Marker]) -> Vec<(String, String)> {
+    fn base(n: &str) -> &str {
+        let t = n.trim_end_matches(')');
+        let cut = t.rfind(|c: char| c == ' ' || c == '(').map(|i| (&t[..i], &t[i + 1..]));
+        match cut {
+            Some((b, num)) if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) => b.trim_end(),
+            _ => n,
+        }
+    }
+    let mut renames = vec![];
+    let bases: Vec<String> = markers.iter().map(|m| base(&m.name).to_string()).collect();
+    for (i, m) in markers.iter_mut().enumerate() {
+        let b = &bases[i];
+        if b != &m.name && bases.iter().filter(|x| *x == b).count() == 1 && !b.is_empty() {
+            // "Verse 2" with no other verse keeps its number only if it was the song's
+            // own name; the app's numbering is always "Name N" from unique_names.
+            if !matches!(b.to_ascii_lowercase().as_str(), "verse" | "chorus" | "bridge" | "tag" | "pre-chorus" | "post-chorus" | "refrain" | "vamp" | "interlude" | "instrumental" | "turnaround" | "breakdown" | "build" | "outro" | "ending" | "intro" | "solo" | "hook" | "rap") {
+                continue;
+            }
+            if b.eq_ignore_ascii_case("verse") || b.eq_ignore_ascii_case("chorus") || b.eq_ignore_ascii_case("bridge") {
+                continue; // "Verse 2" / "Chorus 3" are meaningful even alone
+            }
+            renames.push((m.name.clone(), b.clone()));
+            m.name = b.clone();
+        }
+    }
+    renames
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn analyze(
     click: Option<&StemAudio>,
@@ -582,6 +658,43 @@ mod tests {
         let got: Vec<String> = place_markers(&heard, tempo, 4).into_iter().map(|m| m.name).collect();
         assert_eq!(got, ["Verse 1", "Breakdown"]);
         assert!(is_band_cue("Build Up") && is_band_cue("All In") && is_band_cue("Drums In") && !is_band_cue("Intro") && !is_band_cue("Breakdown"));
+    }
+
+    #[test]
+    fn markers_move_a_bar_after_the_guide_call() {
+        // 77.5 BPM, bar 1 at 0. Calls: count-in over bars 1-2, cues in bars 6, 14, 16
+        // (with a count word) and 24. Ableton markers: Intro 3, Verse 7 (right), Tag 14
+        // and Chorus 16 (on the cue: one early), Turnaround 25 (right).
+        let sr = 16_000;
+        let bpm = 77.5;
+        let beat = 60.0 / bpm;
+        let bar = beat * 4.0;
+        let at = |b: u32, beat_in: f64| (b - 1) as f64 * bar + beat_in * beat;
+        let mut x = vec![0f32; (sr as f64 * at(30, 0.0)) as usize];
+        let mut say = |t: f64, len: f64| {
+            for i in (t * sr as f64) as usize..((t + len) * sr as f64) as usize {
+                x[i] = (i as f32 * 0.3).sin() * 0.4;
+            }
+        };
+        for (b, bt) in [(1, 0.0), (1, 2.0), (2, 0.0), (2, 1.0), (2, 2.0), (2, 3.0)] {
+            say(at(b, bt), 0.3); // "1 . 2 . | 1 2 3 4"
+        }
+        say(at(6, 0.0), 0.6); // "Verse one"
+        say(at(14, 0.0), 0.4); // "Tag"
+        say(at(16, 0.0), 0.5); // "Chorus"
+        say(at(16, 1.0), 0.3); // "two"
+        say(at(24, 0.0), 0.6); // "Turnaround"
+        let starts = call_starts(&x, sr, bpm, 4, 0.0);
+        assert_eq!(starts, vec![3, 7, 15, 17, 25]);
+        let mk = |n: &str, b: u32| Marker { name: n.into(), bar: b };
+        let mut m = vec![mk("Intro 2", 3), mk("Verse 1", 7), mk("Tag 1", 14), mk("Chorus 1", 16), mk("Turnaround", 25)];
+        assert!(align_markers_to_calls(&mut m, &starts));
+        let got: Vec<u32> = m.iter().map(|m| m.bar).collect();
+        assert_eq!(got, [3, 7, 15, 17, 25]);
+        let renames = tidy_names(&mut m);
+        let names: Vec<&str> = m.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Intro", "Verse 1", "Tag", "Chorus 1", "Turnaround"]);
+        assert_eq!(renames, vec![("Intro 2".to_string(), "Intro".to_string()), ("Tag 1".to_string(), "Tag".to_string())]);
     }
 
     #[test]

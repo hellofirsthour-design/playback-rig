@@ -71,7 +71,7 @@
     if (/outro|ending|\bend\b/.test(n)) return '#66727f';
     if (/instrumental|interlude|turn|solo/.test(n)) return '#18b4c9';
     if (/break|build/.test(n)) return '#e05dae';
-    if (/^top$/.test(n)) return '#4a4f58';
+    if (/^top$|count/.test(n)) return '#4a4f58';
     return '#9aa0a8';
   }
   const STEM_FALLBACK = ['#4c9dff', '#f2c94c', '#36c9b0', '#ff6fae', '#b07cff', '#ff7a45'];

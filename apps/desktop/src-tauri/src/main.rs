@@ -395,9 +395,20 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
     if file.grid_version < songfile::GRID_VERSION && matches!(file.markers_from.as_deref(), Some("ableton") | Some("guide")) {
         if let Some(i) = file.stems.iter().position(|s| songfile::is_click(&s.name)) {
             guide::snap_grid_to_click(&mut file, &guide::to_mono(&stems[i]), sample_rate);
-            file.grid_version = songfile::GRID_VERSION;
-            let _ = file.save(folder);
         }
+        // Sections start a bar after the guide's call: move each marker onto the
+        // section start the guide gives beside it, and drop numbering that isn't needed.
+        if let Some(g) = file.stems.iter().position(|s| songfile::is_guide(&s.name)) {
+            let starts = guide::call_starts(&guide::to_mono(&stems[g]), sample_rate, file.play_bpm(), file.beats_per_bar, file.offset_ms / 1000.0 * file.stretch());
+            guide::align_markers_to_calls(&mut file.markers, &starts);
+        }
+        for (old, new) in guide::tidy_names(&mut file.markers) {
+            for b in file.arrangement.iter_mut().filter(|b| b.section == old) {
+                b.section = new.clone();
+            }
+        }
+        file.grid_version = songfile::GRID_VERSION;
+        let _ = file.save(folder);
     }
     let (song, arr) = file.build(sample_rate, length)?;
     let peaks = stems.iter().map(|s| peaks(s, sample_rate)).collect();
@@ -1607,7 +1618,25 @@ mod tests {
         }
         write_wav(&mt.join("Click Track.wav"), &click, sr);
         let tone = |hz: f32, amp: f32| -> Vec<f32> { (0..len).map(|i| (i as f32 / sr as f32 * hz * std::f32::consts::TAU).sin() * amp).collect() };
-        write_wav(&mt.join("Guide.wav"), &vec![0.0; len], sr);
+        // Guide: "1 . 2 . | 1 2 3 4" count-in over bars 1-2, then a call in the bar
+        // before each section (Verse in bar 6, Chorus in bars 10 and 14).
+        let beat = 60.0 / 77.5;
+        let at = |b: u32, bt: f64| ((b - 1) as f64 * 4.0 + bt) * beat;
+        let mut guide = vec![0f32; len];
+        let mut say = |t: f64, l: f64| {
+            for i in (t * sr as f64) as usize..((t + l) * sr as f64) as usize {
+                guide[i] = (i as f32 * 0.21).sin() * 0.4;
+            }
+        };
+        for (b, bt) in [(1, 0.0), (1, 2.0), (2, 0.0), (2, 1.0), (2, 2.0), (2, 3.0)] {
+            say(at(b, bt), 0.3);
+        }
+        for b in [6, 10, 14] {
+            say(at(b, 0.0), 0.6);
+            say(at(b, 2.0), 0.3);
+            say(at(b, 3.0), 0.3);
+        }
+        write_wav(&mt.join("Guide.wav"), &guide, sr);
         write_wav(&mt.join("BGV.wav"), &tone(330.0, 0.2), sr);
         write_wav(&mt.join("Bass.wav"), &tone(55.0, 0.3), sr);
         write_wav(&mt.join("Drums (Live).wav"), &tone(80.0, 0.3), sr);
@@ -1624,7 +1653,7 @@ mod tests {
               <Locator Id="1"><Time Value="48" /><Name Value="Verse 1" /></Locator>
               <Locator Id="2"><Time Value="64" /><Name Value="Build" /></Locator>
               <Locator Id="3"><Time Value="80" /><Name Value="Chorus" /></Locator>
-              <Locator Id="4"><Time Value="112" /><Name Value="Chorus" /></Locator>
+              <Locator Id="4"><Time Value="104" /><Name Value="Chorus" /></Locator>
             </Locators></Locators>
             <MasterTrack><DeviceChain><Mixer><Tempo><LomId Value="0" /><Manual Value="155" /></Tempo>
             <TimeSignature><LomId Value="0" /><Manual Value="201" /></TimeSignature></Mixer></DeviceChain></MasterTrack></LiveSet></Ableton>"#,
@@ -1644,9 +1673,11 @@ mod tests {
         // folder name and Ableton set
         assert_eq!((f.name.as_str(), f.key.as_str(), f.bpm, f.beats_per_bar), ("See a Victory", "A", 77.5, 4));
         assert_eq!(f.markers_from.as_deref(), Some("ableton"));
-        // band cue dropped, repeated name numbered, sections on real bars
+        // band cue dropped, repeated name numbered, sections on real bars; the second
+        // Chorus sat on its cue (bar 14) in the Ableton set and moves a bar later
         let m: Vec<(&str, u32)> = f.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
         assert_eq!(m, [("Intro", 3), ("Verse 1", 7), ("Chorus 1", 11), ("Chorus 2", 15)]);
+        assert_eq!(l.song.sections[0].name, "Count-in", "the two bars before Intro");
         // bar 1 is the first click, at the very start of the file
         assert_eq!(f.grid_version, songfile::GRID_VERSION);
         assert_eq!(f.offset_ms, 0.0, "bar 1 is the first click");

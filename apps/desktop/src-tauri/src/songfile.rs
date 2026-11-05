@@ -70,7 +70,7 @@ pub struct SongFile {
 pub const SETUP_VERSION: u32 = 3;
 
 /// Raise to line up the grid of automatically set up songs with the click again.
-pub const GRID_VERSION: u32 = 3;
+pub const GRID_VERSION: u32 = 4;
 
 /// Where a stem sits in the track list: click and guide first, then Drums,
 /// Percussion, Bass, Guitars, Keys, Other instruments, Vocals, FX.
@@ -375,9 +375,15 @@ impl SongFile {
             .collect();
         marks.sort_by_key(|m| m.1);
         marks.dedup_by_key(|m| m.1);
-        if marks.first().map_or(true, |m| m.1 > 0) {
-            marks.insert(0, ("Top".into(), 0));
-        }
+        // Audio before the first section: the count-in (a bar or more) or a pickup.
+        let lead = if marks.first().map_or(true, |m| m.1 > 0) {
+            let first = marks.first().map_or(length, |m| m.1);
+            let name = if first as f64 >= bar * 0.9 { "Count-in" } else { "Top" };
+            marks.insert(0, (name.into(), 0));
+            Some(name)
+        } else {
+            None
+        };
         let sections: Vec<Section> = marks
             .iter()
             .enumerate()
@@ -401,7 +407,9 @@ impl SongFile {
             .arrangement
             .iter()
             .filter_map(|b| {
-                let section = song.section_index(&b.section)?;
+                // Saved arrangements may call the lead-in "Top" or "Count-in".
+                let lead_alias = lead.is_some() && (b.section == "Top" || b.section == "Count-in");
+                let section = song.section_index(&b.section).or(lead_alias.then_some(0))?;
                 let muted_stems = b.muted.iter().filter_map(|m| self.stems.iter().position(|s| &s.name == m)).collect();
                 Some(ArrItem { section, muted_stems })
             })
