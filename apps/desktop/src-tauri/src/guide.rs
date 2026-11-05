@@ -209,6 +209,18 @@ pub fn label_for(text: &str) -> Option<String> {
     })
 }
 
+/// Cues for the band and MD ("Build", "Drums in", "All in", "Hits"), not parts of the
+/// song's form, so never section markers.
+pub fn is_band_cue(name: &str) -> bool {
+    let n: String = name.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphabetic() { c } else { ' ' }).collect();
+    let n = n.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cues = [
+        "build", "builds", "build up", "buildup", "drums in", "drums out", "all in", "band in", "kick in", "hits", "hit", "hold",
+        "stop", "stops", "swell", "crash", "big", "quiet", "down", "break", "acapella", "a cappella", "last time", "one more time",
+    ];
+    cues.contains(&n.as_str()) || n.starts_with("build ") || n.ends_with(" in") && !n.contains("intro")
+}
+
 /// One burst of speech on the guide and what it said.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Heard {
@@ -239,12 +251,21 @@ pub fn place_markers(heard: &[Heard], tempo: Tempo, bpb: u32) -> Vec<Marker> {
     let mut out: Vec<Marker> = vec![];
     for (i, h) in heard.iter().enumerate() {
         let Some(name) = &h.label else { continue };
+        if is_band_cue(name) {
+            continue;
+        }
         let mut end = h.end;
+        let mut counted = false;
         for f in &heard[i + 1..] {
             if f.label.is_some() || f.start > h.end + 1.6 * bar || !is_count(f) {
                 break;
             }
             end = f.end;
+            counted = true;
+        }
+        // A breakdown is a section only when it's counted in like one.
+        if name.starts_with("Breakdown") && !counted {
+            continue;
         }
         let b = ((end - 0.35 * beat - tempo.offset) / bar).ceil().max(0.0) as u32 + 1;
         if out.last().map_or(false, |m| m.bar >= b) {
@@ -374,6 +395,49 @@ pub fn align_to_counts(tempo: Tempo, heard: &[Heard], bpb: u32) -> Tempo {
     Tempo { bpm: tempo.bpm, offset: best.1.rem_euclid(bar) }
 }
 
+/// Lines the song's bar grid up with the click you can hear. The tempo stays; the
+/// first downbeat moves by less than half a beat to the nearest click-derived
+/// downbeat (accents can't tell bar from half-bar, so the existing grid picks which).
+/// Sections keep their bar numbers, so they move with the grid. `x` is the click,
+/// mono, as it plays (after any tempo change). Returns true if the grid changed.
+pub fn snap_grid_to_click(f: &mut crate::songfile::SongFile, x: &[f32], sr: u32) -> bool {
+    let bpb = f.beats_per_bar.max(1);
+    let Some(t) = tempo_with_known(x, sr, bpb, Some(f.play_bpm())) else { return false };
+    if (t.bpm - f.play_bpm()).abs() > 0.05 {
+        return false; // the click doesn't match the song's tempo: leave the grid alone
+    }
+    let stretch = f.stretch();
+    let beat = 60.0 / f.bpm;
+    let bar = beat * bpb as f64;
+    let cur = f.offset_ms / 1000.0;
+    let det = t.offset / stretch; // back to the recording's own time
+    // the click-derived downbeat candidate closest to the current grid
+    let wrap = |d: f64| d - (d / bar).round() * bar;
+    let mut best = f64::MAX;
+    for k in 0..bpb {
+        let d = wrap(det + k as f64 * beat - cur);
+        if d.abs() < best.abs() {
+            best = d;
+        }
+    }
+    if best.abs() > 0.5 * beat || best.abs() < 0.0005 {
+        return false;
+    }
+    let mut new = cur + best;
+    if new < 0.0 {
+        if new > -0.03 {
+            new = 0.0; // a few ms before the file starts: call it the start
+        } else {
+            new += bar; // bar 1 is earlier than the audio: renumber
+            for m in f.markers.iter_mut() {
+                m.bar = m.bar.saturating_sub(1).max(1);
+            }
+        }
+    }
+    f.offset_ms = new * 1000.0;
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn analyze(
     click: Option<&StemAudio>,
@@ -468,6 +532,43 @@ mod tests {
         let fixed = align_to_counts(t, &heard, 4);
         let d = (fixed.offset - 0.5).rem_euclid(bar);
         assert!(d.min(bar - d) < 0.01, "downbeat at {} (bar {bar})", fixed.offset);
+    }
+
+    #[test]
+    fn grid_snaps_to_the_click_without_moving_sections_to_other_bars() {
+        // Click (eighths at 155) starts on the downbeat at 0.05 s; the Ableton reading
+        // put the grid one eighth late.
+        let sr = 48_000;
+        let x = click_track(sr, 155.0, 0.05, 120, true);
+        let eighth = 60.0 / 155.0;
+        let mut f = crate::songfile::SongFile {
+            name: "S".into(),
+            bpm: 77.5,
+            beats_per_bar: 4,
+            offset_ms: (0.05 + eighth) * 1000.0,
+            markers: vec![crate::songfile::Marker { name: "Intro".into(), bar: 3 }, crate::songfile::Marker { name: "Verse".into(), bar: 7 }],
+            ..Default::default()
+        };
+        assert!(snap_grid_to_click(&mut f, &x, sr));
+        assert!((f.offset_ms - 50.0).abs() < 2.0, "offset {}", f.offset_ms);
+        assert_eq!((f.markers[0].bar, f.markers[1].bar), (3, 7));
+        // already right: nothing changes
+        assert!(!snap_grid_to_click(&mut f, &x, sr));
+    }
+
+    #[test]
+    fn band_cues_are_not_sections_and_breakdown_needs_a_count() {
+        let tempo = Tempo { bpm: 60.0, offset: 0.0 }; // bar 4 s
+        let heard = vec![
+            h(1.0, 1.5, "Verse 1"),
+            h(9.0, 9.5, "Build"),         // band cue
+            h(11.0, 11.4, "Drums in"),    // band cue (not even labelled)
+            h(17.0, 17.5, "Breakdown"),   // called mid-section, no count: not a section
+            h(25.0, 25.6, "Breakdown"), h(28.0, 28.2, "1"), h(29.0, 29.2, "2"), h(30.0, 30.2, "3"), h(31.0, 31.2, "4"),
+        ];
+        let got: Vec<String> = place_markers(&heard, tempo, 4).into_iter().map(|m| m.name).collect();
+        assert_eq!(got, ["Verse 1", "Breakdown"]);
+        assert!(is_band_cue("Build Up") && is_band_cue("All In") && is_band_cue("Drums In") && !is_band_cue("Intro") && !is_band_cue("Breakdown"));
     }
 
     #[test]

@@ -60,10 +60,61 @@ pub struct SongFile {
     /// Version of the automatic setup that last ran (see SETUP_VERSION).
     #[serde(default)]
     pub setup: u32,
+    /// The bar grid has been lined up with the click stem.
+    #[serde(default)]
+    pub grid_checked: bool,
 }
 
 /// Raise to make songs set up automatically by an older version set up again.
-pub const SETUP_VERSION: u32 = 2;
+pub const SETUP_VERSION: u32 = 3;
+
+/// Where a stem sits in the track list: click and guide first, then Drums,
+/// Percussion, Bass, Guitars, Keys, Other instruments, Vocals, FX.
+pub fn stem_category(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    let words: Vec<&str> = n.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let has = |keys: &[&str]| keys.iter().any(|k| n.contains(k));
+    let word = |keys: &[&str]| words.iter().any(|w| keys.contains(w));
+    if has(&["click", "guide", "cue"]) {
+        0
+    } else if word(&["fx", "sfx", "riser", "risers", "swell", "swells", "impact", "impacts", "noise"]) || has(&["effect"]) {
+        8
+    } else if has(&["vox", "vocal", "voc ", "bgv", "alto", "tenor", "soprano", "choir", "harmon", "lead vox", "sing"]) || word(&["voc", "bv", "bvs", "vocals"]) {
+        7
+    } else if has(&["perc", "shaker", "tamb", "conga", "bongo", "clap", "loop", "cajon"]) {
+        2
+    } else if has(&["drum", "kick", "snare", "hat", "tom", "overhead", "cymbal", "kit"]) {
+        1
+    } else if has(&["bass", "sub"]) {
+        3
+    } else if has(&["guitar", "gtr", "electric", "acoustic"]) || word(&["eg", "ag", "eg1", "eg2", "eg3", "ag1", "ag2"]) {
+        4
+    } else if has(&["key", "piano", "rhodes", "wurli", "organ", "synth", "pad", "b3", "ep"]) {
+        5
+    } else {
+        6
+    }
+}
+
+/// Track-list order: category, then name with numbers in number order (EG 2 before EG 10).
+pub fn stem_sort_key(name: &str) -> (u8, Vec<(String, u64)>) {
+    let mut parts = vec![];
+    let mut text = String::new();
+    let mut num = String::new();
+    for c in name.to_ascii_lowercase().chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else {
+            if !num.is_empty() {
+                parts.push((std::mem::take(&mut text), num.parse().unwrap_or(0)));
+                num.clear();
+            }
+            text.push(c);
+        }
+    }
+    parts.push((text, num.parse().unwrap_or(0)));
+    (stem_category(name), parts)
+}
 
 pub fn is_click(name: &str) -> bool {
     name.to_ascii_lowercase().contains("click")
@@ -200,6 +251,7 @@ impl SongFile {
                 transpose: 0,
                 target_bpm: None,
                 setup: SETUP_VERSION,
+                grid_checked: false,
             },
         };
         // Songs set up automatically by an older version are set up again: the tempo
@@ -207,6 +259,7 @@ impl SongFile {
         if sf.setup < SETUP_VERSION {
             if matches!(sf.markers_from.as_deref(), None | Some("ableton") | Some("guide")) {
                 sf.markers_from = None;
+                sf.grid_checked = false;
                 if let Some(b) = folder_bpm {
                     sf.bpm = b;
                 }
@@ -226,6 +279,7 @@ impl SongFile {
                 sf.stems.push(StemFile { route: default_route(&name, channels), file: f.clone(), name, gain: 1.0, muted: false });
             }
         }
+        sf.stems.sort_by_key(|st| stem_sort_key(&st.name));
         Ok(sf)
     }
 
@@ -266,6 +320,10 @@ impl SongFile {
         let offset = offset.rem_euclid(bar);
         let mut markers: Vec<Marker> = vec![];
         for (i, (t, name)) in secs.iter().enumerate() {
+            // Band/MD cues ("Build", "Drums in") aren't parts of the song's form.
+            if crate::guide::is_band_cue(name) {
+                continue;
+            }
             let b = ((t - offset) / bar).round().max(0.0) as u32 + 1;
             if markers.last().map_or(false, |m| m.bar >= b) {
                 continue;
@@ -399,7 +457,7 @@ mod tests {
         let info = crate::als::AlsInfo {
             bpm: Some(155.0),
             beats_per_bar: Some(4),
-            locators: vec![(16.0, "Intro".into()), (48.0, "Verse".into()), (112.0, "Chorus".into())],
+            locators: vec![(16.0, "Intro".into()), (48.0, "Verse".into()), (80.0, "Build".into()), (112.0, "Chorus".into())],
             clip: Some(crate::als::ClipTiming { time: 0.0, start: 0.0, warped: true, warp: vec![(0.0, 0.1), (155.0, 60.1)] }),
         };
         let mut sf = SongFile { name: "S".into(), bpm: 120.0, beats_per_bar: 4, ..Default::default() };
@@ -425,6 +483,13 @@ mod tests {
         assert_eq!(song.bpm, 120.0);
         assert_eq!(song.sections[1].start, 500, "downbeat moves from 1.0 s to 0.5 s");
         assert_eq!(song.sections[2].start, 500 + 4000);
+    }
+
+    #[test]
+    fn tracks_are_ordered_like_a_band() {
+        let mut v = vec!["BGV", "EG 2", "Keys 1", "Alto", "Bass", "Drums (Live)", "FX", "Click Track", "Perc Loop", "EG 10", "Strings", "AG", "Guide", "Choir", "Pad", "Synth Bass", "Rhodes"];
+        v.sort_by_key(|n| stem_sort_key(n));
+        assert_eq!(v, ["Click Track", "Guide", "Drums (Live)", "Perc Loop", "Bass", "Synth Bass", "AG", "EG 2", "EG 10", "Keys 1", "Pad", "Rhodes", "Strings", "Alto", "BGV", "Choir", "FX"]);
     }
 
     #[test]
@@ -455,6 +520,7 @@ mod tests {
                 transpose: 0,
                 target_bpm: None,
                 setup: SETUP_VERSION,
+                grid_checked: false,
         };
         let (song, arr) = sf.build(1000, 20_000).unwrap();
         let names: Vec<&str> = song.sections.iter().map(|s| s.name.as_str()).collect();

@@ -15,7 +15,24 @@
   let sel = null;          // selected clip { block, stem }
   const zoom = { pps: 20, scroll: 0, follow: true };
   let learnWait = null, analyzing = false, loading = false, uidSeq = 1, dirty = true;
-  const LANE_H = 46, RULER_H = 20;
+  const LANE_H = 46, RULER_H = 20, BUS_H = 46;
+  // Folded buses, remembered on this computer.
+  let collapsed = new Set();
+  try { collapsed = new Set(JSON.parse(localStorage.getItem('rig.collapsed') || '[]')); } catch (e) { /* storage off */ }
+  const saveCollapsed = () => { try { localStorage.setItem('rig.collapsed', JSON.stringify([...collapsed])); } catch (e) { /* storage off */ } };
+  // Track-list rows, top to bottom: a bus header, then its stems (unless folded).
+  function rows() {
+    const out = []; let y = 0;
+    if (!V || !V.song) return out;
+    const buses = V.buses && V.buses.length ? V.buses : [{ cat: 6, name: 'Tracks', gain: 1, muted: false, route: null, stems: V.song.stems.map((_, i) => i) }];
+    for (const b of buses) {
+      out.push({ kind: 'bus', b, y, h: BUS_H }); y += BUS_H;
+      if (collapsed.has(b.cat)) continue;
+      for (const i of b.stems) { out.push({ kind: 'stem', i, b, y, h: LANE_H }); y += LANE_H; }
+    }
+    return out;
+  }
+  const rowsHeight = R => (R.length ? R[R.length - 1].y + R[R.length - 1].h : 0);
 
   /* ---------- helpers ---------- */
   let toastT = 0;
@@ -185,7 +202,7 @@
       const d = el('div', 'blk'); d.dataset.i = o.i; d.style.setProperty('--c', secColor(o.b.section));
       d.style.width = Math.max(96, o.b.section.length * 11 + 28, Math.min(220, o.sec.bars * 7)) + 'px';
       d.append(el('div', 'prog'), el('div', 'nm', o.b.section));
-      d.append(el('div', 'sub', `${Math.round(o.sec.bars)} bars${o.b.muted.length ? ' · no ' + o.b.muted.join(', ') : ''}`));
+      d.append(el('div', 'sub', `${o.sec.bars < 0.95 ? 'pickup' : Math.round(o.sec.bars) + ' bars'}${o.b.muted.length ? ' · no ' + o.b.muted.join(', ') : ''}`));
       d.append(el('span', 'num', String(o.i + 1)));
       const tools = el('div', 'tools');
       const dup = el('button', null, '⧉'); dup.title = 'Play this section twice'; dup.setAttribute('aria-label', 'Duplicate');
@@ -302,10 +319,32 @@
   }
   function renderHeads() {
     const box = $('#heads');
-    if (box.contains(document.activeElement) && document.activeElement.type === 'range') return;
+    if (box.contains(document.activeElement) && (document.activeElement.type === 'range' || document.activeElement.tagName === 'SELECT')) return;
     box.innerHTML = '';
     if (!V.song) return;
-    V.song.stems.forEach((st, i) => {
+    rows().forEach(row => {
+      if (row.kind === 'bus') {
+        const b = row.b, r = el('div', 'busrow' + (b.muted ? ' off' : ''));
+        const fold = el('button', 'fold', collapsed.has(b.cat) ? '▸' : '▾');
+        fold.title = collapsed.has(b.cat) ? `Show ${b.name}` : `Fold ${b.name}`; fold.setAttribute('aria-label', fold.title);
+        fold.onclick = () => { collapsed.has(b.cat) ? collapsed.delete(b.cat) : collapsed.add(b.cat); saveCollapsed(); renderHeads(); dirty = true; };
+        const nm = el('b', null, b.name); nm.title = `${b.stems.length} track${b.stems.length > 1 ? 's' : ''}`;
+        const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.5; f.step = 0.01; f.value = b.gain; f.id = 'bus-' + b.cat; f.setAttribute('aria-label', `${b.name} bus level`);
+        f.oninput = () => { b.gain = +f.value; send({ type: 'BusGain', cat: b.cat, gain: b.gain }); };
+        const m = el('button', 'm' + (b.muted ? ' on' : ''), 'M'); m.title = `Mute all ${b.name}`; m.setAttribute('aria-pressed', b.muted);
+        m.onclick = async () => { b.muted = !b.muted; await send({ type: 'BusMute', cat: b.cat, muted: b.muted }); if (solo.size) applySolo(); renderHeads(); dirty = true; };
+        const sel = el('select'); sel.setAttribute('aria-label', `${b.name} bus output`);
+        routeOptions(sel, b.route || { Pair: 0 });
+        sel.prepend(new Option('Own outputs', 'own')); if (!b.route) sel.value = 'own';
+        sel.title = 'Send this whole group to one output';
+        sel.onchange = () => { b.route = sel.value === 'own' ? null : keyRoute(sel.value); send({ type: 'BusRoute', cat: b.cat, route: b.route }); renderSongDrawer(); };
+        const top = el('div', 'bt'); top.append(fold, nm, m);
+        const bot = el('div', 'bb'); bot.append(f, sel);
+        r.append(top, bot);
+        box.append(r);
+        return;
+      }
+      const i = row.i, st = V.song.stems[i];
       const r = el('div', 'lane'); r.style.setProperty('--c', stemColor(st.name, i));
       const ln = el('div', 'ln'); ln.append(el('b', null, st.name));
       const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.5; f.step = 0.01; f.value = st.gain; f.id = 'fader-' + i; f.setAttribute('aria-label', `${st.name} level`);
@@ -341,9 +380,9 @@
     const L = layout(), s = V && V.song;
     const [g, w] = size(cvTop, 50);
     g.fillStyle = '#141518'; g.fillRect(0, 0, w, 50);
-    const nStems = s ? s.stems.length : 0;
-    const [h, w2] = size(cvLanes, Math.max(1, nStems * LANE_H));
-    h.fillStyle = '#111214'; h.fillRect(0, 0, w2, nStems * LANE_H);
+    const R = rows(), H = rowsHeight(R);
+    const [h, w2] = size(cvLanes, Math.max(1, H));
+    h.fillStyle = '#111214'; h.fillRect(0, 0, w2, H);
     if (!s || !L.length) return;
     const p = playing(), now = playTime(L), bs = barSec();
     if (p && zoom.follow) { const x = X(now); if (x > w * 0.72 || x < 0) zoom.scroll = now - (w * 0.2) / zoom.pps; }
@@ -375,9 +414,14 @@
     });
     // lanes
     const per = peaks ? peaks.per_sec : 100;
-    s.stems.forEach((st, r) => {
-      const y = r * LANE_H, col = stemColor(st.name, r);
-      const laneOff = st.muted || (solo.size > 0 && !solo.has(r));
+    R.forEach(row => {
+      if (row.kind === 'bus') {
+        h.fillStyle = '#191b1f'; h.fillRect(0, row.y, w2, BUS_H);
+        h.fillStyle = '#2c2f35'; h.fillRect(0, row.y + BUS_H - 1, w2, 1);
+        return;
+      }
+      const r = row.i, st = s.stems[r], y = row.y, col = stemColor(st.name, r);
+      const laneOff = st.muted || row.b.muted || (solo.size > 0 && !solo.has(r));
       h.fillStyle = r % 2 ? '#131417' : '#111214'; h.fillRect(0, y, w2, LANE_H);
       h.fillStyle = '#22252a'; h.fillRect(0, y + LANE_H - 1, w2, 1);
       const pk = peaks && peaks.stems[r];
@@ -405,19 +449,19 @@
       });
     });
     // block boundaries + playhead + queued jump
-    h.fillStyle = 'rgba(255,255,255,.06)'; L.forEach(o => { const x = X(o.start); if (x >= 0 && x <= w2) h.fillRect(Math.round(x), 0, 1, nStems * LANE_H); });
+    h.fillStyle = 'rgba(255,255,255,.06)'; L.forEach(o => { const x = X(o.start); if (x >= 0 && x <= w2) h.fillRect(Math.round(x), 0, 1, H); });
     if (snap && snap.pending != null && p) {
       const jx = X(now + snap.frames_to_jump / s.sample_rate);
-      [g, h].forEach((c, k) => { c.strokeStyle = '#ffd23f'; c.setLineDash([4, 3]); c.lineWidth = 1.5; c.beginPath(); c.moveTo(jx, k ? 0 : RULER_H); c.lineTo(jx, k ? nStems * LANE_H : 50); c.stroke(); c.setLineDash([]); });
+      [g, h].forEach((c, k) => { c.strokeStyle = '#ffd23f'; c.setLineDash([4, 3]); c.lineWidth = 1.5; c.beginPath(); c.moveTo(jx, k ? 0 : RULER_H); c.lineTo(jx, k ? H : 50); c.stroke(); c.setLineDash([]); });
     }
     if (scrub != null) {
       const sx = X(scrub);
       g.fillStyle = h.fillStyle = 'rgba(255,255,255,.55)';
-      g.fillRect(sx - 1, 0, 2, 50); h.fillRect(sx - 1, 0, 2, nStems * LANE_H);
+      g.fillRect(sx - 1, 0, 2, 50); h.fillRect(sx - 1, 0, 2, H);
     }
     const px = X(now);
     g.fillStyle = h.fillStyle = p ? '#ff6a1a' : '#ececec';
-    g.fillRect(px - 1, 0, 2, 50); h.fillRect(px - 1, 0, 2, nStems * LANE_H);
+    g.fillRect(px - 1, 0, 2, 50); h.fillRect(px - 1, 0, 2, H);
     g.beginPath(); g.moveTo(px - 6, 0); g.lineTo(px + 6, 0); g.lineTo(px, 8); g.fill();
   }
   function loop() { if (V && (dirty || playing() || scrub != null || (snap && snap.pending != null))) { draw(); dirty = false; } requestAnimationFrame(loop); }
@@ -485,10 +529,11 @@
   cvLanes.addEventListener('click', e => {
     if (suppressClick) { suppressClick = false; return; }
     const { o, y } = hit(e, cvLanes); if (!o) return;
-    sel = { block: o.i, stem: Math.floor(y / LANE_H) }; dirty = true;
+    const row = rows().find(r => y >= r.y && y < r.y + r.h);
+    if (row && row.kind === 'stem') { sel = { block: o.i, stem: row.i }; dirty = true; }
   });
   cvLanes.addEventListener('dblclick', e => {
-    const { o, y } = hit(e, cvLanes); const st = V.song && V.song.stems[Math.floor(y / LANE_H)];
+    const { o, y } = hit(e, cvLanes); const row = rows().find(r => y >= r.y && y < r.y + r.h); const st = row && row.kind === 'stem' && V.song.stems[row.i];
     if (o && st) toggleClip(o.i, st.name);
   });
   function onWheel(e) {
@@ -581,7 +626,10 @@
     s.stems.forEach((st, i) => {
       const r = el('div', 'rt'); const sel = el('select'); sel.setAttribute('aria-label', `${st.name} output`); routeOptions(sel, st.route);
       sel.onchange = () => { st.route = keyRoute(sel.value); send({ type: 'StemRoute', stem: i, route: st.route }); };
-      r.append(el('span', null, st.name), sel); rb.append(r);
+      // A bus with its own output overrides the stem's.
+      const bus = (V.buses || []).find(b => b.stems.includes(i));
+      if (bus && bus.route) { sel.disabled = true; sel.title = `Going to the ${bus.name} bus output. Set that bus to "Own outputs" to choose per track.`; }
+      r.append(el('span', null, st.name + (bus && bus.route ? ` · via ${bus.name}` : '')), sel); rb.append(r);
     });
   }
   let kt = null; // { transpose, bpm } being edited
@@ -712,8 +760,11 @@
   $('#midiSel').onchange = e => invoke('choose_midi', { name: e.target.value || null }).then(refresh).catch(err);
 
   /* ---------- drawers ---------- */
+  // Side panels open below the top bar, so the transport and panel buttons stay usable.
+  const placeDrawers = () => document.documentElement.style.setProperty('--bar-b', Math.round(document.querySelector('.bar').getBoundingClientRect().bottom) + 'px');
+  window.addEventListener('resize', placeDrawers); placeDrawers();
   const drawers = { setBtn: '#setDrawer', songBtn: '#songDrawer', setupBtn: '#setupDrawer' };
-  function openDrawer(id) { Object.values(drawers).forEach(d => { $(d).hidden = d !== id || !$(d).hidden; }); if (id === '#setupDrawer') invoke('app_state').then(refresh); }
+  function openDrawer(id) { placeDrawers(); Object.values(drawers).forEach(d => { $(d).hidden = d !== id || !$(d).hidden; }); if (id === '#setupDrawer') invoke('app_state').then(refresh); }
   Object.entries(drawers).forEach(([b, d]) => { $('#' + b).onclick = () => openDrawer(d); });
   document.querySelectorAll('[data-close]').forEach(b => { b.onclick = () => { b.closest('.drawer').hidden = true; }; });
   const anyDrawer = () => Object.values(drawers).some(d => !$(d).hidden);

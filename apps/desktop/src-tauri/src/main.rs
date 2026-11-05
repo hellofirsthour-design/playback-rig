@@ -43,6 +43,53 @@ struct Settings {
     pads_folder: Option<PathBuf>,
     pad_level: f32,
     pad_route: Option<Route>,
+    /// One bus per track group (see songfile::stem_category), shared by every song.
+    buses: Vec<Bus>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct Bus {
+    gain: f32,
+    muted: bool,
+    /// Where the group's stems go; None = each stem uses its own output.
+    route: Option<Route>,
+}
+
+impl Default for Bus {
+    fn default() -> Self {
+        Bus { gain: 1.0, muted: false, route: None }
+    }
+}
+
+const BUS_NAMES: [&str; 9] = ["Click & guide", "Drums", "Percussion", "Bass", "Guitars", "Keys", "Other", "Vocals", "FX"];
+
+impl Settings {
+    fn bus(&self, cat: u8) -> Bus {
+        self.buses.get(cat as usize).cloned().unwrap_or_default()
+    }
+    fn bus_mut(&mut self, cat: u8) -> &mut Bus {
+        while self.buses.len() < BUS_NAMES.len() {
+            self.buses.push(Bus::default());
+        }
+        &mut self.buses[(cat as usize).min(BUS_NAMES.len() - 1)]
+    }
+}
+
+/// What the engine plays for a stem once its bus is applied: (gain, muted, route).
+fn effective(settings: &Settings, st: &songfile::StemFile) -> (f32, bool, Route) {
+    let b = settings.bus(songfile::stem_category(&st.name));
+    (st.gain * b.gain, st.muted || b.muted, b.route.unwrap_or(st.route))
+}
+
+/// Sends every stem's bus-applied level, mute and output to the engine.
+fn push_mix(core: &Core, settings: &Settings, file: &SongFile) {
+    for (i, st) in file.stems.iter().enumerate() {
+        let (g, m, r) = effective(settings, st);
+        core.send(Command::SetStemGain(i, g));
+        core.send(Command::SetStemMute(i, m));
+        core.send(Command::SetStemRoute(i, r));
+    }
 }
 
 impl Default for Settings {
@@ -60,6 +107,7 @@ impl Default for Settings {
             pads_folder: None,
             pad_level: 0.6,
             pad_route: None,
+            buses: vec![],
         }
     }
 }
@@ -292,6 +340,15 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
     });
     let stems = results.into_iter().collect::<Result<Vec<_>, _>>()?;
     let length = stems.iter().map(|s| s.frames()).max().unwrap_or(0);
+    // Songs set up automatically get their grid lined up with the click you hear.
+    let mut file = file;
+    if !file.grid_checked && matches!(file.markers_from.as_deref(), Some("ableton") | Some("guide")) {
+        if let Some(i) = file.stems.iter().position(|s| songfile::is_click(&s.name)) {
+            guide::snap_grid_to_click(&mut file, &guide::to_mono(&stems[i]), sample_rate);
+            file.grid_checked = true;
+            let _ = file.save(folder);
+        }
+    }
     let (song, arr) = file.build(sample_rate, length)?;
     let peaks = stems.iter().map(|s| peaks(s, sample_rate)).collect();
     Ok(Loaded { folder: folder.to_path_buf(), file, song, arr, stems, sample_rate, length, peaks })
@@ -311,6 +368,12 @@ fn install(core: &Core, settings: &Settings, l: &Loaded) -> Result<(), String> {
     e.handle(Command::SetClick(l.file.click));
     e.handle(Command::SetClickGain(settings.click_gain));
     e.handle(Command::SetClickRoute(settings.click_route.unwrap_or(songfile::default_route("click", ch))));
+    for (i, st) in l.file.stems.iter().enumerate() {
+        let (g, m, r) = effective(settings, st);
+        e.handle(Command::SetStemGain(i, g));
+        e.handle(Command::SetStemMute(i, m));
+        e.handle(Command::SetStemRoute(i, r));
+    }
     if !o.send(ToAudio::Swap(Box::new(e))) {
         return Err("The audio thread is busy. Try again.".into());
     }
@@ -442,6 +505,19 @@ struct AppView {
     bindings: Vec<Binding>,
     learning: bool,
     pads: PadsView,
+    /// Buses for the groups in the current song, in track-list order.
+    buses: Vec<BusView>,
+}
+
+#[derive(Serialize)]
+struct BusView {
+    cat: u8,
+    name: String,
+    gain: f32,
+    muted: bool,
+    route: Option<Route>,
+    /// Indices of this song's stems in the group.
+    stems: Vec<usize>,
 }
 
 #[derive(Serialize)]
@@ -467,10 +543,21 @@ fn view(state: &AppState) -> AppView {
     // Take each lock on its own line: a guard inside the struct literal below would
     // live until the end of the whole expression, and locking the same mutex twice
     // there deadlocks (that froze 0.4.0 on launch).
-    let (song, song_key) = {
+    let (song, song_key, stem_cats) = {
         let g = state.song.lock().unwrap();
-        (g.as_ref().map(SongView::from), g.as_ref().and_then(|l| song_key_pc(&l.file)).map(|pc| pads::NAMES[pc as usize].to_string()))
+        let cats: Vec<u8> = g.as_ref().map(|l| l.file.stems.iter().map(|st| songfile::stem_category(&st.name)).collect()).unwrap_or_default();
+        (g.as_ref().map(SongView::from), g.as_ref().and_then(|l| song_key_pc(&l.file)).map(|pc| pads::NAMES[pc as usize].to_string()), cats)
     };
+    let mut buses: Vec<BusView> = vec![];
+    for (i, c) in stem_cats.iter().enumerate() {
+        match buses.iter_mut().find(|b| b.cat == *c) {
+            Some(b) => b.stems.push(i),
+            None => {
+                let b = s.bus(*c);
+                buses.push(BusView { cat: *c, name: BUS_NAMES[*c as usize].into(), gain: b.gain, muted: b.muted, route: b.route, stems: vec![i] });
+            }
+        }
+    }
     let midi = state.midi.lock().unwrap().as_ref().map(|m| m.name.clone());
     let pad_on = *state.pad_on.lock().unwrap();
     AppView {
@@ -499,6 +586,7 @@ fn view(state: &AppState) -> AppView {
         click_route: s.click_route.unwrap_or(songfile::default_route("click", ch)),
         bindings,
         learning,
+        buses,
         pads: PadsView {
             folder: s.pads_folder.as_ref().map(|p| p.display().to_string()),
             keys: s.pads_folder.as_ref().map(|f| pads::scan(f).iter().enumerate().filter(|(_, p)| p.is_some()).map(|(i, _)| pads::NAMES[i].to_string()).collect()).unwrap_or_default(),
@@ -673,6 +761,10 @@ enum UiCmd {
     StemMute { stem: usize, muted: bool },
     /// Mute without saving (used for solo).
     StemMuteLive { stem: usize, muted: bool },
+    BusGain { cat: u8, gain: f32 },
+    BusMute { cat: u8, muted: bool },
+    /// None: the group's stems use their own outputs.
+    BusRoute { cat: u8, route: Option<Route> },
     StemRoute { stem: usize, route: Route },
 }
 
@@ -745,24 +837,52 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                     st.gain = gain;
                     save_song = true;
                 }
-                core.send(Command::SetStemGain(stem, gain));
+                if let Some(st) = song.as_ref().and_then(|l| l.file.stems.get(stem)) {
+                    core.send(Command::SetStemGain(stem, effective(&s, st).0));
+                }
             }
             UiCmd::StemMute { stem, muted } => {
                 if let Some(st) = song.as_mut().and_then(|l| l.file.stems.get_mut(stem)) {
                     st.muted = muted;
                     save_song = true;
                 }
-                core.send(Command::SetStemMute(stem, muted));
+                if let Some(st) = song.as_ref().and_then(|l| l.file.stems.get(stem)) {
+                    core.send(Command::SetStemMute(stem, effective(&s, st).1));
+                }
             }
             UiCmd::StemMuteLive { stem, muted } => {
-                core.send(Command::SetStemMute(stem, muted));
+                let bus_muted = song.as_ref().and_then(|l| l.file.stems.get(stem)).map_or(false, |st| effective(&s, st).1);
+                core.send(Command::SetStemMute(stem, muted || bus_muted));
+            }
+            UiCmd::BusGain { cat, gain } => {
+                s.bus_mut(cat).gain = gain.clamp(0.0, 2.0);
+                save_settings = true;
+                if let Some(l) = song.as_ref() {
+                    push_mix(core, &s, &l.file);
+                }
+            }
+            UiCmd::BusMute { cat, muted } => {
+                s.bus_mut(cat).muted = muted;
+                save_settings = true;
+                if let Some(l) = song.as_ref() {
+                    push_mix(core, &s, &l.file);
+                }
+            }
+            UiCmd::BusRoute { cat, route } => {
+                s.bus_mut(cat).route = route;
+                save_settings = true;
+                if let Some(l) = song.as_ref() {
+                    push_mix(core, &s, &l.file);
+                }
             }
             UiCmd::StemRoute { stem, route } => {
                 if let Some(st) = song.as_mut().and_then(|l| l.file.stems.get_mut(stem)) {
                     st.route = route;
                     save_song = true;
                 }
-                core.send(Command::SetStemRoute(stem, route));
+                if let Some(st) = song.as_ref().and_then(|l| l.file.stems.get(stem)) {
+                    core.send(Command::SetStemRoute(stem, effective(&s, st).2));
+                }
             }
         }
         if save_song {
@@ -1035,6 +1155,7 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
             f.arrangement = vec![];
         }
         f.markers_from = Some(if analysis.markers.is_empty() { "manual" } else { "guide" }.into());
+        f.grid_checked = analysis.offset_ms.is_some(); // the guide reading already used the click
     })?;
     Ok(AnalysisResult { view, heard: analysis.heard, found_tempo, sections })
 }
@@ -1223,6 +1344,151 @@ mod tests {
             let _ = tx.send(f());
         });
         rx.recv_timeout(Duration::from_secs(10)).expect("timed out: deadlock")
+    }
+
+    fn write_wav(path: &Path, x: &[f32], sr: u32) {
+        let spec = hound::WavSpec { channels: 1, sample_rate: sr, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for v in x {
+            w.write_sample((v.clamp(-1.0, 1.0) * 32767.0) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    /// A MultiTracks-style download: stems in MultiTracks/, an Ableton set running at
+    /// double time (155 for a 77.5 song) with a "Build" cue locator, an eighth-note
+    /// click whose first downbeat is at 0.05 s, folder name with key and tempo.
+    fn multitracks_folder(root: &Path) -> PathBuf {
+        let sr = 44_100u32;
+        let folder = root.join("See a Victory-At Midnight-A-77.50bpm");
+        let mt = folder.join("MultiTracks");
+        std::fs::create_dir_all(&mt).unwrap();
+        let eighth = 60.0 / 155.0;
+        let len = (sr as f64 * 60.0) as usize;
+        let mut click = vec![0f32; len];
+        let mut k = 0;
+        loop {
+            let t = 0.05 + k as f64 * eighth;
+            let s0 = (t * sr as f64) as usize;
+            if s0 + 2000 >= len { break; }
+            let (f, a) = if k % 4 == 0 { (1760.0, 0.9) } else { (1175.0, 0.55) };
+            for i in 0..1500 {
+                let tt = i as f32 / sr as f32;
+                click[s0 + i] += (std::f32::consts::TAU * f * tt).sin() * a * (-tt * 80.0).exp();
+            }
+            k += 1;
+        }
+        write_wav(&mt.join("Click Track.wav"), &click, sr);
+        let tone = |hz: f32, amp: f32| -> Vec<f32> { (0..len).map(|i| (i as f32 / sr as f32 * hz * std::f32::consts::TAU).sin() * amp).collect() };
+        write_wav(&mt.join("Guide.wav"), &vec![0.0; len], sr);
+        write_wav(&mt.join("BGV.wav"), &tone(330.0, 0.2), sr);
+        write_wav(&mt.join("Bass.wav"), &tone(55.0, 0.3), sr);
+        write_wav(&mt.join("Drums (Live).wav"), &tone(80.0, 0.3), sr);
+        write_wav(&mt.join("EG 2.wav"), &tone(220.0, 0.2), sr);
+        write_wav(&mt.join("EG 1.wav"), &tone(220.0, 0.2), sr);
+        // Live beats at 155: the clip starts at beat 0, 0.05 s + one eighth into the audio
+        // (the off-by-an-eighth reading the user saw), 155 beats per 60 s.
+        let als = format!(r#"<Ableton><LiveSet><Tracks><AudioTrack><DeviceChain><Mixer><Tempo><LomId Value="0" /><Manual Value="120" /></Tempo></Mixer>
+            <AudioClip Id="1" Time="0"><LoopStart Value="0" /><StartRelative Value="0" /><IsWarped Value="true" />
+            <WarpMarkers><WarpMarker Id="0" SecTime="{s0}" BeatTime="0" /><WarpMarker Id="1" SecTime="{s1}" BeatTime="155" /></WarpMarkers></AudioClip>
+            </DeviceChain></AudioTrack></Tracks>
+            <Locators><Locators>
+              <Locator Id="0"><Time Value="16" /><Name Value="Intro" /></Locator>
+              <Locator Id="1"><Time Value="48" /><Name Value="Verse 1" /></Locator>
+              <Locator Id="2"><Time Value="64" /><Name Value="Build" /></Locator>
+              <Locator Id="3"><Time Value="80" /><Name Value="Chorus" /></Locator>
+              <Locator Id="4"><Time Value="112" /><Name Value="Chorus" /></Locator>
+            </Locators></Locators>
+            <MasterTrack><DeviceChain><Mixer><Tempo><LomId Value="0" /><Manual Value="155" /></Tempo>
+            <TimeSignature><LomId Value="0" /><Manual Value="201" /></TimeSignature></Mixer></DeviceChain></MasterTrack></LiveSet></Ableton>"#,
+            s0 = 0.05 + eighth, s1 = 0.05 + eighth + 60.0);
+        std::fs::write(folder.join("MultiTrack.als"), als).unwrap();
+        folder
+    }
+
+    #[test]
+    fn a_multitracks_song_loads_onto_the_click_grid_with_buses_and_key_change() {
+        let root = std::env::temp_dir().join(format!("rig-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = multitracks_folder(&root);
+        let sr = 48_000;
+        let l = load(&folder, sr, 10).unwrap();
+        let f = &l.file;
+        // folder name and Ableton set
+        assert_eq!((f.name.as_str(), f.key.as_str(), f.bpm, f.beats_per_bar), ("See a Victory", "A", 77.5, 4));
+        assert_eq!(f.markers_from.as_deref(), Some("ableton"));
+        // band cue dropped, repeated name numbered, sections on real bars
+        let m: Vec<(&str, u32)> = f.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
+        assert_eq!(m, [("Intro", 3), ("Verse 1", 7), ("Chorus 1", 11), ("Chorus 2", 15)]);
+        // grid snapped to the click you hear (first downbeat 0.05 s, not an eighth later)
+        assert!(f.grid_checked);
+        assert!((f.offset_ms - 50.0).abs() < 3.0, "offset {}", f.offset_ms);
+        // every section between the first and last is whole bars
+        let bar = l.song.frames_per_bar();
+        for s in &l.song.sections[1..l.song.sections.len() - 1] {
+            let b = s.len() as f64 / bar;
+            assert!((b - b.round()).abs() * bar < 2.0, "{} = {b} bars", s.name);
+        }
+        // band order: click & guide, drums, bass, guitars (EG 1 before EG 2), vocals
+        let names: Vec<&str> = f.stems.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Click Track", "Guide", "Drums (Live)", "Bass", "EG 1", "EG 2", "BGV"]);
+        // the setup was saved, and loading again doesn't redo or move it
+        let again = load(&folder, sr, 10).unwrap();
+        assert_eq!(again.file.offset_ms, f.offset_ms);
+        assert_eq!(again.file.markers, f.markers);
+
+        // buses: the Guitars bus to Out 5-6 at half level, muted
+        let mut st = Settings::default();
+        st.bus_mut(4).route = Some(Route::Pair(4));
+        st.bus_mut(4).gain = 0.5;
+        st.bus_mut(4).muted = true;
+        let eg = &f.stems[4];
+        assert_eq!(effective(&st, eg), (0.5, true, Route::Pair(4)));
+        assert_eq!(effective(&st, &f.stems[3]), (1.0, false, f.stems[3].route), "bass bus untouched");
+
+        // key change: up a tone, click and guide unchanged, same length, grid unchanged
+        let mut f2 = f.clone();
+        f2.transpose = 2;
+        f2.save(&folder).unwrap();
+        let k = load(&folder, sr, 10).unwrap();
+        assert_eq!(k.file.transpose, 2);
+        assert_eq!(k.length, l.length);
+        assert_eq!(k.song.sections[1].start, l.song.sections[1].start);
+        assert_eq!(song_key_pc(&k.file), Some(11), "A + 2 = B");
+        // tempo change: 10% faster, sections move earlier in proportion
+        let mut f3 = k.file.clone();
+        f3.target_bpm = Some(85.25);
+        f3.save(&folder).unwrap();
+        let t = load(&folder, sr, 10).unwrap();
+        let ratio = t.song.sections[2].start as f64 / l.song.sections[2].start as f64;
+        assert!((ratio - 77.5 / 85.25).abs() < 0.002, "ratio {ratio}");
+        assert!(t.file.grid_checked, "a tempo change doesn't redo the grid");
+
+        // the app state works with this song loaded (no deadlock, pads report the key)
+        let state = Arc::new(state());
+        *state.song.lock().unwrap() = Some(t);
+        let s2 = state.clone();
+        let v = finishes(move || view(&s2));
+        assert_eq!(v.pads.song_key.as_deref(), Some("B"));
+        let cats: Vec<&str> = v.buses.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(cats, ["Click & guide", "Drums", "Bass", "Guitars", "Vocals"]);
+        assert_eq!(v.buses[3].stems, vec![4, 5]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_click_song_loads_like_any_other_song() {
+        let root = std::env::temp_dir().join(format!("rig-click-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let spec = clicksong::Spec { name: "Goodness".into(), bpm: 63.0, beats_per_bar: 4, key: "Ab".into(), sections: vec![("Verse".into(), 8), ("Chorus".into(), 8)], guide: true };
+        let voice = |_: &str| Some(vec![0.2f32; 4000]);
+        let (folder, _) = clicksong::create(&root, &spec, &voice).unwrap();
+        let l = load(&folder, 48_000, 2).unwrap();
+        assert_eq!(l.file.markers_from.as_deref(), Some("manual"));
+        assert!(!l.file.grid_checked, "hand-made grids are never moved");
+        assert_eq!(l.song.sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Count", "Verse", "Chorus"]);
+        assert_eq!(song_key_pc(&l.file), Some(8));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
