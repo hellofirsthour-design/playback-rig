@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_updater::UpdaterExt;
 
 /* ---------------- state ---------------- */
 
@@ -843,9 +844,67 @@ fn midi_unbind(state: State<'_, AppState>, index: usize) -> AppView {
     view(&state)
 }
 
+/* ---------------- updates ---------------- */
+
+#[derive(Serialize)]
+struct UpdateInfo {
+    version: String,
+    current: String,
+    notes: Option<String>,
+}
+
+/// Asks GitHub Releases whether a newer version exists. None = up to date.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    let u = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| format!("Couldn't check for updates. Check the internet connection. ({e})"))?;
+    Ok(u.map(|u| UpdateInfo { version: u.version.clone(), current: u.current_version.clone(), notes: u.body.clone() }))
+}
+
+/// Downloads the new version, checks its signature, installs it and restarts.
+/// Refused while playing.
+#[tauri::command]
+async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if state.core.playing() {
+        return Err("Stop playback before updating.".into());
+    }
+    let u = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| format!("Couldn't check for updates. ({e})"))?
+        .ok_or("You're already on the latest version.")?;
+    let h = app.clone();
+    let mut got = 0u64;
+    u.download_and_install(
+        move |chunk, total| {
+            got += chunk as u64;
+            if let Some(t) = total.filter(|t| *t > 0) {
+                let _ = h.emit("update-progress", got as f32 / t as f32);
+            }
+        },
+        || {},
+    )
+    .await
+    .map_err(|e| format!("The update didn't install: {e}"))?;
+    *state.core.output.lock().unwrap() = None; // close the audio device cleanly
+    app.restart();
+}
+
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -896,6 +955,9 @@ fn main() {
             set_arrangement,
             song_peaks,
             analyze_song,
+            check_update,
+            install_update,
+            app_version,
             midi_learn,
             midi_cancel,
             midi_unbind

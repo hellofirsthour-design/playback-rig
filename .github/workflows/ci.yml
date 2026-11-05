@@ -16,26 +16,64 @@ jobs:
       - run: cargo run --release -p rig-render -- --arrangement "Intro,Chorus,Verse 1,Chorus,Bridge,Outro" --mute "Verse 1=Drums" --channels 10 --out render.wav
 
   mac-app:
-    name: Mac app
+    name: Mac app tests
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
       - name: App tests
         working-directory: apps/desktop/src-tauri
         run: cargo test
-      - name: Build Playback Rig.app (Apple Silicon + Intel)
-        working-directory: apps/desktop/src-tauri
-        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app
-      - name: Zip the app
-        run: ditto -c -k --keepParent "apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Playback Rig.app" PlaybackRig-mac.zip
-      - uses: actions/upload-artifact@v4
+
+  # Publishes a GitHub Release (and the update the app installs itself) whenever
+  # the version in tauri.conf.json goes up. Same version = nothing is published.
+  release:
+    name: Release
+    needs: [engine, mac-app]
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Is this version already released?
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(python3 -c "import json;print(json.load(open('apps/desktop/src-tauri/tauri.conf.json'))['version'])")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v$v is already released; nothing to publish."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.ver.outputs.new == 'true'
         with:
-          name: PlaybackRig-mac
-          path: PlaybackRig-mac.zip
-          retention-days: 30
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        if: steps.ver.outputs.new == 'true'
+        with:
+          workspaces: apps/desktop/src-tauri
+      - name: Build, sign and publish
+        if: steps.ver.outputs.new == 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          projectPath: apps/desktop/src-tauri
+          tauriScript: npx --yes @tauri-apps/cli@2
+          args: --target universal-apple-darwin
+          tagName: v__VERSION__
+          releaseName: Playback Rig __VERSION__
+          releaseBody: Download the .dmg below to install. If you already have Playback Rig 0.2 or later, it updates itself; look for "Install & restart" at the bottom of the window.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

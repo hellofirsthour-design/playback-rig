@@ -15,15 +15,19 @@ Product decisions are in [`docs/product.md`](docs/product.md).
 
 ## Get the Mac app
 
-Every push builds the app on GitHub's Mac machines. One build runs on both Apple Silicon and Intel Macs.
+Download the **.dmg** from the latest release: https://github.com/hellofirsthour-design/playback-rig/releases/latest. Open it and drag **Playback Rig** into Applications. One build runs on both Apple Silicon and Intel Macs.
 
-1. Open the repo on GitHub and go to **Actions**. Pick the latest green **CI** run and download **PlaybackRig-mac** under *Artifacts*.
-2. Unzip it and drag **Playback Rig** into Applications.
-3. The app isn't signed with an Apple developer certificate yet, so the first launch needs one extra step. Right-click the app, choose **Open**, then click **Open** again. If macOS says the app is damaged, run this once in Terminal:
+The app isn't signed with an Apple developer certificate yet, so the first launch needs one extra step. Right-click the app, choose **Open**, then click **Open** again. If macOS says the app is damaged, run this once in Terminal:
 
 ```bash
 xattr -cr "/Applications/Playback Rig.app"
 ```
+
+**Updates are automatic from version 0.2 on.** The app checks for a new version at launch. When one exists, **Install & restart** appears at the bottom of the window. It only installs while playback is stopped. Settings, the set list, pedal mappings and song setups are kept. You can also check by hand in **Setup → Updates**.
+
+### Publishing a new version
+
+Raise `version` in `apps/desktop/src-tauri/tauri.conf.json` and push. CI then builds, signs and publishes a GitHub Release with the update file the app reads. A push that doesn't raise the version publishes nothing. Signing uses the `TAURI_SIGNING_PRIVATE_KEY` repository secret, and its public half is in `tauri.conf.json`. If that key is lost, installed apps can't accept updates signed with a new key, and everyone has to reinstall once.
 
 ## First-time setup on the church Mac
 

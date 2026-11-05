@@ -611,9 +611,40 @@
     else if (e.payload === 'pad-only') toast('Pads arrive in a later update.');
   });
 
+  /* ---------- updates ---------- */
+  let update = null, updating = false;
+  async function checkUpdate(manual) {
+    if (manual) { $('#checkUpd').disabled = true; $('#checkUpd').textContent = 'Checking…'; }
+    try { update = await invoke('check_update'); }
+    catch (e) { if (manual) err(e); }
+    finally { $('#checkUpd').disabled = false; $('#checkUpd').textContent = 'Check for updates'; }
+    renderUpdate();
+    if (manual && !update) toast("You're on the latest version.");
+  }
+  function renderUpdate() {
+    $('#stUpd').hidden = !update;
+    if (!update) return;
+    $('#updText').textContent = `Version ${update.version} is ready`;
+    $('#updBtn').textContent = updating ? 'Installing…' : 'Install & restart';
+    $('#updBtn').disabled = updating || playing();
+    $('#updBtn').title = playing() ? 'Stop playback to update' : `Update from ${update.current} to ${update.version}`;
+  }
+  $('#updBtn').onclick = async () => {
+    if (playing()) { toast('Stop playback before updating.'); return; }
+    updating = true; renderUpdate(); showTask('Downloading update', 0);
+    try { await invoke('install_update'); } // restarts the app on success
+    catch (e) { err(e); updating = false; hideTask(); renderUpdate(); }
+  };
+  $('#checkUpd').onclick = () => checkUpdate(true);
+  T.event.listen('update-progress', e => showTask('Downloading update', e.payload));
+  invoke('app_version').then(v => { $('#verText').textContent = `Playback Rig ${v}. Updates install only when playback is stopped.`; }).catch(() => {});
+  setTimeout(() => checkUpdate(false), 4000);
+  setInterval(() => { if (!update) checkUpdate(false); }, 6 * 3600 * 1000);
+
   setInterval(async () => {
     try {
       const s = await invoke('status'); snap = s.snapshot;
+      if (update && !updating) $('#updBtn').disabled = playing();
       if (learnWait != null && !s.learning) { learnWait = null; await refresh(); } else tick();
     } catch (e) { /* closing */ }
   }, 40);

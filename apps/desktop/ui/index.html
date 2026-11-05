@@ -61,6 +61,7 @@
   <span id="stOut"></span>
   <span id="stMidi"></span>
   <span class="task" id="stTask" hidden><span id="stTaskText"></span><span class="pbar"><i id="stTaskBar"></i></span></span>
+  <span class="upd" id="stUpd" hidden><span id="updText"></span><button class="mini accent" id="updBtn">Install &amp; restart</button></span>
   <span class="zoom"><button class="mini" id="zoomOut" aria-label="Zoom out">−</button><button class="mini" id="zoomFit">Fit</button><button class="mini" id="zoomIn" aria-label="Zoom in">+</button></span>
 </footer>
 
@@ -116,6 +117,11 @@
       <label>Click level<input id="clickGain" type="range" min="0" max="1.5" step="0.01"></label>
     </div>
     <p class="hint" id="outHint"></p>
+  </div>
+  <div class="card">
+    <h3>Updates</h3>
+    <p class="hint" id="verText">Playback Rig</p>
+    <button class="btn" id="checkUpd">Check for updates</button>
   </div>
   <div class="card">
     <h3>Pedals and controller</h3>
