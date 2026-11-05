@@ -46,6 +46,8 @@ pub enum Action {
     ToggleView,
     /// Fade the song out over two bars and stop.
     FadeOut,
+    /// Start or stop the free click (a click with no song).
+    FreeClick,
     /// Continuous: a fader sets this stem's level.
     StemLevel(usize),
     /// Continuous: a fader sets the click level.

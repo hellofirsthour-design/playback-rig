@@ -44,7 +44,7 @@
 
 <section class="railwrap">
   <div class="rail" id="rail" aria-label="Arrangement"></div>
-  <div class="palette"><span class="lbl">Sections</span><div class="chips" id="palette"></div><span class="hint" id="palHint">Drag into the arrangement, or + to add at the end</span></div>
+  <div class="palette"><span class="lbl">Sections</span><div class="chips" id="palette"></div><span class="typearr"><input id="arrText" spellcheck="false" autocomplete="off" aria-label="Type the arrangement" title="Type the arrangement and press Enter. Abbreviations work: I V1 PC C B T O, and x2 to repeat." placeholder="Type: I, V1, C1, V2, C2 x2, B, O"><button class="btn" id="arrApply">Set</button></span></div>
 </section>
 
 <section class="arr" id="arr">
@@ -61,20 +61,28 @@
 
 <section class="live" id="live" hidden>
   <div class="lmain">
-    <div class="lnow">
-      <div class="lbl">Now</div>
-      <div class="lsec" id="lvSec">—</div>
-      <div class="lrow2">
-        <div class="lbars"><b id="lvBars">–</b><span id="lvBarsLbl">bars left</span></div>
-        <div class="lbeats" id="lvBeats"></div>
-        <div class="lpos" id="lvPos"></div>
+    <div class="lhead">
+      <div class="lnow">
+        <div class="lnrow"><span class="lbl">Now</span><span class="lpos" id="lvPos"></span></div>
+        <div class="lsec" id="lvSec">—</div>
+        <div class="lrow2">
+          <div class="lbars"><b id="lvBars">–</b><span id="lvBarsLbl">bars left</span></div>
+          <div class="lbeats" id="lvBeats"></div>
+        </div>
+        <div class="lprog"><i id="lvProg"></i></div>
       </div>
-      <div class="lprog"><i id="lvProg"></i></div>
+      <div class="lnext" id="lvNext"><div class="lbl" id="lvNextLbl">Next</div><div class="lnsec" id="lvNextSec">—</div></div>
     </div>
-    <div class="lnext" id="lvNext"><div class="lbl" id="lvNextLbl">Next</div><div class="lnsec" id="lvNextSec">—</div></div>
     <div class="lstrip">
       <div class="lblocks" id="lvBlocks" aria-label="Arrangement: tap a section to go there"></div>
       <div class="fades" id="lvFades" aria-label="Fades and transition"></div>
+    </div>
+    <div class="ltabs">
+      <div class="tabbar" role="tablist" aria-label="Live controls">
+        <button role="tab" data-tab="mix">Mixer</button><button role="tab" data-tab="pads">Pads</button><button role="tab" data-tab="click">Click</button>
+        <span class="lkey"><span class="lbl">Key</span><button class="ib" id="lvKeyDown" aria-label="Key down a semitone">−</button><b id="lvKey">—</b><button class="ib" id="lvKeyUp" aria-label="Key up a semitone">+</button></span>
+      </div>
+      <div class="tabbody" id="lvTab"></div>
     </div>
   </div>
   <aside class="lset">

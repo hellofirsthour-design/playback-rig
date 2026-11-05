@@ -6,6 +6,7 @@ mod audio;
 mod clicksong;
 mod decode;
 mod guide;
+mod metronome;
 mod midi_io;
 mod model;
 mod pads;
@@ -44,6 +45,9 @@ struct Settings {
     pads_folder: Option<PathBuf>,
     pad_level: f32,
     pad_route: Option<Route>,
+    /// The free click's last tempo and meter.
+    free_click_bpm: f64,
+    free_click_bpb: u32,
     /// 0.5.0's per-group buses (read once to carry their settings over; never written).
     #[serde(skip_serializing)]
     buses: Vec<Bus>,
@@ -154,6 +158,8 @@ impl Default for Settings {
             pads_folder: None,
             pad_level: 0.6,
             pad_route: None,
+            free_click_bpm: 120.0,
+            free_click_bpb: 4,
             buses: vec![],
             bus_list: vec![],
             bus_of_track: Default::default(),
@@ -199,6 +205,8 @@ struct Core {
     status: Arc<Mutex<Option<Snapshot>>>,
     /// Counts handoffs to the next song done by the audio thread.
     segues: Arc<AtomicU64>,
+    /// The free click is running (the audio thread stops it when a song starts).
+    metro_on: Arc<AtomicBool>,
     map: Mutex<MidiMap>,
     config_dir: PathBuf,
     data_dir: PathBuf,
@@ -238,6 +246,9 @@ struct AppState {
     seen_segues: AtomicU64,
     /// The pad was brought in automatically for this song's ending.
     pad_auto: AtomicBool,
+    /// A pad key picked on the Live page (None = the song's key). Back to the song's key
+    /// when the song changes.
+    pad_choice: Mutex<Option<u8>>,
 }
 
 #[derive(Default)]
@@ -270,13 +281,9 @@ fn pad_update(state: &AppState) -> Result<(), String> {
         return Ok(());
     }
     let folder = s.pads_folder.clone().ok_or("Choose your pads folder in Setup → Pads first.")?;
-    let pc = state
-        .song
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|l| song_key_pc(&l.file))
-        .ok_or("This song has no key, so there's no pad to play. Set its key in Song → Song details.")?;
+    let chosen = *state.pad_choice.lock().unwrap();
+    let song_pc = state.song.lock().unwrap().as_ref().and_then(|l| song_key_pc(&l.file));
+    let pc = chosen.or(song_pc).ok_or("This song has no key. Pick a pad key, or set the song's key in Song → Song details.")?;
     if *state.pad_key.lock().unwrap() == Some(pc) {
         return Ok(());
     }
@@ -367,6 +374,17 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
             Action::FadeOut => {
                 fade_out(&app.state::<AppState>(), 2.0);
             }
+            Action::FreeClick => {
+                let st = app.state::<AppState>();
+                let (bpm, bpb) = {
+                    let s = st.settings.lock().unwrap();
+                    (s.free_click_bpm, s.free_click_bpb)
+                };
+                let on = !st.core.metro_on.load(Ordering::Acquire);
+                if free_click(st.clone(), on, bpm, bpb).is_ok() {
+                    let _ = app.emit("pedal", "refresh");
+                }
+            }
             Action::StemLevel(_) | Action::ClickLevel => {}
         },
     }
@@ -387,7 +405,7 @@ fn open_output(core: &Core, app: &AppHandle, name: Option<String>) -> Result<Ope
     *core.output.lock().unwrap() = None; // close the old one first
     *core.status.lock().unwrap() = None;
     let h = app.clone();
-    let out = audio::open(name, core.status.clone(), core.segues.clone(), move |e| {
+    let out = audio::open(name, core.status.clone(), core.segues.clone(), core.metro_on.clone(), move |e| {
         let _ = h.emit("audio-error", e);
     })?;
     let info = out.info.clone();
@@ -612,6 +630,7 @@ fn take_segue(state: &AppState) -> bool {
         state.save_settings();
     }
     state.pad_auto.store(false, Ordering::Relaxed);
+    *state.pad_choice.lock().unwrap() = None;
     let _ = pad_update(state); // the pad follows the new song's key
     true
 }
@@ -828,6 +847,14 @@ struct AppView {
     buses: Vec<BusView>,
     /// The next song in the set is loaded and ready.
     next_ready: bool,
+    free_click: FreeClickView,
+}
+
+#[derive(Serialize)]
+struct FreeClickView {
+    on: bool,
+    bpm: f64,
+    beats_per_bar: u32,
 }
 
 #[derive(Serialize)]
@@ -852,6 +879,8 @@ struct PadsView {
     route: Route,
     /// The key the pad plays for the current song.
     song_key: Option<String>,
+    /// A key picked by hand (None = the song's key).
+    chosen: Option<String>,
 }
 
 fn view(state: &AppState) -> AppView {
@@ -886,6 +915,8 @@ fn view(state: &AppState) -> AppView {
     buses.retain(|b| b.custom || !b.stems.is_empty());
     let midi = state.midi.lock().unwrap().as_ref().map(|m| m.name.clone());
     let next_ready = state.next.lock().unwrap().loaded.is_some();
+    let pad_choice = *state.pad_choice.lock().unwrap();
+    let free_click = FreeClickView { on: state.core.metro_on.load(Ordering::Acquire), bpm: s.free_click_bpm, beats_per_bar: s.free_click_bpb };
     let pad_on = *state.pad_on.lock().unwrap();
     AppView {
         outputs: audio::list_outputs(),
@@ -920,7 +951,9 @@ fn view(state: &AppState) -> AppView {
             level: s.pad_level,
             route: s.pad_route.unwrap_or(Route::Pair(0)),
             song_key,
+            chosen: pad_choice.map(|pc| pads::NAMES[pc as usize].to_string()),
         },
+        free_click,
     }
 }
 
@@ -939,6 +972,8 @@ struct Status {
     song_changed: bool,
     /// The pad was switched on or off here (pad underneath): reload the view.
     pad_changed: bool,
+    /// The free click is running.
+    free_click: bool,
 }
 
 #[tauri::command]
@@ -951,7 +986,7 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
     let pad_changed = auto_pad(&state, &snapshot);
     sync_next(&app, &state);
     let learning = state.core.map.lock().unwrap().is_learning();
-    Status { snapshot, learning, song_changed, pad_changed }
+    Status { snapshot, learning, song_changed, pad_changed, free_click: state.core.metro_on.load(Ordering::Acquire) }
 }
 
 async fn reload_current(state: &AppState) -> Result<(), String> {
@@ -1085,6 +1120,7 @@ async fn select_song(state: State<'_, AppState>, index: usize) -> Result<AppView
     *state.song.lock().unwrap() = Some(loaded);
     state.settings.lock().unwrap().current = Some(index);
     state.save_settings();
+    *state.pad_choice.lock().unwrap() = None;
     let _ = pad_update(&state); // pad follows the new song's key
     Ok(view(&state))
 }
@@ -1561,6 +1597,51 @@ fn pad_set(state: State<'_, AppState>, on: bool) -> Result<AppView, String> {
     Ok(view(&state))
 }
 
+/// Plays the pad in a key picked by hand (None = back to the song's key).
+#[tauri::command]
+fn pad_key(state: State<'_, AppState>, key: Option<String>) -> Result<AppView, String> {
+    let pc = match key.as_deref() {
+        Some(k) => Some(pads::pitch_class(k).ok_or(format!("\"{k}\" isn't a key."))?),
+        None => None,
+    };
+    *state.pad_choice.lock().unwrap() = pc;
+    *state.pad_on.lock().unwrap() = true;
+    if let Err(e) = pad_update(&state) {
+        *state.pad_on.lock().unwrap() = false;
+        let _ = pad_update(&state);
+        return Err(e);
+    }
+    Ok(view(&state))
+}
+
+/// The free click: a click with no song (between songs, announcements, rehearsal).
+/// It goes to the click output at the click level, and stops when a song starts.
+#[tauri::command]
+fn free_click(state: State<'_, AppState>, on: bool, bpm: f64, beats_per_bar: u32) -> Result<AppView, String> {
+    let bpm = bpm.clamp(30.0, 300.0);
+    let bpb = beats_per_bar.clamp(1, 12);
+    if on && state.core.playing() {
+        return Err("A song is playing; its own click is on. Stop the song to run the free click.".into());
+    }
+    let (gain, route) = {
+        let mut s = state.settings.lock().unwrap();
+        s.free_click_bpm = bpm;
+        s.free_click_bpb = bpb;
+        (s.click_gain, s.click_route)
+    };
+    state.save_settings();
+    {
+        let mut out = state.core.output.lock().unwrap();
+        let o = out.as_mut().ok_or("No audio output is open.")?;
+        let route = route.unwrap_or(songfile::default_route("click", o.info.channels));
+        if !o.send(ToAudio::Metro { on, bpm, beats_per_bar: bpb, gain, route }) {
+            return Err("The audio thread is busy. Try again.".into());
+        }
+    }
+    state.core.metro_on.store(on, Ordering::Release);
+    Ok(view(&state))
+}
+
 #[tauri::command]
 fn pad_mix(state: State<'_, AppState>, level: Option<f32>, route: Option<Route>) -> Result<(), String> {
     {
@@ -1832,6 +1913,7 @@ fn main() {
                 output: Mutex::new(None),
                 status: Arc::new(Mutex::new(None)),
                 segues: Arc::new(AtomicU64::new(0)),
+                metro_on: Arc::new(AtomicBool::new(false)),
                 map: Mutex::new(map),
                 config_dir: dir,
                 data_dir,
@@ -1865,6 +1947,7 @@ fn main() {
                 next: Mutex::new(NextSong::default()),
                 seen_segues: AtomicU64::new(0),
                 pad_auto: AtomicBool::new(false),
+                pad_choice: Mutex::new(None),
             });
             Ok(())
         })
@@ -1881,6 +1964,8 @@ fn main() {
             update_song,
             set_arrangement,
             set_transition,
+            pad_key,
+            free_click,
             song_peaks,
             analyze_song,
             check_update,
@@ -1911,6 +1996,7 @@ mod tests {
                 output: Mutex::new(None),
                 status: Arc::new(Mutex::new(None)),
                 segues: Arc::new(AtomicU64::new(0)),
+                metro_on: Arc::new(AtomicBool::new(false)),
                 map: Mutex::new(MidiMap::default()),
                 config_dir: dir.clone(),
                 data_dir: dir,
@@ -1924,6 +2010,7 @@ mod tests {
             next: Mutex::new(NextSong::default()),
             seen_segues: AtomicU64::new(0),
             pad_auto: AtomicBool::new(false),
+            pad_choice: Mutex::new(None),
         }
     }
 

@@ -22,7 +22,12 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
 
 **Live / Edit** in the top bar (or L, or a learned MIDI button) switches pages; the app remembers the last one. The top bar (transport, display, Song, Setup) is the same on both.
 
-- **Live page** (Playback-style, readable from the keys): the current section huge, bars left, beat lights, a progress bar, then what's next ("Next", "In 2 bars → Chorus 2" when a jump is queued, "Vamping"). Below, the arrangement on one line that scrolls along with the song (tap a block to go there), and under it the **fades**: the song's ending, the way into the next song, pad under the ending and **Fade out now**. On the right, the set; the next song is highlighted, with → for a segue and ⤳ for a crossfade.
+- **Live page** (Playback-style, readable from the keys): Now and Next side by side (kept compact so the controls fit): the current section, bars left, beat lights, a progress bar, and what's next ("Next", "In 2 bars → Chorus 2" when a jump is queued, "Vamping"). Below, the arrangement on one line that scrolls along with the song (tap a block to go there), and under it the **fades**: the song's ending, the way into the next song, pad under the ending and **Fade out now**. On the right, the set; the next song is highlighted, with → for a segue and ⤳ for a crossfade.
+  Below that, three tabs, so nobody has to dig into Setup mid-service (and someone else can run it from here):
+  - **Mixer:** a fader and mute per bus, plus the built-in click and pad levels. Track-by-track mixing stays on the Edit page.
+  - **Pads:** on/off, level, and any of the 12 keys (the song's key is marked). Picking a key overrides the song's key until the song changes.
+  - **Click (free click):** a click with no song, for announcements, between songs or a rehearsal with no tracks. Start/stop, BPM −/+, tap tempo, meter, "song tempo". It goes to the click output at the click level and stops by itself when a song starts. Also a learnable MIDI button.
+  - **Key −/+** sits on the tab bar (stopped only, since the stems are re-rendered).
 - **Edit page:** the section rail and the arrangement view below.
 
 ## The main screen
@@ -74,6 +79,8 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 ## Arrangement editing (Build mode)
 
 - **Reorder** section blocks, and repeat or remove them.
+- **Type the arrangement** in the box beside the section chips: "I, V1, PC, C1 x2, B, O". Abbreviations (I, V, PC, C, B, T, O, TA, Inst…), number words ("verse two") and x2 work. Each block keeps its own edits (muted tracks, trims). Anything it doesn't recognise is reported and nothing changes. It runs offline; no AI service.
+- **Zoom** (+/−, = and - keys) keeps the playhead where it is on screen.
 - **Change stems per block:** for example, drums out in verse 1 or keys only in the bridge.
 - **Tempo and key.** Pitch-shifting full stems gets audibly worse past about ±2 semitones, so for bigger key changes we recommend downloading the stems in the right key from MultiTracks.
 - **Clip editing** on the timeline: drag a clip's left or right edge to trim that track inside that block (snaps to the beat; Alt for fine). Drag the small handle at a clip's top corner for a fade-in or fade-out. Backspace on a selected clip removes its trim. Trims move with their block and work while playing.

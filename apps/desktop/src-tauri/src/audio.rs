@@ -23,6 +23,8 @@ pub enum ToAudio {
     Queue(Box<Engine>, Handoff),
     /// Forget the queued next song.
     Unqueue,
+    /// The free click: on/off, BPM, beats per bar, level, output.
+    Metro { on: bool, bpm: f64, beats_per_bar: u32, gain: f32, route: rig_engine::Route },
 }
 
 /// How the queued next song takes over.
@@ -165,7 +167,7 @@ pub fn list_outputs() -> Vec<OutputInfo> {
 }
 
 /// Opens an output (by name, or the system default) using all of its channels.
-pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, on_error: impl Fn(String) + Send + 'static) -> Result<Output, String> {
+pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, on_error: impl Fn(String) + Send + 'static) -> Result<Output, String> {
     let (tx, mut rx) = rtrb::RingBuffer::<ToAudio>::new(1024);
     let (mut gtx, garbage) = rtrb::RingBuffer::<Garbage>::new(32);
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -208,6 +210,7 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
             let sample_rate = config.sample_rate.0;
 
             let mut decks = Decks::new(channels);
+            let mut metro = crate::metronome::Metronome::new(sample_rate);
             let mut pads = crate::pads::PadPlayer::new(sample_rate);
             let stream = dev.build_output_stream(
                 &config,
@@ -243,6 +246,12 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                                     let _ = gtx.push(Garbage::Engine(old));
                                 }
                             }
+                            ToAudio::Metro { on, bpm, beats_per_bar, gain, route } => {
+                                metro.gain = gain;
+                                metro.route = route;
+                                metro.set(on, bpm, beats_per_bar);
+                                metro_on.store(metro.on, Ordering::Release);
+                            }
                             ToAudio::Unqueue => {
                                 if let Some((old, _)) = decks.queued.take() {
                                     let _ = gtx.push(Garbage::Engine(old));
@@ -265,6 +274,12 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                             *st = Some(e.snapshot());
                         }
                     }
+                    // The free click stops when a song starts.
+                    if metro.on && decks.engine.as_ref().is_some_and(|e| e.is_playing()) {
+                        metro.on = false;
+                        metro_on.store(false, Ordering::Release);
+                    }
+                    metro.process(data, channels);
                     if let Some(done) = pads.process(data, channels) {
                         let _ = gtx.push(Garbage::Pad(done));
                     }

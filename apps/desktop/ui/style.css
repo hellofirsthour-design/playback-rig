@@ -240,22 +240,22 @@ body { grid-template-columns: minmax(0, 1fr) }
 body.live-mode { grid-template-rows: auto 1fr auto }
 body.live-mode .railwrap, body.live-mode .arr { display: none }
 .live { display: grid; grid-template-columns: 1fr 260px; min-height: 0; overflow: hidden }
-.lmain { display: grid; grid-template-rows: auto auto auto 1fr; gap: 14px; padding: 18px 20px; min-width: 0; min-height: 0 }
-.lnow { background: var(--panel); border: 1px solid var(--line); border-left: 8px solid var(--c, var(--go)); border-radius: 14px; padding: 14px 20px 16px }
-.lsec { font: 900 clamp(48px, 9vw, 112px)/1 var(--f-round); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 4px 0 10px }
+.lmain { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 12px; padding: 18px 20px; min-width: 0; min-height: 0 }
+.lnow { background: var(--panel); border: 1px solid var(--line); border-left: 6px solid var(--c, var(--go)); border-radius: 12px; padding: 10px 16px 12px; min-width: 0 }
+.lsec { font: 900 clamp(32px, 4.2vw, 58px)/1 var(--f-round); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 2px 0 6px }
 .lrow2 { display: flex; align-items: center; gap: 28px; flex-wrap: wrap }
-.lbars b { font: 800 clamp(36px, 5vw, 64px)/1 var(--f-mono); margin-right: 8px }
+.lbars b { font: 800 clamp(26px, 3vw, 40px)/1 var(--f-mono); margin-right: 6px }
 .lbars span { color: var(--muted); font-size: 16px }
 .lbeats { display: flex; gap: 10px }
-.lbeats i { width: 26px; height: 26px; border-radius: 50%; background: var(--raised-2); border: 1px solid var(--line-2) }
+.lbeats i { width: 18px; height: 18px; border-radius: 50%; background: var(--raised-2); border: 1px solid var(--line-2) }
 .lbeats i.on { background: var(--fg) }
 .lbeats i.on.one { background: var(--go); border-color: var(--go) }
-.lpos { font: 600 18px var(--f-mono); color: var(--muted); margin-left: auto }
-.lprog { height: 8px; background: var(--raised-2); border-radius: 4px; margin-top: 14px; overflow: hidden }
+.lpos { font: 600 13px var(--f-mono); color: var(--muted); margin-left: auto }
+.lprog { height: 6px; background: var(--raised-2); border-radius: 3px; margin-top: 10px; overflow: hidden }
 .lprog i { display: block; height: 100%; width: 0; background: var(--c, var(--go)) }
-.lnext { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 10px 20px; display: flex; align-items: baseline; gap: 18px }
-.lnext .lbl { font-size: 14px; min-width: 110px }
-.lnsec { font: 800 clamp(28px, 4.5vw, 54px)/1.1 var(--f-round); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.lnext { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 16px; display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 0 }
+.lnext .lbl { font-size: 12px }
+.lnsec { font: 800 clamp(24px, 3vw, 42px)/1.05 var(--f-round); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 .lnext.going { border-color: var(--cue) } .lnext.going .lbl, .lnext.going .lnsec { color: var(--cue) }
 .lnext.vamp { border-color: var(--go) } .lnext.vamp .lbl, .lnext.vamp .lnsec { color: var(--go) }
 .lstrip { display: flex; flex-direction: column; gap: 10px; min-width: 0 }
@@ -292,3 +292,38 @@ body.live-mode .status .zoom { visibility: hidden }
 .fades .fadenow { margin-left: auto; border-color: var(--go); color: var(--go) }
 .fades.stacked .fadenow { display: none }
 body.live-mode .bar .lcd { display: none }
+
+.lhead { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 12px }
+.lnrow { display: flex; align-items: baseline; gap: 10px }
+/* Live tabs: Mixer (buses), Pads, Click */
+.ltabs { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden }
+.tabbar { display: flex; align-items: center; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--line) }
+.tabbar [role=tab] { background: none; border: 0; border-radius: 8px; padding: 7px 14px; font: 700 13px var(--f-ui); color: var(--muted); cursor: pointer }
+.tabbar [role=tab].on { background: var(--raised-2); color: var(--fg) }
+.lkey { margin-left: auto; display: inline-flex; align-items: center; gap: 6px }
+.lkey b { min-width: 44px; text-align: center; font: 800 16px var(--f-round) }
+.tabbody { padding: 12px 14px; overflow-y: auto; min-height: 0 }
+.strips { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 18px }
+.strip { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto 40px; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--raised) }
+.strip b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; grid-column: 2 / 4; grid-row: 1 }
+.strip .m { grid-column: 1; grid-row: 1 / 3; width: 30px; height: 30px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--raised-2); font-weight: 800; cursor: pointer }
+.strip .m.on { background: var(--danger); border-color: var(--danger); color: #111 }
+.strip input[type=range] { grid-column: 2 / 4; grid-row: 2; width: 100% }
+.strip .val { grid-column: 4; grid-row: 1 / 3; font: 12px var(--f-mono); color: var(--muted); text-align: right }
+.strip.off b { color: var(--dim) }
+.padkeys { display: grid; grid-template-columns: repeat(6, minmax(56px, 1fr)); gap: 8px; max-width: 560px }
+.padkeys button { height: 52px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--raised); font: 800 18px var(--f-round); cursor: pointer }
+.padkeys button.on { background: #6aa8ff; border-color: #6aa8ff; color: #0b0b0c }
+.padkeys button.song { box-shadow: inset 0 -3px 0 var(--go) }
+.padkeys button:disabled { opacity: .3; cursor: default }
+.prow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px }
+.prow .big { height: 44px; padding: 0 20px; font-size: 15px; font-weight: 800 }
+.prow input[type=range] { width: 200px }
+.clk { display: flex; align-items: center; gap: 14px; flex-wrap: wrap }
+.clk .bpm { font: 800 44px/1 var(--f-mono); min-width: 120px; text-align: center }
+.clk .go { height: 52px; padding: 0 26px; font-size: 16px; font-weight: 800 }
+.clk .go.on { background: var(--go); border-color: var(--go); color: #111 }
+.typearr { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: 0 1 420px; min-width: 180px }
+.typearr input { flex: 1 1 auto; min-width: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px; font: 12px var(--f-mono) }
+.typearr .btn { padding: 5px 10px }
+@media (max-width: 900px) { .lhead { grid-template-columns: 1fr } }

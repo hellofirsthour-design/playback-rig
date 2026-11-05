@@ -260,6 +260,9 @@
       box.append(t);
     });
     renderFades($('#lvFades'));
+    renderLiveTab();
+    const sk = V.song;
+    $('#lvKey').textContent = sk ? (sk.key ? keyName(sk.key, sk.transpose) : (sk.transpose ? (sk.transpose > 0 ? '+' : '') + sk.transpose : '—')) : '—';
     liveFollowed = -1;
     const set = $('#lvSet'); set.innerHTML = '';
     (V ? V.setlist : []).forEach((s, i) => {
@@ -269,6 +272,89 @@
       set.append(li);
     });
   }
+  /* Live tabs: Mixer (buses), Pads, Click */
+  let liveTab = 'mix';
+  try { liveTab = localStorage.getItem('rig.liveTab') || 'mix'; } catch (e) { /* storage off */ }
+  document.querySelectorAll('.tabbar [role=tab]').forEach(b => { b.onclick = () => { liveTab = b.dataset.tab; try { localStorage.setItem('rig.liveTab', liveTab); } catch (e) { /* storage off */ } renderLiveTab(); }; });
+  function faderStrip(name, value, max, onInput, muted, onMute, label) {
+    const r = el('div', 'strip' + (muted ? ' off' : ''));
+    const m = el('button', 'm' + (muted ? ' on' : ''), 'M'); m.title = `Mute ${name}`; m.setAttribute('aria-pressed', !!muted);
+    if (onMute) m.onclick = onMute; else m.style.visibility = 'hidden';
+    const f = el('input'); f.type = 'range'; f.min = 0; f.max = max; f.step = 0.01; f.value = value; f.setAttribute('aria-label', label || `${name} level`);
+    const v = el('span', 'val', Math.round(value * 100) + '%');
+    f.oninput = () => { v.textContent = Math.round(+f.value * 100) + '%'; onInput(+f.value); };
+    r.append(m, el('b', null, name), f, v);
+    return r;
+  }
+  function renderLiveTab() {
+    document.querySelectorAll('.tabbar [role=tab]').forEach(b => { const on = b.dataset.tab === liveTab; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+    const box = $('#lvTab'); if (!box || box.contains(document.activeElement) && document.activeElement.type === 'range') return;
+    box.innerHTML = '';
+    if (liveTab === 'mix') {
+      const g = el('div', 'strips');
+      (V.buses || []).forEach(b => g.append(faderStrip(b.name, b.gain, 1.5, x => { b.gain = x; send({ type: 'BusGain', bus: b.id, gain: x }); }, b.muted,
+        async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; })));
+      g.append(faderStrip('Click (built-in)', V.click_gain, 1.5, x => { V.click_gain = x; send({ type: 'ClickGain', gain: x }); }, null, null));
+      g.append(faderStrip('Pad', V.pads.level, 1.5, x => { V.pads.level = x; invoke('pad_mix', { level: x, route: null }).catch(err); }, !V.pads.on, () => togglePad()));
+      if (!(V.buses || []).length) box.append(el('p', 'hint', 'Load a song to see its buses.'));
+      box.append(g);
+    } else if (liveTab === 'pads') {
+      const pd = V.pads;
+      if (!pd.folder) {
+        box.append(el('p', 'hint', 'Choose a folder with one pad per key (MultiTracks pad packs work).'));
+        const b = el('button', 'btn', 'Choose pads folder'); b.onclick = () => invoke('choose_pads_folder').then(refresh).catch(err); box.append(b);
+        return;
+      }
+      const row = el('div', 'prow');
+      const on = el('button', 'btn big tog pad' + (pd.on ? ' on' : ''), pd.on ? 'Pad on' : 'Pad off'); on.onclick = () => togglePad();
+      const songBtn = el('button', 'btn big' + (pd.on && !pd.chosen ? ' on' : ''), pd.song_key ? `Song key (${pd.song_key})` : 'Song key');
+      songBtn.onclick = () => invoke('pad_key', { key: null }).then(refresh).catch(err);
+      const lv = el('input'); lv.type = 'range'; lv.min = 0; lv.max = 1.5; lv.step = 0.01; lv.value = pd.level; lv.setAttribute('aria-label', 'Pad level');
+      lv.oninput = () => { pd.level = +lv.value; invoke('pad_mix', { level: pd.level, route: null }).catch(err); };
+      row.append(on, songBtn, el('span', 'lbl', 'Level'), lv);
+      box.append(row);
+      const keys = el('div', 'padkeys');
+      const playing = pd.on ? (pd.chosen || pd.song_key) : null;
+      ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'].forEach(k => {
+        const b = el('button', (k === playing ? 'on' : '') + (k === pd.song_key ? ' song' : ''), k);
+        b.disabled = !pd.keys.includes(k); b.title = b.disabled ? `No ${k} pad in your folder` : `Play the ${k} pad`;
+        b.onclick = () => invoke('pad_key', { key: k }).then(refresh).catch(err);
+        keys.append(b);
+      });
+      box.append(keys);
+    } else {
+      const fc = V.free_click || { on: false, bpm: 120, beats_per_bar: 4 };
+      const c = el('div', 'clk');
+      const set = (on, bpm, bpb) => invoke('free_click', { on, bpm, beatsPerBar: bpb }).then(refresh).catch(err);
+      const dn = el('button', 'ib', '−'), up = el('button', 'ib', '+');
+      dn.setAttribute('aria-label', 'Slower'); up.setAttribute('aria-label', 'Faster');
+      dn.onclick = () => set(fc.on, Math.max(30, fc.bpm - 1), fc.beats_per_bar);
+      up.onclick = () => set(fc.on, Math.min(300, fc.bpm + 1), fc.beats_per_bar);
+      const tap = el('button', 'btn big', 'Tap');
+      tap.onclick = () => {
+        const now = performance.now(); taps = taps.filter(t => now - t < 2500); taps.push(now);
+        if (taps.length >= 3) { const iv = (taps[taps.length - 1] - taps[0]) / (taps.length - 1); set(fc.on, Math.round(60000 / iv * 2) / 2, fc.beats_per_bar); }
+      };
+      const go = el('button', 'btn go' + (fc.on ? ' on' : ''), fc.on ? 'Stop click' : 'Start click');
+      go.onclick = () => set(!fc.on, fc.bpm, fc.beats_per_bar);
+      const meter = seg([[2, '2/4'], [3, '3/4'], [4, '4/4'], [6, '6/8']], fc.beats_per_bar, v => set(fc.on, fc.bpm, v), 'Beats per bar');
+      const song = el('button', 'btn', 'Song tempo'); song.disabled = !V.song; song.onclick = () => set(fc.on, Math.round(playBpm() * 100) / 100, V.song.beats_per_bar);
+      c.append(go, dn, el('span', 'bpm', String(+fc.bpm.toFixed(2))), up, el('span', 'lbl', 'BPM'), tap, meter, song);
+      box.append(c, el('p', 'hint', 'A click with no song: run it between songs, during announcements, or for a song with no tracks. It plays on the click output at the click level, and stops when a song starts. (Also on a MIDI button: Setup → MIDI.)'));
+    }
+  }
+  let taps = [];
+  async function liveKey(d) {
+    if (!V.song) return;
+    if (playing()) { toast('Stop playback before changing the key.'); return; }
+    const t = Math.max(-12, Math.min(12, V.song.transpose + d));
+    showTask('Changing key', 0.3);
+    try { const v = await invoke('set_key_tempo', { transpose: t, bpm: playBpm() }); songKey = null; await refresh(v); toast(`Now in ${keyName(V.song.key, V.song.transpose)}.`); }
+    catch (e) { err(e); } finally { hideTask(); }
+  }
+  $('#lvKeyDown').onclick = () => liveKey(-1);
+  $('#lvKeyUp').onclick = () => liveKey(1);
+
   function tickLive(L, cur, p) {
     if (page !== 'live') return;
     const s = V.song, now = $('.lnow');
@@ -311,6 +397,49 @@
     if (!p) liveFollowed = -1;
   }
   let liveFollowed = -1;
+
+  /* ---------- typed arrangement ---------- */
+  // "I, V1, PC, C1 x2, B, O" -> blocks. Abbreviations and number words work; offline, no AI.
+  const ABBR = { i: 'intro', in: 'intro', int: 'intro', v: 'verse', vs: 'verse', c: 'chorus', ch: 'chorus', chor: 'chorus', pc: 'pre-chorus', pre: 'pre-chorus', prechorus: 'pre-chorus',
+    b: 'bridge', br: 'bridge', t: 'tag', tg: 'tag', o: 'outro', out: 'outro', e: 'ending', end: 'ending', inst: 'instrumental', it: 'interlude', int2: 'interlude', ta: 'turnaround', turn: 'turnaround',
+    ci: 'count-in', count: 'count-in', countin: 'count-in', r: 'refrain', ref: 'refrain', pst: 'post-chorus', post: 'post-chorus', postchorus: 'post-chorus', vamp: 'vamp', solo: 'solo', rap: 'rap', top: 'count-in' };
+  const NUMW = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, first: 1, second: 2, third: 3 };
+  const normName = n => n.toLowerCase().replace(/\s+/g, ' ').replace(/pre ?chorus/, 'pre-chorus').replace(/post ?chorus/, 'post-chorus').replace(/count ?in/, 'count-in').trim();
+  function parseArrangement(text, names) {
+    const norm = names.map(n => [normName(n), n]);
+    const out = [], bad = [];
+    for (let raw of text.split(/[,;\n→>]+|->|\bthen\b/i)) {
+      raw = raw.trim().toLowerCase(); if (!raw) continue;
+      let times = 1;
+      const rep = raw.match(/\s*(?:x\s*(\d+)|(\d+)\s*x|\*\s*(\d+)|\btwice\b)\s*$/);
+      if (rep) { times = rep[0].includes('twice') ? 2 : +(rep[1] || rep[2] || rep[3]); raw = raw.slice(0, rep.index).trim(); }
+      let t = raw.replace(/\b(one|two|three|four|five|six|first|second|third)\b/g, w => NUMW[w]);
+      let m = t.match(/^([a-z][a-z \-]*?)\s*(\d+)?$/);
+      if (!m) { bad.push(raw); continue; }
+      let base = m[1].trim().replace(/\s+/g, ''), num = m[2];
+      const full = ABBR[base] || normName(m[1].trim());
+      const want = num ? `${full} ${num}` : full;
+      let hit = norm.find(([n]) => n === want) || (!num && norm.find(([n]) => n === full + ' 1')) || (!num && norm.find(([n]) => n.startsWith(full + ' ')));
+      if (!hit) { bad.push(raw); continue; }
+      for (let k = 0; k < Math.max(1, Math.min(8, times)); k++) out.push(hit[1]);
+    }
+    return { names: out, bad };
+  }
+  const arrText = () => blocks.map(b => b.section).join(', ');
+  function renderTypeArr() { const i = $('#arrText'); if (i && document.activeElement !== i) i.value = V && V.song ? arrText() : ''; }
+  function applyTyped() {
+    if (!V.song) return;
+    const { names, bad } = parseArrangement($('#arrText').value, V.song.sections.map(s => s.name));
+    if (bad.length) { toast(`Didn't recognise: ${bad.join(', ')}. Sections here: ${V.song.sections.map(s => s.name).join(', ')}.`, 6000); return; }
+    if (!names.length) { toast('Type at least one section.'); return; }
+    // Keep each section's per-block edits (muted tracks, trims) in order of use.
+    const pool = blocks.map(b => ({ ...b, muted: [...b.muted], trims: copyTrims(b) }));
+    const nb = names.map(n => { const k = pool.findIndex(b => b.section === n); return k >= 0 ? pool.splice(k, 1)[0] : { uid: uidSeq++, section: n, muted: [], trims: [] }; });
+    $('#arrText').blur();
+    commit(nb);
+  }
+  $('#arrApply').onclick = applyTyped;
+  $('#arrText').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); applyTyped(); } else if (e.key === 'Escape') { e.target.value = arrText(); e.target.blur(); } e.stopPropagation(); });
 
   /* ---------- fades: ending and the way into the next song ---------- */
   function setTransition(tr, ending) {
@@ -381,6 +510,7 @@
 
   /* ---------- section rail (drag to arrange) ---------- */
   function renderRail() {
+    renderTypeArr();
     const rail = $('#rail'); rail.innerHTML = '';
     const L = layout();
     L.forEach(o => {
@@ -875,7 +1005,13 @@
   }
   cvTop.addEventListener('wheel', onWheel, { passive: false });
   cvLanes.addEventListener('wheel', onWheel, { passive: false });
-  const zoomBy = f => { const w = cvTop.clientWidth, c = zoom.scroll + w / 2 / zoom.pps; zoom.pps = Math.max(1, Math.min(400, zoom.pps * f)); zoom.scroll = c - w / 2 / zoom.pps; clampScroll(layout(), w); dirty = true; };
+  // Zoom around the playhead: it stays where it is on screen (or comes into view).
+  const zoomBy = f => {
+    const w = cvTop.clientWidth, L = layout(), t = playTime(L);
+    let x = (t - zoom.scroll) * zoom.pps;
+    if (x < 0 || x > w) x = w * 0.3;
+    zoom.pps = Math.max(1, Math.min(400, zoom.pps * f)); zoom.scroll = t - x / zoom.pps; clampScroll(L, w); dirty = true;
+  };
   $('#zoomIn').onclick = () => zoomBy(1.5); $('#zoomOut').onclick = () => zoomBy(1 / 1.5); $('#zoomFit').onclick = fit;
   $('#followBtn').onclick = () => { zoom.follow = !zoom.follow; renderStatus(); };
 
@@ -1037,11 +1173,11 @@
     { label: 'Pedal 4', tap: 'NextSong', hold: 'PadOnly', desc: 'Tap: next song · Hold: pad only' },
     { label: 'Play / stop button', tap: 'PlayStop' }, { label: 'Next button', tap: 'Next' }, { label: 'Repeat button', tap: 'Repeat' },
     { label: 'Vamp button', tap: 'ToggleVamp' }, { label: 'Next song button', tap: 'NextSong' }, { label: 'Click fader', tap: 'ClickLevel' },
-    { label: 'Live / Edit page button', tap: 'ToggleView' }, { label: 'Fade out button', tap: 'FadeOut', desc: 'Fades the song out over 2 bars and stops' },
+    { label: 'Live / Edit page button', tap: 'ToggleView' }, { label: 'Fade out button', tap: 'FadeOut', desc: 'Fades the song out over 2 bars and stops' }, { label: 'Free click button', tap: 'FreeClick', desc: 'Starts or stops the click with no song' },
   ];
   function actionLabel(a) {
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
-    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out' })[a] || String(a);
+    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
   }
   const controlLabel = c => (c.Note ? `Note ${c.Note.key} · ch ${c.Note.ch + 1}` : c.Cc ? `CC ${c.Cc.num} · ch ${c.Cc.ch + 1}` : '?');
   function renderSetup() {
@@ -1191,6 +1327,7 @@
     if (e.payload === 'next-song') { if (playing()) { toast('Next song loads when this one stops.'); return; } if (V && V.current != null && V.current + 1 < V.setlist.length) selectSong(V.current + 1); }
     else if (e.payload === 'pad-only') togglePad();
     else if (e.payload === 'toggle-view') setPage(page === 'live' ? 'edit' : 'live');
+    else if (e.payload === 'refresh') refresh();
   });
 
   /* ---------- updates ---------- */
@@ -1229,6 +1366,7 @@
       const s = await invoke('status'); snap = s.snapshot;
       if (s.song_changed) { toast('Next song: ' + ((V.setlist[(V.current || 0) + 1] || {}).name || '')); await refresh(); return; }
       if (s.pad_changed) { await refresh(); return; }
+      if (V && V.free_click && s.free_click !== V.free_click.on) { V.free_click.on = s.free_click; if (page === 'live') renderLiveTab(); }
       // The next song loads in the background: show when it's ready.
       if (V && V.song && !V.next_ready && V.current != null && V.setlist[V.current + 1] && ++readyPoll % 50 === 0) await refresh();
       if (update && !updating) $('#updBtn').disabled = playing();
