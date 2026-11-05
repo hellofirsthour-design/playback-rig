@@ -740,13 +740,13 @@
     cSecs.forEach((sec, i) => {
       const r = el('div', 'cs');
       const n = el('input'); n.value = sec[0]; n.id = 'cs-n-' + i; n.setAttribute('aria-label', 'Section name'); n.oninput = () => { sec[0] = n.value; };
-      const b = el('input'); b.type = 'number'; b.min = 1; b.value = sec[1]; b.id = 'cs-b-' + i; b.setAttribute('aria-label', 'Bars'); b.oninput = () => { sec[1] = Math.max(1, Math.round(+b.value || 1)); total(); };
+      const b = el('input'); b.type = 'number'; b.min = 1; b.value = sec[1]; b.id = 'cs-b-' + i; b.setAttribute('aria-label', 'Bars'); b.oninput = () => { sec[1] = Math.max(1, Math.round(+b.value || 1)); updateClickTotal(); };
       const x = el('button', 'btn danger', '✕'); x.type = 'button'; x.setAttribute('aria-label', 'Remove section'); x.onclick = () => { cSecs.splice(i, 1); renderClickSecs(); };
       r.append(n, b, el('span', null, 'bars'), x); box.append(r);
     });
-    total();
+    updateClickTotal();
   }
-  function total() {
+  function updateClickTotal() {
     const bars = cSecs.reduce((a, s) => a + s[1], 0), bpm = +$('#c-bpm').value || 72, bpb = +$('#c-bpb').value || 4;
     $('#c-total').textContent = `${bars} bars + 1 count bar · ${fmt((bars + 1) * bpb * 60 / bpm)}`;
   }
@@ -756,7 +756,7 @@
   };
   $('#c-add').onclick = () => { cSecs.push(['Section', 8]); renderClickSecs(); };
   $('#clickCancel').onclick = () => { $('#clickModal').hidden = true; };
-  $('#c-bpm').oninput = total; $('#c-bpb').oninput = total;
+  $('#c-bpm').oninput = updateClickTotal; $('#c-bpb').oninput = updateClickTotal;
   $('#clickForm').onsubmit = async e => {
     e.preventDefault();
     const spec = { name: $('#c-name').value.trim(), bpm: +$('#c-bpm').value, beats_per_bar: Math.round(+$('#c-bpb').value), key: $('#c-key').value.trim(),

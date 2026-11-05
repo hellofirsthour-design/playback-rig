@@ -13,6 +13,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      - name: UI script checks
+        run: node apps/desktop/ui/check.js
       - run: cargo run --release -p rig-render -- --arrangement "Intro,Chorus,Verse 1,Chorus,Bridge,Outro" --mute "Verse 1=Drums" --channels 10 --out render.wav
 
   # Publishes a GitHub Release (and the update the app installs itself) whenever
