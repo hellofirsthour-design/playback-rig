@@ -102,6 +102,7 @@ fn demo() -> (Song, Vec<StemAudio>) {
         stems: vec![stem("Drums"), stem("Bass"), stem("Keys")],
         guide_stem: None,
         calls: vec![],
+        beat_frames: vec![],
     };
     (song, vec![StemAudio::mono(drums), StemAudio::mono(bass), StemAudio::mono(keys)])
 }

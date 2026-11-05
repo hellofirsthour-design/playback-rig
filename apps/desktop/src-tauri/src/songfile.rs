@@ -3,7 +3,7 @@
 //! bar number and name, so they survive a change of sample rate.
 
 use crate::decode::is_audio;
-use rig_engine::{ArrItem, Arrangement, Route, Section, Song, StemInfo};
+use rig_engine::{ArrItem, Arrangement, Route, Section, Song, StemInfo, Trim};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -30,6 +30,63 @@ pub struct Block {
     pub section: String,
     #[serde(default)]
     pub muted: Vec<String>,
+    /// Tracks that play only part of this block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trims: Vec<TrimSpec>,
+}
+
+/// A track trimmed inside a block, in beats from the block's start.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TrimSpec {
+    pub track: String,
+    pub from: f64,
+    pub to: f64,
+    #[serde(default)]
+    pub fade_in: f64,
+    #[serde(default)]
+    pub fade_out: f64,
+}
+
+/// What happens when the song ends.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransitionMode {
+    /// Stop and wait for the next song.
+    #[default]
+    Stop,
+    /// The next song starts the moment this one ends.
+    Segue,
+    /// The next song starts `bars` before the end while this one fades out.
+    Crossfade,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Transition {
+    #[serde(default)]
+    pub mode: TransitionMode,
+    /// Crossfade length in bars of this song.
+    #[serde(default = "two")]
+    pub bars: f64,
+    /// Bring the pad in (this song's key) when the last block starts, so it carries
+    /// across to the next song.
+    #[serde(default)]
+    pub pad: bool,
+}
+
+fn two() -> f64 {
+    2.0
+}
+
+impl Default for Transition {
+    fn default() -> Self {
+        Transition { mode: TransitionMode::Stop, bars: 2.0, pad: false }
+    }
+}
+
+/// Cut a long ending short: the last block fades out from `at` bars in, over `bars`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Ending {
+    pub at: f64,
+    pub bars: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -64,13 +121,24 @@ pub struct SongFile {
     /// get the grid lined up again on load; markers keep their bars.
     #[serde(default)]
     pub grid_version: u32,
+    /// Into the next song: stop, segue or crossfade, and the pad.
+    #[serde(default)]
+    pub transition: Transition,
+    /// The last block fades out early (None = plays to the end).
+    #[serde(default)]
+    pub ending: Option<Ending>,
+    /// Songs whose tempo changes: the time (seconds into the recording) of every beat
+    /// from bar 1 beat 1, read from the click or the Ableton set's tempo automation.
+    /// Empty = one steady tempo (`bpm` from `offset_ms`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub beat_times: Vec<f64>,
 }
 
 /// Raise to make songs set up automatically by an older version set up again.
 pub const SETUP_VERSION: u32 = 3;
 
 /// Raise to line up the grid of automatically set up songs with the click again.
-pub const GRID_VERSION: u32 = 4;
+pub const GRID_VERSION: u32 = 5;
 
 /// Where a stem sits in the track list: click and guide first, then Drums,
 /// Percussion, Bass, Guitars, Keys, Other instruments, Vocals, FX.
@@ -256,6 +324,9 @@ impl SongFile {
                 target_bpm: None,
                 setup: SETUP_VERSION,
                 grid_version: 0,
+                transition: Transition::default(),
+                ending: None,
+                beat_times: vec![],
             },
         };
         // Songs set up automatically by an older version are set up again: the tempo
@@ -343,6 +414,87 @@ impl SongFile {
         true
     }
 
+    /// Seconds into the recording of a beat position (0 = bar 1 beat 1).
+    pub fn beat_time(&self, beat: f64) -> f64 {
+        rig_engine::beat_time(&self.beat_times, self.offset_ms / 1000.0, 60.0 / self.bpm, beat)
+    }
+    /// Beat position at a time in the recording.
+    pub fn beat_at(&self, t: f64) -> f64 {
+        rig_engine::beat_pos(&self.beat_times, self.offset_ms / 1000.0, 60.0 / self.bpm, t)
+    }
+    /// Seconds into the recording where a bar (1-based) starts.
+    pub fn bar_time(&self, bar: u32) -> f64 {
+        self.beat_time(((bar.max(1) - 1) * self.beats_per_bar.max(1)) as f64)
+    }
+    /// The song's tempo changes as (bar, BPM), where the tempo moves by more than
+    /// 1% for a bar or more. Empty for a steady tempo.
+    pub fn tempo_changes(&self) -> Vec<(u32, f64)> {
+        let bpb = self.beats_per_bar.max(1) as usize;
+        if self.beat_times.len() < bpb * 2 {
+            return vec![];
+        }
+        let mut out: Vec<(u32, f64)> = vec![];
+        for (i, w) in self.beat_times.windows(bpb + 1).step_by(bpb).enumerate() {
+            let bpm = 60.0 * bpb as f64 / (w[bpb] - w[0]);
+            let bpm = (bpm * 10.0).round() / 10.0;
+            if out.last().map_or(true, |&(_, b)| (bpm - b).abs() / b > 0.01) {
+                out.push((i as u32 + 1, bpm));
+            }
+        }
+        if out.len() < 2 {
+            return vec![];
+        }
+        out
+    }
+
+    /// Puts the song on a beat grid that follows tempo changes (times in the recording,
+    /// beat 0 = bar 1). Sections keep their place in the audio, moved to the nearest bar.
+    pub fn set_beat_grid(&mut self, beats: Vec<f64>) {
+        if beats.len() < 2 {
+            return;
+        }
+        let times: Vec<f64> = self.markers.iter().map(|m| self.bar_time(m.bar)).collect();
+        self.offset_ms = beats[0] * 1000.0;
+        self.beat_times = beats;
+        let bpb = self.beats_per_bar.max(1) as f64;
+        let bars: Vec<u32> = times.iter().map(|&t| (self.beat_at(t) / bpb).round().max(0.0) as u32 + 1).collect();
+        for (m, b) in self.markers.iter_mut().zip(bars) {
+            m.bar = b;
+        }
+        let mut seen = 0;
+        self.markers.retain(|m| {
+            let keep = m.bar > seen;
+            seen = seen.max(m.bar);
+            keep
+        });
+    }
+
+    /// Places the Ableton set's locators on the song's grid by where they fall in the
+    /// audio (used once the grid follows tempo changes, so every marker lands on its
+    /// own bar however the tempo moved before it). Band cues are skipped as usual.
+    pub fn place_locators(&mut self, info: &crate::als::AlsInfo) {
+        let bpb = self.beats_per_bar.max(1) as f64;
+        let mut markers: Vec<Marker> = vec![];
+        for (i, (beat, name)) in info.locators.iter().enumerate() {
+            if crate::guide::is_band_cue(name) {
+                continue;
+            }
+            let t = info.audio_sec(*beat);
+            let b = (self.beat_at(t) / bpb).round().max(0.0) as u32 + 1;
+            if markers.last().map_or(false, |m| m.bar >= b) {
+                continue;
+            }
+            let name = if name.is_empty() { format!("Section {}", i + 1) } else { name.clone() };
+            markers.push(Marker { name, bar: b });
+        }
+        if markers.is_empty() {
+            return;
+        }
+        crate::guide::unique_names(&mut markers);
+        // Keep the arrangement: names that still exist stay put.
+        self.markers = markers;
+    }
+
     /// Tempo the song plays at.
     pub fn play_bpm(&self) -> f64 {
         self.target_bpm.filter(|b| *b > 0.0).unwrap_or(self.bpm)
@@ -365,12 +517,18 @@ impl SongFile {
         }
         let bpm = self.play_bpm();
         let bpb = self.beats_per_bar.max(1);
-        let offset = (self.offset_ms.max(0.0) * self.stretch() / 1000.0 * sample_rate as f64).round() as u64;
-        let bar = sample_rate as f64 * 60.0 / bpm * bpb as f64;
+        let to_frames = |t: f64| t * self.stretch() * sample_rate as f64;
+        let beat_frames: Vec<f64> = self.beat_times.iter().map(|&t| to_frames(t)).collect();
+        let offset = match beat_frames.first() {
+            Some(&f) => f.max(0.0).round() as u64,
+            None => (self.offset_ms.max(0.0) * self.stretch() / 1000.0 * sample_rate as f64).round() as u64,
+        };
+        let beat = sample_rate as f64 * 60.0 / bpm;
+        let bar = beat * bpb as f64;
         let mut marks: Vec<(String, u64)> = self
             .markers
             .iter()
-            .map(|m| (m.name.clone(), offset + ((m.bar.max(1) - 1) as f64 * bar).round() as u64))
+            .map(|m| (m.name.clone(), to_frames(self.bar_time(m.bar)).max(0.0).round() as u64))
             .filter(|(_, s)| *s < length)
             .collect();
         marks.sort_by_key(|m| m.1);
@@ -404,6 +562,7 @@ impl SongFile {
                 .collect(),
             guide_stem: None,
             calls: vec![],
+            beat_frames,
         };
         let items: Vec<ArrItem> = self
             .arrangement
@@ -413,10 +572,28 @@ impl SongFile {
                 let lead_alias = lead.is_some() && (b.section == "Top" || b.section == "Count-in");
                 let section = song.section_index(&b.section).or(lead_alias.then_some(0))?;
                 let muted_stems = b.muted.iter().filter_map(|m| self.stems.iter().position(|s| &s.name == m)).collect();
-                Some(ArrItem { section, muted_stems })
+                let len = song.sections[section].len();
+                let trims = b
+                    .trims
+                    .iter()
+                    .filter_map(|t| {
+                        let stem = self.stems.iter().position(|s| s.name == t.track)?;
+                        let f = |beats: f64| ((beats.max(0.0) * beat).round() as u64).min(len);
+                        let (start, end) = (f(t.from), f(t.to));
+                        (end > start).then(|| Trim { stem, start, end, fade_in: f(t.fade_in).min(end - start), fade_out: f(t.fade_out).min(end - start) })
+                    })
+                    .collect();
+                Some(ArrItem { section, muted_stems, trims, fade_out: None })
             })
             .collect();
-        let arr = if items.is_empty() { Arrangement::linear(&song) } else { Arrangement { items } };
+        let mut arr = if items.is_empty() { Arrangement::linear(&song) } else { Arrangement { items } };
+        // The ending: the last block fades out early.
+        if let (Some(e), Some(last)) = (self.ending, arr.items.last_mut()) {
+            let len = song.sections[last.section].len();
+            let at = ((e.at.max(0.0) * bar).round() as u64).min(len.saturating_sub(1));
+            let l = ((e.bars.max(0.0) * bar).round() as u64).clamp(1, len - at);
+            last.fade_out = Some((at, l));
+        }
         song.validate()?;
         arr.validate(&song)?;
         Ok((song, arr))
@@ -473,6 +650,7 @@ mod tests {
             beats_per_bar: Some(4),
             locators: vec![(16.0, "Intro".into()), (48.0, "Verse".into()), (80.0, "Build".into()), (112.0, "Chorus".into())],
             clip: Some(crate::als::ClipTiming { time: 0.0, start: 0.0, warped: true, warp: vec![(0.0, 0.1), (155.0, 60.1)] }),
+            tempo_points: vec![],
         };
         let mut sf = SongFile { name: "S".into(), bpm: 120.0, beats_per_bar: 4, ..Default::default() };
         sf.apply_ableton(&info, Some(77.5));
@@ -526,15 +704,18 @@ mod tests {
             markers: vec![Marker { name: "Verse".into(), bar: 1 }, Marker { name: "Chorus".into(), bar: 3 }],
             stems: vec![StemFile { file: "Drums.wav".into(), name: "Drums".into(), route: Route::Pair(0), gain: 1.0, muted: false }],
             arrangement: vec![
-                Block { section: "Chorus".into(), muted: vec![] },
-                Block { section: "Verse".into(), muted: vec!["Drums".into()] },
-                Block { section: "Missing".into(), muted: vec![] },
+                Block { section: "Chorus".into(), muted: vec![], trims: vec![] },
+                Block { section: "Verse".into(), muted: vec!["Drums".into()], trims: vec![] },
+                Block { section: "Missing".into(), muted: vec![], trims: vec![] },
             ],
             markers_from: None,
                 transpose: 0,
                 target_bpm: None,
                 setup: SETUP_VERSION,
                 grid_version: 0,
+                transition: Transition::default(),
+                ending: None,
+                beat_times: vec![],
         };
         let (song, arr) = sf.build(1000, 20_000).unwrap();
         let names: Vec<&str> = song.sections.iter().map(|s| s.name.as_str()).collect();
@@ -544,6 +725,20 @@ mod tests {
         assert_eq!(song.sections[2].end, 20_000);
         assert_eq!(arr.items.len(), 2, "unknown section names are skipped");
         assert_eq!(arr.items[1].muted_stems, vec![0]);
+
+        // Trims are in beats from the block's start; the ending fades the last block.
+        let mut sf = sf;
+        sf.arrangement[1].trims.push(TrimSpec { track: "Drums".into(), from: 2.0, to: 6.0, fade_in: 1.0, fade_out: 0.0 });
+        sf.arrangement[1].trims.push(TrimSpec { track: "Nobody".into(), from: 0.0, to: 1.0, fade_in: 0.0, fade_out: 0.0 });
+        sf.ending = Some(Ending { at: 1.0, bars: 0.5 });
+        let (_, arr) = sf.build(1000, 20_000).unwrap();
+        assert_eq!(arr.items[1].trims, vec![Trim { stem: 0, start: 2000, end: 6000, fade_in: 1000, fade_out: 0 }], "unknown tracks are skipped");
+        assert_eq!(arr.items[1].fade_out, Some((4000, 2000)), "the ending is on the last block");
+        assert_eq!(arr.items[0].fade_out, None);
+        // An old song file (no transition, no ending, no trims) still loads.
+        let old: SongFile = serde_json::from_str(r#"{"name":"S","bpm":60,"beats_per_bar":4,"click":false,"markers":[],"stems":[],"arrangement":[{"section":"Verse","muted":[]}]}"#).unwrap();
+        assert_eq!(old.transition, Transition::default());
+        assert_eq!(old.ending, None);
     }
 
     #[test]

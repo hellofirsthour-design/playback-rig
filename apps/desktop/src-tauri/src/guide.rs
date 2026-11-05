@@ -404,11 +404,95 @@ pub fn first_click(x: &[f32], sr: u32) -> Option<f64> {
     onsets(x, sr).first().map(|o| if o.t < 0.03 { 0.0 } else { o.t })
 }
 
+/// Reads every beat off the click, for songs whose tempo changes (ramps, or a new
+/// tempo for a section). `bpm` is the song's tempo (from the folder name), used to
+/// tell an eighth-note click from a quarter-note one. Beat 0 is the first click.
+/// Returns None when the tempo holds steady (within 1%), so steady songs keep their
+/// simple grid.
+pub fn beat_grid_from_click(x: &[f32], sr: u32, bpm: f64) -> Option<Vec<f64>> {
+    let on: Vec<f64> = onsets(x, sr).iter().map(|o| o.t).collect();
+    if on.len() < 16 {
+        return None;
+    }
+    let mut iv: Vec<f64> = on.windows(2).map(|w| w[1] - w[0]).filter(|d| (0.12..=2.0).contains(d)).collect();
+    if iv.len() < 12 {
+        return None;
+    }
+    iv.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let beat = 60.0 / bpm;
+    // The click's pulse: quarters, or eighths (MultiTracks often clicks in eighths).
+    let mut p = {
+        let first: Vec<f64> = on.windows(2).take(16).map(|w| w[1] - w[0]).filter(|d| (0.12..=2.0).contains(d)).collect();
+        let mut f = first.clone();
+        f.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        f.get(f.len() / 2).copied().unwrap_or(iv[iv.len() / 2])
+    };
+    let sub = ((beat / p).round() as usize).clamp(1, 2);
+    // Walk the clicks, following the pulse as it speeds up or slows down, and filling
+    // gaps where the click drops out.
+    let mut pulses = vec![on[0]];
+    let mut last = on[0];
+    for &t in &on[1..] {
+        let d = t - last;
+        if d < 0.55 * p {
+            continue; // not a pulse (a flam, an extra accent)
+        }
+        let n = (d / p).round().max(1.0);
+        let err = (d - n * p).abs() / p;
+        if n == 1.0 || err < 0.2 {
+            for k in 1..n as usize {
+                pulses.push(last + d * k as f64 / n);
+            }
+            pulses.push(t);
+            if n == 1.0 {
+                p = 0.6 * p + 0.4 * d;
+            }
+            last = t;
+        } else {
+            // A gap that doesn't fit the pulse: a tempo change across a break. Take the
+            // new pulse from what follows and fill the gap evenly.
+            let n = (d / p).floor().max(1.0);
+            for k in 1..n as usize {
+                pulses.push(last + d * k as f64 / n);
+            }
+            if n == 1.0 {
+                p = d;
+            }
+            pulses.push(t);
+            last = t;
+        }
+    }
+    let beats: Vec<f64> = pulses.iter().step_by(sub).copied().collect();
+    if beats.len() < 8 {
+        return None;
+    }
+    // Steady? Compare each bar-sized stretch (4 beats) with the whole song's average.
+    let lens: Vec<f64> = beats.windows(5).step_by(4).map(|w| (w[4] - w[0]) / 4.0).collect();
+    let mut sorted = lens.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = sorted[sorted.len() / 2];
+    // Stretches that sound like a different tempo (more than 1% off, two in a row, so a
+    // single sloppy click doesn't count).
+    let off: Vec<bool> = lens.iter().map(|l| (l - med).abs() / med > 0.01).collect();
+    let varies = off.windows(2).any(|w| w[0] && w[1]);
+    if !varies {
+        return None;
+    }
+    // Sanity: every beat between half and double the song's tempo.
+    if beats.windows(2).any(|w| { let d = w[1] - w[0]; d < beat * 0.45 || d > beat * 2.2 }) {
+        return None;
+    }
+    Some(beats)
+}
+
 /// Puts bar 1 on the first click. Sections keep the audio position they had, rounded
 /// to the new bars, so a small correction moves them with the grid and a whole-bar
 /// difference renumbers them. `x` is the click as it plays (after any tempo change).
 /// Returns true if the grid changed.
 pub fn snap_grid_to_click(f: &mut crate::songfile::SongFile, x: &[f32], sr: u32) -> bool {
+    if !f.beat_times.is_empty() {
+        return false; // a tempo map already sits on the click
+    }
     let Some(first) = first_click(x, sr) else { return false };
     let new = first / f.stretch(); // back to the recording's own time
     let cur = f.offset_ms / 1000.0;
@@ -434,49 +518,88 @@ pub fn snap_grid_to_click(f: &mut crate::songfile::SongFile, x: &[f32], sr: u32)
 /// "call" (a cue, plus any count after it) is followed by its section on the next
 /// downbeat. Bursts of speech less than ~3/4 of a bar apart belong to the same call.
 /// Returns 1-based bar numbers on the song's grid (bpm, bar 1 at `offset` seconds).
+#[cfg(test)]
 pub fn call_starts(guide: &[f32], sr: u32, bpm: f64, bpb: u32, offset: f64) -> Vec<u32> {
-    let beat = 60.0 / bpm;
-    let bar = beat * bpb.max(1) as f64;
-    let cues = find_cues(guide, sr);
-    let mut ends: Vec<f64> = vec![];
-    let mut last_end = f64::NEG_INFINITY;
-    for c in &cues {
-        if c.start - last_end > 0.75 * bar {
-            ends.push(c.end);
-        } else if let Some(e) = ends.last_mut() {
-            *e = c.end;
-        }
-        last_end = c.end;
-    }
-    let mut out: Vec<u32> = ends.iter().map(|e| ((e - 0.35 * beat - offset) / bar).ceil().max(0.0) as u32 + 1).collect();
+    call_starts_on(guide, sr, &Grid::steady(bpm, bpb, offset))
+}
+
+/// `call_starts` on any grid, including songs whose tempo changes.
+pub fn call_starts_on(guide: &[f32], sr: u32, grid: &Grid) -> Vec<u32> {
+    let mut out: Vec<u32> = calls_on(guide, sr, grid).into_iter().map(|(_, b)| b).collect();
     out.dedup();
     out
 }
 
+/// The song's beat grid in seconds as it plays: steady, or following tempo changes.
+#[derive(Clone, Debug)]
+pub struct Grid {
+    /// Time of every beat from bar 1 beat 1; empty for a steady tempo.
+    pub beats: Vec<f64>,
+    pub offset: f64,
+    /// Beat length of the steady tempo.
+    pub beat: f64,
+    pub bpb: u32,
+}
+
+impl Grid {
+    #[cfg(test)]
+    pub fn steady(bpm: f64, bpb: u32, offset: f64) -> Grid {
+        Grid { beats: vec![], offset, beat: 60.0 / bpm, bpb: bpb.max(1) }
+    }
+    /// A song's grid as it plays (after any tempo change).
+    pub fn of(f: &crate::songfile::SongFile) -> Grid {
+        let k = f.stretch();
+        Grid { beats: f.beat_times.iter().map(|t| t * k).collect(), offset: f.offset_ms / 1000.0 * k, beat: 60.0 / f.play_bpm(), bpb: f.beats_per_bar.max(1) }
+    }
+    pub fn beat_at(&self, t: f64) -> f64 {
+        rig_engine::beat_pos(&self.beats, self.offset, self.beat, t)
+    }
+    pub fn time_of(&self, beat: f64) -> f64 {
+        rig_engine::beat_time(&self.beats, self.offset, self.beat, beat)
+    }
+    /// Length of the beat playing at `t`.
+    pub fn beat_len(&self, t: f64) -> f64 {
+        let b = self.beat_at(t).floor();
+        self.time_of(b + 1.0) - self.time_of(b)
+    }
+    pub fn bar_len(&self, t: f64) -> f64 {
+        self.beat_len(t) * self.bpb as f64
+    }
+    /// The bar (1-based) a call ending at `end` brings in: the next downbeat.
+    fn bar_after_call(&self, end: f64) -> u32 {
+        let b = self.beat_at(end - 0.35 * self.beat_len(end));
+        (b / self.bpb as f64).ceil().max(0.0) as u32 + 1
+    }
+}
+
 /// The guide's calls: (where the call's speech starts, in seconds; the bar it calls in).
 /// Same grouping as `call_starts`.
+#[cfg(test)]
 pub fn calls(guide: &[f32], sr: u32, bpm: f64, bpb: u32, offset: f64) -> Vec<(f64, u32)> {
-    let beat = 60.0 / bpm;
-    let bar = beat * bpb.max(1) as f64;
+    calls_on(guide, sr, &Grid::steady(bpm, bpb, offset))
+}
+
+/// `calls` on any grid.
+pub fn calls_on(guide: &[f32], sr: u32, grid: &Grid) -> Vec<(f64, u32)> {
     let mut groups: Vec<(f64, f64)> = vec![];
     let mut last_end = f64::NEG_INFINITY;
     for c in &find_cues(guide, sr) {
-        if c.start - last_end > 0.75 * bar {
+        if c.start - last_end > 0.75 * grid.bar_len(c.start) {
             groups.push((c.start, c.end));
         } else if let Some(g) = groups.last_mut() {
             g.1 = c.end;
         }
         last_end = c.end;
     }
-    groups.iter().map(|(s, e)| (*s, ((e - 0.35 * beat - offset) / bar).ceil().max(0.0) as u32 + 1)).collect()
+    groups.iter().map(|(s, e)| (*s, grid.bar_after_call(*e))).collect()
 }
 
 /// For each section, the stretch of guide (in frames) that calls it in: from just before
 /// the call's speech to the section's start. At most two bars, and never before the
 /// previous section starts.
 pub fn call_regions(song: &rig_engine::Song, calls: &[(f64, u32)], sr: u32) -> Vec<Option<(u64, u64)>> {
-    let bar = song.frames_per_bar();
     let pre = sr as f64 * 0.05;
+    let bpb = song.beats_per_bar as f64;
     song.sections
         .iter()
         .enumerate()
@@ -485,9 +608,12 @@ pub fn call_regions(song: &rig_engine::Song, calls: &[(f64, u32)], sr: u32) -> V
                 return None;
             }
             let prev = song.sections[i - 1].start;
+            let s = sec.start as f64;
+            let sb = song.beat_pos(s);
+            let bar = song.beat_frame(sb) - song.beat_frame(sb - bpb); // the bar before the section
             calls
                 .iter()
-                .filter(|(_, b)| (song.offset as f64 + (*b as f64 - 1.0) * bar - sec.start as f64).abs() < bar * 0.25)
+                .filter(|(_, b)| (song.beat_frame((*b as f64 - 1.0) * bpb) - s).abs() < bar * 0.25)
                 .map(|(t, _)| (t * sr as f64 - pre).max(0.0) as u64)
                 .filter(|cs| *cs < sec.start && (sec.start - cs) as f64 <= bar * 2.0 + pre)
                 .min()
@@ -615,6 +741,78 @@ mod tests {
             }
         }
         x
+    }
+
+    /// A click whose beats are at `times` (seconds); accent on every 4th (or 8th for eighths).
+    fn click_at(sr: u32, times: &[f64], every: usize) -> Vec<f32> {
+        let len = ((times.last().unwrap() + 1.0) * sr as f64) as usize;
+        let mut x = vec![0.0f32; len];
+        for (k, &t0) in times.iter().enumerate() {
+            let s0 = (t0 * sr as f64) as usize;
+            let (f, a) = if k % every == 0 { (1760.0, 0.9) } else { (1175.0, 0.6) };
+            for i in 0..(sr as usize / 25) {
+                let t = i as f32 / sr as f32;
+                x[s0 + i] += (std::f32::consts::TAU * f * t).sin() * a * (-t * 80.0).exp();
+            }
+        }
+        x
+    }
+
+    /// Beat times: `bars_a` bars at `a` BPM, then a ramp over `ramp` bars to `b`, then `bars_b` bars at `b`.
+    fn tempo_path(a: f64, bars_a: usize, ramp: usize, b: f64, bars_b: usize, sub: usize) -> Vec<f64> {
+        let mut t = 0.0;
+        let mut out = vec![];
+        let total = (bars_a + ramp + bars_b) * 4 * sub;
+        for k in 0..total {
+            out.push(t);
+            let bar = k as f64 / (4 * sub) as f64;
+            let bpm = if bar < bars_a as f64 { a } else if bar < (bars_a + ramp) as f64 { a + (b - a) * (bar - bars_a as f64) / ramp.max(1) as f64 } else { b };
+            t += 60.0 / bpm / sub as f64;
+        }
+        out
+    }
+
+    #[test]
+    fn a_steady_click_has_no_tempo_map() {
+        let sr = 44_100;
+        // quarter notes at 72, and an eighth-note click for a 77.5 song (155 clicks a minute)
+        assert!(beat_grid_from_click(&click_track(sr, 72.0, 0.0, 200, true), sr, 72.0).is_none());
+        assert!(beat_grid_from_click(&click_track(sr, 155.0, 0.0, 400, true), sr, 77.5).is_none());
+    }
+
+    #[test]
+    fn a_tempo_jump_is_followed_beat_by_beat() {
+        let sr = 44_100;
+        let times = tempo_path(70.0, 8, 0, 84.0, 8, 1);
+        let g = beat_grid_from_click(&click_at(sr, &times, 4), sr, 70.0).expect("a tempo change");
+        assert!(g.len() >= times.len() - 1, "{} beats of {}", g.len(), times.len());
+        for (k, (a, b)) in g.iter().zip(&times).enumerate() {
+            assert!((a - b).abs() < 0.004, "beat {k}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn a_tempo_ramp_on_an_eighth_note_click_is_followed() {
+        let sr = 44_100;
+        // 72 to 80 over 4 bars, eighth-note click; the grid is in quarter notes.
+        let eighths = tempo_path(72.0, 4, 4, 80.0, 8, 2);
+        let g = beat_grid_from_click(&click_at(sr, &eighths, 8), sr, 72.0).expect("a ramp");
+        let quarters: Vec<f64> = eighths.iter().step_by(2).copied().collect();
+        for (k, (a, b)) in g.iter().zip(&quarters).enumerate() {
+            assert!((a - b).abs() < 0.004, "beat {k}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn calls_follow_the_tempo_map() {
+        // 4 bars at 60 (1 s beats), then 120. A call ending in bar 6 brings in bar 7.
+        let mut beats: Vec<f64> = (0..16).map(|k| k as f64).collect();
+        beats.extend((0..40).map(|k| 16.0 + k as f64 * 0.5));
+        let g = Grid { beats, offset: 0.0, beat: 1.0, bpb: 4 };
+        // bar 5 starts at 16 s, bar 6 at 18 s, bar 7 at 20 s
+        assert_eq!(g.bar_after_call(19.6), 7);
+        assert!((g.bar_len(19.0) - 2.0).abs() < 1e-9);
+        assert!((g.time_of(24.0) - 20.0).abs() < 1e-9);
     }
 
     #[test]

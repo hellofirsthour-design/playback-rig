@@ -16,8 +16,9 @@ use audio::{OpenOutput, Output, OutputInfo, ToAudio};
 use rig_engine::midi::{Action, Binding, Event, MidiMap};
 use rig_engine::{Arrangement, Command, Engine, Quantize, Route, Snapshot, Song, StemAudio};
 use serde::{Deserialize, Serialize};
-use songfile::{Block, Marker, SongFile};
+use songfile::{Block, Ending, Marker, SongFile, TrimSpec, Transition};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -196,6 +197,8 @@ fn peaks(a: &StemAudio, sr: u32) -> String {
 struct Core {
     output: Mutex<Option<Output>>,
     status: Arc<Mutex<Option<Snapshot>>>,
+    /// Counts handoffs to the next song done by the audio thread.
+    segues: Arc<AtomicU64>,
     map: Mutex<MidiMap>,
     config_dir: PathBuf,
     data_dir: PathBuf,
@@ -229,6 +232,23 @@ struct AppState {
     pad_on: Mutex<bool>,
     /// Pitch class of the pad loaded on the audio thread.
     pad_key: Mutex<Option<u8>>,
+    /// The next song in the set, loaded ahead so switching (or a segue) is instant.
+    next: Mutex<NextSong>,
+    /// Handoffs already applied to `song` (see Core::segues).
+    seen_segues: AtomicU64,
+    /// The pad was brought in automatically for this song's ending.
+    pad_auto: AtomicBool,
+}
+
+#[derive(Default)]
+struct NextSong {
+    loaded: Option<Loaded>,
+    /// Being loaded in the background.
+    loading: Option<PathBuf>,
+    /// Couldn't be loaded; not retried until the set changes.
+    failed: Option<PathBuf>,
+    /// What was last queued on the audio thread (current song, next song, transition).
+    queued: Option<String>,
 }
 
 /// The song's key as played (recorded key + key change), as a pitch class.
@@ -344,6 +364,9 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
             Action::ToggleView => {
                 let _ = app.emit("pedal", "toggle-view");
             }
+            Action::FadeOut => {
+                fade_out(&app.state::<AppState>(), 2.0);
+            }
             Action::StemLevel(_) | Action::ClickLevel => {}
         },
     }
@@ -364,7 +387,7 @@ fn open_output(core: &Core, app: &AppHandle, name: Option<String>) -> Result<Ope
     *core.output.lock().unwrap() = None; // close the old one first
     *core.status.lock().unwrap() = None;
     let h = app.clone();
-    let out = audio::open(name, core.status.clone(), move |e| {
+    let out = audio::open(name, core.status.clone(), core.segues.clone(), move |e| {
         let _ = h.emit("audio-error", e);
     })?;
     let info = out.info.clone();
@@ -396,13 +419,37 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
     // Songs set up automatically get their grid lined up with the click you hear.
     let mut file = file;
     if file.grid_version < songfile::GRID_VERSION && matches!(file.markers_from.as_deref(), Some("ableton") | Some("guide")) {
+        let ableton = (file.markers_from.as_deref() == Some("ableton")).then(|| als::find(folder).and_then(|p| als::read(&p).ok())).flatten();
+        let had_map = !file.beat_times.is_empty();
         if let Some(i) = file.stems.iter().position(|s| songfile::is_click(&s.name)) {
-            guide::snap_grid_to_click(&mut file, &guide::to_mono(&stems[i]), sample_rate);
+            let click = guide::to_mono(&stems[i]);
+            guide::snap_grid_to_click(&mut file, &click, sample_rate);
+            // Songs whose tempo changes: the grid follows every beat of the click.
+            if file.beat_times.is_empty() {
+                if let Some(g) = guide::beat_grid_from_click(&click, sample_rate, file.play_bpm()) {
+                    let k = file.stretch();
+                    file.set_beat_grid(g.iter().map(|t| t / k).collect());
+                }
+            }
+        } else if file.beat_times.is_empty() {
+            // No click: the Ableton set's tempo automation, if it has any.
+            if let Some(info) = &ableton {
+                let len = length as f64 / sample_rate as f64 / file.stretch();
+                if let Some(g) = info.beat_grid(file.bpm, file.offset_ms / 1000.0, len) {
+                    file.set_beat_grid(g);
+                }
+            }
+        }
+        // A new tempo map: put the Ableton markers back where they are in the audio.
+        if !had_map && !file.beat_times.is_empty() {
+            if let Some(info) = &ableton {
+                file.place_locators(info);
+            }
         }
         // Sections start a bar after the guide's call: move each marker onto the
         // section start the guide gives beside it, and drop numbering that isn't needed.
         if let Some(g) = file.stems.iter().position(|s| songfile::is_guide(&s.name)) {
-            let starts = guide::call_starts(&guide::to_mono(&stems[g]), sample_rate, file.play_bpm(), file.beats_per_bar, file.offset_ms / 1000.0 * file.stretch());
+            let starts = guide::call_starts_on(&guide::to_mono(&stems[g]), sample_rate, &guide::Grid::of(&file));
             guide::align_markers_to_calls(&mut file.markers, &starts);
         }
         for (old, new) in guide::tidy_names(&mut file.markers) {
@@ -422,10 +469,182 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
 /// Cuts the guide by section, so it calls whatever section actually comes next.
 fn cut_guide(song: &mut Song, file: &SongFile, stems: &[StemAudio], sample_rate: u32) {
     if let Some(g) = file.stems.iter().position(|s| songfile::is_guide(&s.name)) {
-        let c = guide::calls(&guide::to_mono(&stems[g]), sample_rate, song.bpm, song.beats_per_bar, song.offset as f64 / sample_rate as f64);
+        let c = guide::calls_on(&guide::to_mono(&stems[g]), sample_rate, &guide::Grid::of(file));
         song.calls = guide::call_regions(song, &c, sample_rate);
         song.guide_stem = Some(g);
     }
+}
+
+/// The commands that set an engine's mixer and options from the settings.
+fn mix_commands(settings: &Settings, l: &Loaded, ch: usize) -> Vec<Command> {
+    let mut c = vec![
+        Command::SetQuantize(settings.quantize),
+        Command::SetClick(l.file.click),
+        Command::SetClickGain(settings.click_gain),
+        Command::SetClickRoute(settings.click_route.unwrap_or(songfile::default_route("click", ch))),
+    ];
+    for (i, st) in l.file.stems.iter().enumerate() {
+        let (g, m, r) = effective(settings, st);
+        c.extend([Command::SetStemGain(i, g), Command::SetStemMute(i, m), Command::SetStemRoute(i, r)]);
+    }
+    c
+}
+
+fn make_engine(settings: &Settings, l: &Loaded, ch: usize) -> Result<Engine, String> {
+    let mut e = Engine::new(l.song.clone(), l.arr.clone(), l.stems.clone(), ch)?;
+    e.handle(Command::SetCountIn(settings.count_in));
+    for c in mix_commands(settings, l, ch) {
+        e.handle(c);
+    }
+    Ok(e)
+}
+
+/// Keeps the next song loaded and queued on the audio thread, following the set and
+/// the current song's transition. Called on every status poll; cheap when nothing changed.
+fn sync_next(app: &AppHandle, state: &AppState) {
+    let want = {
+        let s = state.settings.lock().unwrap();
+        s.current.and_then(|c| s.setlist.get(c + 1)).cloned()
+    };
+    let cur = {
+        let g = state.song.lock().unwrap();
+        g.as_ref().map(|l| (l.folder.clone(), l.file.transition, end_bar(l), l.sample_rate, l.file.stems.iter().enumerate().filter(|(_, s)| songfile::is_click(&s.name) || songfile::is_guide(&s.name)).map(|(i, _)| i).collect::<Vec<_>>()))
+    };
+    let Some((cur_folder, tr, bar, sr, cues)) = cur else { return };
+    let want = want.filter(|w| *w != cur_folder);
+    // Load it in the background if it isn't loaded (or is loaded for another output rate).
+    let start_load = {
+        let mut n = state.next.lock().unwrap();
+        let have = n.loaded.as_ref().filter(|l| l.sample_rate == sr).map(|l| l.folder.clone());
+        if have != want {
+            n.loaded = None;
+            n.queued = None; // forces an Unqueue below
+        }
+        if want.is_some() && n.loaded.is_none() && n.loading.is_none() && n.failed != want {
+            n.loading = want.clone();
+            want.clone()
+        } else {
+            None
+        }
+    };
+    if let Some(folder) = start_load {
+        let ch = state.core.output.lock().unwrap().as_ref().map_or(2, |o| o.info.channels);
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let r = load(&folder, sr, ch);
+            let st = app.state::<AppState>();
+            let mut n = st.next.lock().unwrap();
+            if n.loading.as_ref() == Some(&folder) {
+                n.loading = None;
+                match r {
+                    Ok(l) => n.loaded = Some(l),
+                    Err(_) => n.failed = Some(folder),
+                }
+            }
+        });
+    }
+    // Queue it for the handoff, or take it off the queue.
+    let settings = state.settings.lock().unwrap().clone();
+    let mut n = state.next.lock().unwrap();
+    let sig = match (&n.loaded, tr.mode) {
+        (Some(l), m) if m != songfile::TransitionMode::Stop => format!("{}|{}|{:?}|{}|{}", cur_folder.display(), l.folder.display(), m, tr.bars, bar),
+        _ => "none".to_string(),
+    };
+    if n.queued.as_deref() == Some(sig.as_str()) {
+        return;
+    }
+    let mut out = state.core.output.lock().unwrap();
+    let Some(o) = out.as_mut() else { return };
+    let sent = match (&n.loaded, sig != "none") {
+        (Some(l), true) => match make_engine(&settings, l, o.info.channels) {
+            Ok(mut e) => {
+                e.handle(Command::SetCountIn(false)); // it follows straight on
+                let (overlap, fade) = match tr.mode {
+                    songfile::TransitionMode::Crossfade => {
+                        let f = (tr.bars.max(0.0) * bar).round() as u64;
+                        (f, f)
+                    }
+                    _ => (0, 0),
+                };
+                let h = audio::Handoff { overlap, fade, cues: [cues.first().copied(), cues.get(1).copied()] };
+                o.send(ToAudio::Queue(Box::new(e), h))
+            }
+            Err(_) => false,
+        },
+        _ => o.send(ToAudio::Unqueue),
+    };
+    if sent {
+        n.queued = Some(sig);
+    }
+}
+
+/// Length in frames of the song's last bar (where a crossfade happens), following
+/// any tempo change.
+fn end_bar(l: &Loaded) -> f64 {
+    let end = l.arr.items.last().map_or(l.length, |it| l.song.sections[it.section].end) as f64;
+    let e = l.song.beat_pos(end);
+    let bpb = l.song.beats_per_bar.max(1) as f64;
+    (l.song.beat_frame(e) - l.song.beat_frame(e - bpb)).max(1.0)
+}
+
+/// After the audio thread handed over to the next song: make it the current song.
+fn take_segue(state: &AppState) -> bool {
+    let done = state.core.segues.load(Ordering::Acquire);
+    if done == state.seen_segues.swap(done, Ordering::AcqRel) {
+        return false;
+    }
+    let next = {
+        let mut n = state.next.lock().unwrap();
+        n.queued = None;
+        n.loaded.take()
+    };
+    let Some(l) = next else { return false };
+    let settings = state.settings.lock().unwrap().clone();
+    let ch = state.core.output.lock().unwrap().as_ref().map_or(2, |o| o.info.channels);
+    // The queued engine was set up when it was queued; bring its mixer up to date.
+    for c in mix_commands(&settings, &l, ch) {
+        state.core.send(c);
+    }
+    let idx = settings.setlist.iter().position(|p| *p == l.folder);
+    *state.song.lock().unwrap() = Some(l);
+    if idx.is_some() {
+        state.settings.lock().unwrap().current = idx;
+        state.save_settings();
+    }
+    state.pad_auto.store(false, Ordering::Relaxed);
+    let _ = pad_update(state); // the pad follows the new song's key
+    true
+}
+
+/// "Pad underneath": bring the pad in when the song's last block starts.
+fn auto_pad(state: &AppState, snap: &Option<Snapshot>) -> bool {
+    let Some(sn) = snap else { return false };
+    let (want, last) = {
+        let g = state.song.lock().unwrap();
+        match g.as_ref() {
+            Some(l) => (l.file.transition.pad, sn.item + 1 >= l.arr.items.len()),
+            None => (false, false),
+        }
+    };
+    if !(want && sn.playing && last) {
+        if !last {
+            state.pad_auto.store(false, Ordering::Relaxed);
+        }
+        return false;
+    }
+    if state.pad_auto.swap(true, Ordering::Relaxed) || *state.pad_on.lock().unwrap() {
+        return false;
+    }
+    if state.settings.lock().unwrap().pads_folder.is_none() {
+        return false;
+    }
+    *state.pad_on.lock().unwrap() = true;
+    if pad_update(state).is_err() {
+        *state.pad_on.lock().unwrap() = false;
+        let _ = pad_update(state);
+        return false;
+    }
+    true
 }
 
 /// Builds a fresh engine for the loaded song and hands it to the audio thread.
@@ -435,19 +654,7 @@ fn install(core: &Core, settings: &Settings, l: &Loaded) -> Result<(), String> {
     if o.info.sample_rate != l.sample_rate {
         return Err("The audio output changed sample rate. Reload the song.".into());
     }
-    let ch = o.info.channels;
-    let mut e = Engine::new(l.song.clone(), l.arr.clone(), l.stems.clone(), ch)?;
-    e.handle(Command::SetQuantize(settings.quantize));
-    e.handle(Command::SetCountIn(settings.count_in));
-    e.handle(Command::SetClick(l.file.click));
-    e.handle(Command::SetClickGain(settings.click_gain));
-    e.handle(Command::SetClickRoute(settings.click_route.unwrap_or(songfile::default_route("click", ch))));
-    for (i, st) in l.file.stems.iter().enumerate() {
-        let (g, m, r) = effective(settings, st);
-        e.handle(Command::SetStemGain(i, g));
-        e.handle(Command::SetStemMute(i, m));
-        e.handle(Command::SetStemRoute(i, r));
-    }
+    let e = make_engine(settings, l, o.info.channels)?;
     if !o.send(ToAudio::Swap(Box::new(e))) {
         return Err("The audio thread is busy. Try again.".into());
     }
@@ -472,6 +679,10 @@ struct BlockView {
     section_index: usize,
     muted: Vec<String>,
     bars: f64,
+    /// Tracks playing only part of this block (beats from the block's start).
+    trims: Vec<TrimSpec>,
+    /// The block fades out early: (start, length) in bars.
+    fade_out: Option<(f64, f64)>,
 }
 
 #[derive(Serialize)]
@@ -506,11 +717,31 @@ struct SongView {
     /// Key change in semitones; `bpm` is the recorded tempo, `play_bpm` what plays.
     transpose: i32,
     play_bpm: f64,
+    transition: Transition,
+    ending: Option<Ending>,
+    /// Songs whose tempo changes: the time (seconds, as it plays) of every bar line.
+    /// Empty for a steady tempo.
+    downbeats: Vec<f64>,
+    /// (bar, BPM as it plays) where the tempo changes. Empty for a steady tempo.
+    tempo_changes: Vec<(u32, f64)>,
 }
 
 impl SongView {
     fn from(l: &Loaded) -> Self {
         let bar = l.song.frames_per_bar();
+        let bpb = l.song.beats_per_bar.max(1) as f64;
+        let sr = l.sample_rate as f64;
+        // Songs whose tempo changes: every downbeat, so the ruler follows the tempo.
+        let downbeats: Vec<f64> = if l.song.beat_frames.is_empty() {
+            vec![]
+        } else {
+            let last = l.song.beat_pos(l.length as f64);
+            (0..)
+                .map(|k| k as f64 * bpb)
+                .take_while(|&b| b <= last)
+                .map(|b| (l.song.beat_frame(b) / sr * 1000.0).round() / 1000.0)
+                .collect()
+        };
         SongView {
             folder: l.folder.display().to_string(),
             name: l.file.name.clone(),
@@ -528,8 +759,8 @@ impl SongView {
                 .iter()
                 .map(|s| SectionView {
                     name: s.name.clone(),
-                    bar: ((s.start as f64 - l.song.offset as f64) / bar).round() as i64 + 1,
-                    bars: s.len() as f64 / bar,
+                    bar: (l.song.beat_pos(s.start as f64) / bpb).round() as i64 + 1,
+                    bars: (l.song.beat_pos(s.end as f64) - l.song.beat_pos(s.start as f64)) / bpb,
                     start_sec: s.start as f64 / l.sample_rate as f64,
                     secs: s.len() as f64 / l.sample_rate as f64,
                 })
@@ -544,6 +775,15 @@ impl SongView {
                     section_index: it.section,
                     muted: it.muted_stems.iter().map(|&i| l.file.stems[i].name.clone()).collect(),
                     bars: l.song.sections[it.section].len() as f64 / bar,
+                    trims: it
+                        .trims
+                        .iter()
+                        .map(|t| {
+                            let b = |f: u64| (f as f64 / l.song.frames_per_beat() * 1000.0).round() / 1000.0;
+                            TrimSpec { track: l.file.stems[t.stem].name.clone(), from: b(t.start), to: b(t.end), fade_in: b(t.fade_in), fade_out: b(t.fade_out) }
+                        })
+                        .collect(),
+                    fade_out: it.fade_out.map(|(s, n)| (s as f64 / bar, n as f64 / bar)),
                 })
                 .collect(),
             has_click: l.file.stems.iter().any(|s| songfile::is_click(&s.name)),
@@ -552,6 +792,10 @@ impl SongView {
             markers_from: l.file.markers_from.clone(),
             transpose: l.file.transpose,
             play_bpm: l.file.play_bpm(),
+            transition: l.file.transition,
+            ending: l.file.ending,
+            downbeats,
+            tempo_changes: l.file.tempo_changes().into_iter().map(|(b, t)| (b, (t / l.file.stretch() * 10.0).round() / 10.0)).collect(),
         }
     }
 }
@@ -561,6 +805,7 @@ struct SetItem {
     name: String,
     path: String,
     found: bool,
+    transition: songfile::TransitionMode,
 }
 
 #[derive(Serialize)]
@@ -581,6 +826,8 @@ struct AppView {
     pads: PadsView,
     /// Buses for the groups in the current song, in track-list order.
     buses: Vec<BusView>,
+    /// The next song in the set is loaded and ready.
+    next_ready: bool,
 }
 
 #[derive(Serialize)]
@@ -638,6 +885,7 @@ fn view(state: &AppState) -> AppView {
     }
     buses.retain(|b| b.custom || !b.stems.is_empty());
     let midi = state.midi.lock().unwrap().as_ref().map(|m| m.name.clone());
+    let next_ready = state.next.lock().unwrap().loaded.is_some();
     let pad_on = *state.pad_on.lock().unwrap();
     AppView {
         outputs: audio::list_outputs(),
@@ -649,16 +897,15 @@ fn view(state: &AppState) -> AppView {
             .iter()
             .map(|p| {
                 let found = p.is_dir();
-                let name = std::fs::read_to_string(SongFile::path(p))
-                    .ok()
-                    .and_then(|t| serde_json::from_str::<SongFile>(&t).ok())
-                    .map(|f| f.name)
-                    .unwrap_or_else(|| p.file_name().and_then(|n| n.to_str()).unwrap_or("Song").to_string());
-                SetItem { name, path: p.display().to_string(), found }
+                let file = std::fs::read_to_string(SongFile::path(p)).ok().and_then(|t| serde_json::from_str::<SongFile>(&t).ok());
+                let transition = file.as_ref().map_or(songfile::TransitionMode::Stop, |f| f.transition.mode);
+                let name = file.map(|f| f.name).unwrap_or_else(|| p.file_name().and_then(|n| n.to_str()).unwrap_or("Song").to_string());
+                SetItem { name, path: p.display().to_string(), found, transition }
             })
             .collect(),
         current: s.current,
         song,
+        next_ready,
         quantize: s.quantize,
         count_in: s.count_in,
         click_gain: s.click_gain,
@@ -688,14 +935,23 @@ fn app_state(state: State<'_, AppState>) -> AppView {
 struct Status {
     snapshot: Option<Snapshot>,
     learning: bool,
+    /// The next song took over (segue or crossfade): reload the view.
+    song_changed: bool,
+    /// The pad was switched on or off here (pad underneath): reload the view.
+    pad_changed: bool,
 }
 
 #[tauri::command]
-fn status(state: State<'_, AppState>) -> Status {
+fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
     if let Some(o) = state.core.output.lock().unwrap().as_mut() {
         o.collect_garbage();
     }
-    Status { snapshot: state.core.snapshot(), learning: state.core.map.lock().unwrap().is_learning() }
+    let song_changed = take_segue(&state);
+    let snapshot = state.core.snapshot();
+    let pad_changed = auto_pad(&state, &snapshot);
+    sync_next(&app, &state);
+    let learning = state.core.map.lock().unwrap().is_learning();
+    Status { snapshot, learning, song_changed, pad_changed }
 }
 
 async fn reload_current(state: &AppState) -> Result<(), String> {
@@ -806,7 +1062,21 @@ async fn select_song(state: State<'_, AppState>, index: usize) -> Result<AppView
         let o = out.as_ref().ok_or("No audio output is open. Pick one at the top of the window.")?;
         (o.info.sample_rate, o.info.channels)
     };
-    let loaded = tauri::async_runtime::spawn_blocking(move || load(&folder, sr, ch)).await.map_err(|e| e.to_string())??;
+    // The next song is usually loaded already.
+    let ready = {
+        let mut n = state.next.lock().unwrap();
+        let hit = n.loaded.as_ref().is_some_and(|l| l.folder == folder && l.sample_rate == sr);
+        if hit {
+            n.queued = None;
+            n.loaded.take()
+        } else {
+            None
+        }
+    };
+    let loaded = match ready {
+        Some(l) => l,
+        None => tauri::async_runtime::spawn_blocking(move || load(&folder, sr, ch)).await.map_err(|e| e.to_string())??,
+    };
     let settings = state.settings.lock().unwrap().clone();
     install(&state.core, &settings, &loaded)?;
     if !SongFile::path(&loaded.folder).exists() {
@@ -845,6 +1115,16 @@ enum UiCmd {
     /// None: the group's stems use their own outputs.
     BusRoute { bus: String, route: Option<Route> },
     StemRoute { stem: usize, route: Route },
+    /// Fade the song out over this many bars and stop.
+    FadeOut { bars: f64 },
+}
+
+/// Fades the playing song out over `bars` of its own bars.
+fn fade_out(state: &AppState, bars: f64) {
+    let frames = state.song.lock().unwrap().as_ref().map(|l| (bars.max(0.25) * l.song.frames_per_bar()).round() as u64);
+    if let Some(f) = frames {
+        state.core.send(Command::FadeOut(f));
+    }
 }
 
 #[tauri::command]
@@ -877,6 +1157,11 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
             }
             UiCmd::CancelJump => {
                 core.send(Command::CancelJump);
+            }
+            UiCmd::FadeOut { bars } => {
+                if let Some(l) = song.as_ref() {
+                    core.send(Command::FadeOut((bars.max(0.25) * l.song.frames_per_bar()).round() as u64));
+                }
             }
             UiCmd::Goto { block } => {
                 core.send(Command::Goto(block));
@@ -1028,14 +1313,48 @@ fn update_song(state: State<'_, AppState>, meta: SongMeta) -> Result<AppView, St
         if !meta.name.trim().is_empty() {
             f.name = meta.name.trim().to_string();
         }
-        f.bpm = meta.bpm.clamp(30.0, 300.0);
+        let bpm = meta.bpm.clamp(30.0, 300.0);
+        let offset = meta.offset_ms.max(0.0);
+        if (bpm - f.bpm).abs() > 1e-9 || meta.beats_per_bar != f.beats_per_bar {
+            f.beat_times.clear(); // a new tempo by hand: one steady tempo
+        } else if !f.beat_times.is_empty() {
+            // moving the downbeat moves the whole tempo map
+            let d = (offset - f.offset_ms) / 1000.0;
+            f.beat_times.iter_mut().for_each(|t| *t += d);
+        }
+        f.bpm = bpm;
         f.beats_per_bar = meta.beats_per_bar.clamp(1, 12);
-        f.offset_ms = meta.offset_ms.max(0.0);
+        f.offset_ms = offset;
         f.key = meta.key.trim().to_string();
         let mut m = meta.markers;
         m.retain(|x| !x.name.trim().is_empty());
         m.sort_by_key(|x| x.bar);
         f.markers = m;
+    })
+}
+
+/// The song's transition into the next one, and its ending. The transition can change
+/// while playing; the ending changes the arrangement, so it needs playback stopped.
+#[tauri::command]
+fn set_transition(state: State<'_, AppState>, transition: Transition, ending: Option<Ending>) -> Result<AppView, String> {
+    let same_ending = state.song.lock().unwrap().as_ref().ok_or("Load a song first.")?.file.ending == ending;
+    let mut t = transition;
+    t.bars = t.bars.clamp(0.25, 64.0);
+    if same_ending {
+        {
+            let mut g = state.song.lock().unwrap();
+            let l = g.as_mut().ok_or("Load a song first.")?;
+            l.file.transition = t;
+            l.file.save(&l.folder)?;
+        }
+        return Ok(view(&state));
+    }
+    if state.core.playing() {
+        return Err("Stop playback before changing the ending.".into());
+    }
+    edit_song(&state, |f| {
+        f.transition = t;
+        f.ending = ending.map(|e| Ending { at: e.at.max(0.0), bars: e.bars.clamp(0.25, 64.0) });
     })
 }
 
@@ -1382,6 +1701,9 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
     let found_tempo = analysis.bpm.is_some();
     let sections = analysis.markers.len();
     let view = edit_song(&state, |f| {
+        if analysis.bpm.is_some() || analysis.offset_ms.is_some() {
+            f.beat_times.clear(); // reading the guide sets one steady tempo
+        }
         if let Some(b) = analysis.bpm {
             f.bpm = b;
         }
@@ -1509,6 +1831,7 @@ fn main() {
             let core = Arc::new(Core {
                 output: Mutex::new(None),
                 status: Arc::new(Mutex::new(None)),
+                segues: Arc::new(AtomicU64::new(0)),
                 map: Mutex::new(map),
                 config_dir: dir,
                 data_dir,
@@ -1532,7 +1855,17 @@ fn main() {
                     }
                 })?;
             }
-            app.manage(AppState { core, song: Mutex::new(None), settings: Mutex::new(settings), midi: Mutex::new(midi), pad_on: Mutex::new(false), pad_key: Mutex::new(None) });
+            app.manage(AppState {
+                core,
+                song: Mutex::new(None),
+                settings: Mutex::new(settings),
+                midi: Mutex::new(midi),
+                pad_on: Mutex::new(false),
+                pad_key: Mutex::new(None),
+                next: Mutex::new(NextSong::default()),
+                seen_segues: AtomicU64::new(0),
+                pad_auto: AtomicBool::new(false),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1547,6 +1880,7 @@ fn main() {
             cmd,
             update_song,
             set_arrangement,
+            set_transition,
             song_peaks,
             analyze_song,
             check_update,
@@ -1576,6 +1910,7 @@ mod tests {
             core: Arc::new(Core {
                 output: Mutex::new(None),
                 status: Arc::new(Mutex::new(None)),
+                segues: Arc::new(AtomicU64::new(0)),
                 map: Mutex::new(MidiMap::default()),
                 config_dir: dir.clone(),
                 data_dir: dir,
@@ -1586,6 +1921,9 @@ mod tests {
             midi: Mutex::new(None),
             pad_on: Mutex::new(false),
             pad_key: Mutex::new(None),
+            next: Mutex::new(NextSong::default()),
+            seen_segues: AtomicU64::new(0),
+            pad_auto: AtomicBool::new(false),
         }
     }
 
@@ -1707,6 +2045,7 @@ mod tests {
         // bar 1 is the first click, at the very start of the file
         assert_eq!(f.grid_version, songfile::GRID_VERSION);
         assert_eq!(f.offset_ms, 0.0, "bar 1 is the first click");
+        assert!(f.beat_times.is_empty(), "a steady song keeps its simple grid");
         // every section between the first and last is whole bars
         let bar = l.song.frames_per_bar();
         for s in &l.song.sections[1..l.song.sections.len() - 1] {
@@ -1823,6 +2162,115 @@ mod tests {
         assert_eq!(l.file.grid_version, 0, "hand-made grids are never moved");
         assert_eq!(l.song.sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Count", "Verse", "Chorus"]);
         assert_eq!(song_key_pc(&l.file), Some(8));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_song_with_a_tempo_change_gets_a_grid_that_follows_it() {
+        let root = std::env::temp_dir().join(format!("rig-tempo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sr = 44_100u32;
+        let folder = root.join("Tempo Song-A-70bpm");
+        std::fs::create_dir_all(&folder).unwrap();
+        // 8 bars at 70, then 12 bars at 84.
+        let bt: Vec<f64> = (0..=80).scan(0.0, |t, k| { let v = *t; *t += 60.0 / if k < 32 { 70.0 } else { 84.0 }; Some(v) }).collect();
+        let len = ((bt[80] + 2.0) * sr as f64) as usize;
+        let mut click = vec![0f32; len];
+        for (k, &t0) in bt.iter().enumerate() {
+            let s0 = (t0 * sr as f64) as usize;
+            let (f, a) = if k % 4 == 0 { (1760.0, 0.9) } else { (1175.0, 0.55) };
+            for i in 0..1500 {
+                let tt = i as f32 / sr as f32;
+                click[s0 + i] += (std::f32::consts::TAU * f * tt).sin() * a * (-tt * 80.0).exp();
+            }
+        }
+        write_wav(&folder.join("Click Track.wav"), &click, sr);
+        let mut guide = vec![0f32; len];
+        let bar = |b: usize| bt[(b - 1) * 4];
+        let beat_t = |b: usize, k: usize| bt[(b - 1) * 4 + k];
+        let mut say = |t: f64, l: f64| for i in (t * sr as f64) as usize..((t + l) * sr as f64) as usize { guide[i] = (i as f32 * 0.21).sin() * 0.4; };
+        for b in [4, 8, 12] {
+            say(bar(b), 0.5);
+            say(beat_t(b, 2), 0.25);
+            say(beat_t(b, 3), 0.25);
+        }
+        write_wav(&folder.join("Guide.wav"), &guide, sr);
+        write_wav(&folder.join("Keys.wav"), &(0..len).map(|i| (i as f32 * 0.03).sin() * 0.2).collect::<Vec<_>>(), sr);
+        let als = format!(r#"<Ableton><LiveSet><Tracks><AudioTrack><DeviceChain>
+            <AudioClip Id="1" Time="0"><LoopStart Value="0" /><StartRelative Value="0" /><IsWarped Value="true" />
+            <WarpMarkers><WarpMarker Id="0" SecTime="0" BeatTime="0" /><WarpMarker Id="1" SecTime="{a}" BeatTime="32" /><WarpMarker Id="2" SecTime="{b}" BeatTime="80" /></WarpMarkers></AudioClip>
+            </DeviceChain></AudioTrack></Tracks>
+            <Locators><Locators>
+              <Locator Id="0"><Time Value="16" /><Name Value="Verse" /></Locator>
+              <Locator Id="1"><Time Value="32" /><Name Value="Chorus" /></Locator>
+              <Locator Id="2"><Time Value="48" /><Name Value="Bridge" /></Locator>
+            </Locators></Locators>
+            <MasterTrack><DeviceChain><Mixer><Tempo><LomId Value="0" /><Manual Value="70" /><AutomationTarget Id="8"><LockEnvelope Value="0" /></AutomationTarget></Tempo>
+            <TimeSignature><LomId Value="0" /><Manual Value="201" /></TimeSignature></Mixer></DeviceChain>
+            <AutomationEnvelopes><Envelopes><AutomationEnvelope Id="0"><EnvelopeTarget><PointeeId Value="8" /></EnvelopeTarget><Automation><Events>
+              <FloatEvent Id="1" Time="-63072000" Value="70" /><FloatEvent Id="2" Time="32" Value="70" /><FloatEvent Id="3" Time="32" Value="84" />
+            </Events></Automation></AutomationEnvelope></Envelopes></AutomationEnvelopes></MasterTrack></LiveSet></Ableton>"#, a = bt[32], b = bt[80]);
+        std::fs::write(folder.join("MultiTrack.als"), als).unwrap();
+
+        let l = load(&folder, 48_000, 2).unwrap();
+        let f = &l.file;
+        assert!(!f.beat_times.is_empty(), "the tempo change was found");
+        let m: Vec<(&str, u32)> = f.markers.iter().map(|m| (m.name.as_str(), m.bar)).collect();
+        assert_eq!(m, [("Verse", 5), ("Chorus", 9), ("Bridge", 13)]);
+        assert_eq!(f.tempo_changes(), vec![(1, 70.0), (9, 84.0)]);
+        // Sections start on the real downbeats, in the second tempo too.
+        for (i, b) in [(1, 5), (2, 9), (3, 13)] {
+            let want = bar(b) * 48_000.0;
+            let got = l.song.sections[i].start as f64;
+            assert!((got - want).abs() < 48.0 * 3.0, "{} at {got}, want {want}", l.song.sections[i].name);
+        }
+        assert_eq!(l.song.sections[0].name, "Count-in");
+        // The view shows the bar lines where they are, and the tempo changes.
+        let v = SongView::from(&l);
+        assert!((v.downbeats[12] - bar(13)).abs() < 0.003, "bar 13 line at {}", v.downbeats[12]);
+        assert_eq!(v.tempo_changes, vec![(1, 70.0), (9, 84.0)]);
+        // The engine's click and bar numbers follow it: bar 13 at its real start.
+        let s = &l.song;
+        let pos = s.beat_pos(bar(13) * 48_000.0 + 10.0);
+        assert_eq!((pos / 4.0).floor() as i64 + 1, 13);
+        assert!((s.bpm_at(bar(13) * 48_000.0) - 84.0).abs() < 0.5);
+        // The guide calls are found on the new grid: every section has its call.
+        assert!(l.song.calls[1..].iter().all(|c| c.is_some()), "{:?}", l.song.calls);
+        // Saved and loaded again: same grid, nothing moves.
+        let again = load(&folder, 48_000, 2).unwrap();
+        assert_eq!(again.file.markers, f.markers);
+        assert_eq!(again.file.beat_times.len(), f.beat_times.len());
+        assert!(again.file.beat_times.iter().zip(&f.beat_times).all(|(a, b)| (a - b).abs() < 1e-9), "saved and read back (to the last decimal)");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_segue_makes_the_next_song_current() {
+        let root = std::env::temp_dir().join(format!("rig-segue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let spec = |n: &str| clicksong::Spec { name: n.into(), bpm: 70.0, beats_per_bar: 4, key: "G".into(), sections: vec![("Verse".into(), 4)], guide: false };
+        let voice = |_: &str| Some(vec![0.2f32; 4000]);
+        let (a, _) = clicksong::create(&root, &spec("First"), &voice).unwrap();
+        let (b, _) = clicksong::create(&root, &spec("Second"), &voice).unwrap();
+        let st = Arc::new(state());
+        {
+            let mut s = st.settings.lock().unwrap();
+            s.setlist = vec![a.clone(), b.clone()];
+            s.current = Some(0);
+        }
+        *st.song.lock().unwrap() = Some(load(&a, 48_000, 2).unwrap());
+        st.next.lock().unwrap().loaded = Some(load(&b, 48_000, 2).unwrap());
+        assert!(!take_segue(&st), "nothing happened yet");
+        st.core.segues.fetch_add(1, Ordering::Release); // the audio thread handed over
+        let s2 = st.clone();
+        assert!(finishes(move || take_segue(&s2)));
+        assert_eq!(st.song.lock().unwrap().as_ref().unwrap().folder, b);
+        assert_eq!(st.settings.lock().unwrap().current, Some(1));
+        assert!(st.next.lock().unwrap().loaded.is_none());
+        assert!(!take_segue(&st), "applied once");
+        let s3 = st.clone();
+        let v = finishes(move || view(&s3));
+        assert_eq!(v.song.unwrap().name, "Second");
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -210,7 +210,7 @@ body { grid-template-columns: minmax(0, 1fr) }
 @media (max-width: 1100px) { .lcd-row { display: none } .lcd { grid-template-columns: 1fr } }
 #clickForm label.row { white-space: nowrap; margin: 0 }
 /* Narrow windows: the section display gets its own full-width row under the buttons. */
-@media (max-width: 1180px) {
+@media (max-width: 1380px) {
   .bar { flex-wrap: wrap; row-gap: 8px }
   .lcd { order: 10; flex: 1 1 100%; min-width: 0 }
   .lcd-row { display: flex !important }
@@ -240,7 +240,7 @@ body { grid-template-columns: minmax(0, 1fr) }
 body.live-mode { grid-template-rows: auto 1fr auto }
 body.live-mode .railwrap, body.live-mode .arr { display: none }
 .live { display: grid; grid-template-columns: 1fr 260px; min-height: 0; overflow: hidden }
-.lmain { display: grid; grid-template-rows: auto auto 1fr; gap: 14px; padding: 18px 20px; min-width: 0; min-height: 0 }
+.lmain { display: grid; grid-template-rows: auto auto auto 1fr; gap: 14px; padding: 18px 20px; min-width: 0; min-height: 0 }
 .lnow { background: var(--panel); border: 1px solid var(--line); border-left: 8px solid var(--c, var(--go)); border-radius: 14px; padding: 14px 20px 16px }
 .lsec { font: 900 clamp(48px, 9vw, 112px)/1 var(--f-round); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 4px 0 10px }
 .lrow2 { display: flex; align-items: center; gap: 28px; flex-wrap: wrap }
@@ -258,8 +258,10 @@ body.live-mode .railwrap, body.live-mode .arr { display: none }
 .lnsec { font: 800 clamp(28px, 4.5vw, 54px)/1.1 var(--f-round); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 .lnext.going { border-color: var(--cue) } .lnext.going .lbl, .lnext.going .lnsec { color: var(--cue) }
 .lnext.vamp { border-color: var(--go) } .lnext.vamp .lbl, .lnext.vamp .lnsec { color: var(--go) }
-.lblocks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; align-content: start; overflow-y: auto; min-height: 0 }
-.ltile { position: relative; text-align: left; background: var(--raised); border: 2px solid var(--line); border-top: 6px solid var(--c); border-radius: 10px; padding: 10px 12px; cursor: pointer; min-height: 74px }
+.lstrip { display: flex; flex-direction: column; gap: 10px; min-width: 0 }
+.lblocks { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; overflow-y: hidden; padding: 2px 2px 8px; scroll-behavior: smooth; position: relative }
+.lblocks::-webkit-scrollbar { height: 6px } .lblocks::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px }
+.ltile { position: relative; flex: 0 0 auto; overflow: hidden; text-align: left; background: var(--raised); border: 2px solid var(--line); border-top: 6px solid var(--c); border-radius: 10px; padding: 10px 12px; cursor: pointer; min-height: 74px }
 .ltile b { display: block; font: 800 20px/1.1 var(--f-round); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 .ltile small { color: var(--muted); font: 12px var(--f-mono) }
 .ltile.done { opacity: .4 }
@@ -274,3 +276,19 @@ body.live-mode .railwrap, body.live-mode .arr { display: none }
 .lset li.missing { color: var(--dim); text-decoration: line-through }
 @media (max-width: 820px) { .live { grid-template-columns: 1fr } .lset { display: none } }
 body.live-mode .status .zoom { visibility: hidden }
+.ltile .tprog { position: absolute; left: 0; bottom: 0; height: 4px; width: 0; background: var(--c) }
+.ltile .tfade { position: absolute; right: 0; top: 0; bottom: 0; background: linear-gradient(90deg, transparent, rgba(0,0,0,.55)); pointer-events: none }
+.ltile .tags { position: absolute; right: 8px; top: 6px; font: 11px var(--f-mono); color: var(--muted) }
+/* Fades: the ending and the way into the next song */
+.fades { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px }
+.fades.stacked { flex-direction: column; align-items: stretch; background: none; border: 0; padding: 0 }
+.fades .fgrp { display: flex; align-items: center; gap: 8px; flex-wrap: wrap }
+.fades .flbl { font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--dim) }
+.fades .num { display: inline-flex; align-items: center; gap: 4px; font: 600 13px var(--f-mono) }
+.fades .num button { width: 26px; height: 26px; padding: 0 }
+.fades .num b { min-width: 28px; text-align: center }
+.fades .fst { font-size: 11px; color: var(--muted) }
+.fades .fst.ok { color: #6fd08c }
+.fades .fadenow { margin-left: auto; border-color: var(--go); color: var(--go) }
+.fades.stacked .fadenow { display: none }
+body.live-mode .bar .lcd { display: none }

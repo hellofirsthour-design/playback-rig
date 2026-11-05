@@ -44,6 +44,8 @@ pub enum Action {
     PadOnly,
     /// Switch between the Live page and the Edit page.
     ToggleView,
+    /// Fade the song out over two bars and stop.
+    FadeOut,
     /// Continuous: a fader sets this stem's level.
     StemLevel(usize),
     /// Continuous: a fader sets the click level.

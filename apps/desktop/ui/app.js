@@ -56,8 +56,9 @@
     const i = (((PC[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0) + semis) % 12) + 12) % 12;
     return (m[3] ? MINOR : MAJOR)[i];
   }
-  const strip = bs => bs.map(b => ({ section: b.section, muted: [...b.muted] }));
-  const withUid = bs => bs.map(b => ({ uid: uidSeq++, section: b.section, muted: [...b.muted] }));
+  const copyTrims = b => (b.trims || []).map(t => ({ ...t }));
+  const strip = bs => bs.map(b => ({ section: b.section, muted: [...b.muted], trims: copyTrims(b) }));
+  const withUid = bs => bs.map(b => ({ uid: uidSeq++, section: b.section, muted: [...b.muted], trims: copyTrims(b), fade_out: b.fade_out || null }));
 
   function secColor(name) {
     const n = name.toLowerCase();
@@ -97,7 +98,20 @@
 
   /* ---------- layout of the arrangement in time ---------- */
   // The song's real downbeats (seconds in the audio as it plays) inside [a, b).
+  // Bars left in the block: from the engine, which follows tempo changes.
+  const barsLeft = sn => (sn.bars_left != null ? sn.bars_left : (sn.section_frames - sn.frame_in_section) / V.song.sample_rate / barSec());
+  // "77.5 BPM", or "70 → 84 BPM" for a song whose tempo changes.
+  function tempoText(s) {
+    const tc = s.tempo_changes || [];
+    if (tc.length < 2) return `${+playBpm().toFixed(2)} BPM`;
+    if (tc.length <= 3) return tc.map(t => +t[1].toFixed(1)).join(' → ') + ' BPM';
+    const lo = Math.min(...tc.map(t => t[1])), hi = Math.max(...tc.map(t => t[1]));
+    return `${+lo.toFixed(1)}–${+hi.toFixed(1)} BPM`;
+  }
   function downbeats(a, b) {
+    // Songs whose tempo changes: the server sends every bar line.
+    const db = V.song.downbeats;
+    if (db && db.length) return db.filter(t => t >= a - 1e-6 && t < b - 1e-6);
     const bs = barSec(), off = V.song.offset_ms / 1000 * (V.song.bpm / playBpm());
     const out = [];
     for (let n = Math.ceil((a - off) / bs - 1e-6); off + n * bs < b - 1e-6; n++) out.push(off + n * bs);
@@ -108,9 +122,11 @@
     let t = 0, bar = 1;
     return blocks.map((b, i) => {
       const sec = V.song.sections.find(x => x.name === b.section) || { start_sec: 0, secs: 0, bars: 0, bar: 1 };
-      const beats = downbeats(sec.start_sec, sec.start_sec + sec.secs);
-      const o = { i, b, sec, start: t, secs: sec.secs, bar, beats };
-      t += sec.secs; bar += beats.length;
+      // A block with an ending fade stops where the fade does.
+      const secs = b.fade_out ? Math.min(sec.secs, (b.fade_out[0] + b.fade_out[1]) * barSec()) : sec.secs;
+      const beats = downbeats(sec.start_sec, sec.start_sec + secs);
+      const o = { i, b, sec, start: t, secs, bar, beats };
+      t += secs; bar += beats.length;
       return o;
     });
   }
@@ -139,6 +155,8 @@
       }
     } else if (s && JSON.stringify(strip(blocks)) !== JSON.stringify(strip(s.blocks))) {
       blocks = withUid(s.blocks); // changed elsewhere (e.g. guide re-read)
+    } else if (s) {
+      blocks.forEach((b, i) => { b.fade_out = s.blocks[i] ? s.blocks[i].fade_out : null; }); // the ending moves with the last block
     }
     render();
   }
@@ -152,7 +170,7 @@
   function renderBar() {
     const s = V.song;
     $('#songTitle').textContent = loading ? 'Loading…' : s ? s.name : (V.setlist.length ? 'Pick a song' : 'No songs yet');
-    $('#songMeta').textContent = s ? `${+playBpm().toFixed(2)} BPM · ${s.beats_per_bar}/4${s.key || s.transpose ? ' · ' + keyName(s.key, s.transpose) : ''}${s.transpose ? ` (${s.transpose > 0 ? '+' : ''}${s.transpose})` : ''}` : '';
+    $('#songMeta').textContent = s ? `${tempoText(s)} · ${s.beats_per_bar}/4${s.key || s.transpose ? ' · ' + keyName(s.key, s.transpose) : ''}${s.transpose ? ` (${s.transpose > 0 ? '+' : ''}${s.transpose})` : ''}` : '';
     document.querySelectorAll('#quant button').forEach(b => b.classList.toggle('on', b.dataset.q === V.quantize));
     $('#clickBtn').classList.toggle('on', !!(s && s.click)); $('#clickBtn').disabled = !s;
     $('#countBtn').classList.toggle('on', V.count_in);
@@ -173,7 +191,7 @@
     $('#lcdBB').textContent = !snap || !s ? '–' : snap.counting_in ? 'Count' : `${snap.bar}.${snap.beat}`;
     const total = L.length ? L[L.length - 1].start + L[L.length - 1].secs : 0, now = playTime(L);
     $('#lcdTime').textContent = s ? `${fmt(now)} / ${fmt(total)}` : '';
-    const left = cur >= 0 && snap ? (snap.section_frames - snap.frame_in_section) / s.sample_rate / barSec() : 0;
+    const left = cur >= 0 && snap ? barsLeft(snap) : 0;
     $('#lcdLeft').textContent = p && !snap.counting_in ? `${Math.max(0, Math.ceil(left - 0.001))} bars left` : '';
     const call = $('#lcdCall'); call.className = 'lcd-call'; call.innerHTML = '';
     if (snap && s && cur >= 0) {
@@ -231,13 +249,22 @@
     const box = $('#lvBlocks'); box.innerHTML = '';
     layout().forEach(o => {
       const t = el('button', 'ltile'); t.dataset.i = o.i; t.style.setProperty('--c', secColor(o.b.section));
-      t.append(el('b', null, o.b.section), el('small', null, `${o.i + 1} · ${o.sec.bars < 0.95 ? 'pickup' : Math.round(o.sec.bars) + ' bars'}${o.b.muted.length ? ' · no ' + o.b.muted.join(', ') : ''}`));
+      const bars = o.b.fade_out ? o.b.fade_out[0] + o.b.fade_out[1] : o.sec.bars;
+      t.style.width = Math.round(Math.max(120, Math.min(300, 70 + bars * 12))) + 'px';
+      t.append(el('b', null, o.b.section), el('small', null, `${o.i + 1} · ${o.sec.bars < 0.95 ? 'pickup' : Math.round(bars) + ' bars'}${o.b.muted.length ? ' · no ' + o.b.muted.join(', ') : ''}`));
+      if (o.b.fade_out) { const f = el('i', 'tfade'); f.style.width = Math.min(100, o.b.fade_out[1] / bars * 100) + '%'; t.append(f); }
+      const tags = (o.b.trims && o.b.trims.length ? '✂' : '') + (o.b.fade_out ? ' fade' : '');
+      if (tags) t.append(el('span', 'tags', tags.trim()));
+      t.append(el('i', 'tprog'));
       t.onclick = () => send({ type: 'Goto', block: o.i });
       box.append(t);
     });
+    renderFades($('#lvFades'));
+    liveFollowed = -1;
     const set = $('#lvSet'); set.innerHTML = '';
     (V ? V.setlist : []).forEach((s, i) => {
-      const li = el('li', (i === V.current ? 'cur' : i === V.current + 1 ? 'next' : '') + (s.found ? '' : ' missing'), s.name);
+      const arrow = s.transition === 'Segue' ? '  →' : s.transition === 'Crossfade' ? '  ⤳' : '';
+      const li = el('li', (i === V.current ? 'cur' : i === V.current + 1 ? 'next' : '') + (s.found ? '' : ' missing'), s.name + (i + 1 < V.setlist.length ? arrow : ''));
       li.onclick = () => { if (playing()) { toast('Stop the song to switch.'); return; } selectSong(i); };
       set.append(li);
     });
@@ -248,7 +275,7 @@
     const o = cur >= 0 ? L[cur] : null;
     $('#lvSec').textContent = o ? o.b.section : (s ? s.name : 'No song');
     now.style.setProperty('--c', o ? secColor(o.b.section) : 'var(--go)');
-    const left = o && snap ? (snap.section_frames - snap.frame_in_section) / s.sample_rate / barSec() : 0;
+    const left = o && snap ? barsLeft(snap) : 0;
     const counting = snap && snap.counting_in;
     $('#lvBars').textContent = !p ? '–' : counting ? 'Count' : String(Math.max(0, Math.ceil(left - 0.001)));
     $('#lvBarsLbl').textContent = p && !counting ? (Math.ceil(left - 0.001) === 1 ? 'bar left' : 'bars left') : '';
@@ -256,7 +283,7 @@
     const bpb = s ? s.beats_per_bar : 4, beats = $('#lvBeats');
     if (beats.children.length !== bpb) { beats.innerHTML = ''; for (let i = 0; i < bpb; i++) beats.append(el('i')); }
     [...beats.children].forEach((d, i) => { d.className = (p && snap && snap.beat === i + 1 ? 'on' : '') + (i === 0 ? ' one' : ''); });
-    $('#lvPos').textContent = s ? `${p && snap && !counting ? snap.bar + '.' + snap.beat + ' · ' : ''}${+playBpm().toFixed(2)} BPM${s.key ? ' · ' + keyName(s.key, s.transpose) : ''}` : '';
+    $('#lvPos').textContent = s ? `${p && snap && !counting ? snap.bar + '.' + snap.beat + ' · ' : ''}${+((p && snap && snap.bpm) || (s.tempo_changes && s.tempo_changes.length ? s.tempo_changes[0][1] : playBpm())).toFixed(1)} BPM${s.key ? ' · ' + keyName(s.key, s.transpose) : ''}` : '';
     const nx = $('#lvNext'); let lbl = 'Next', name = '—'; nx.className = 'lnext';
     if (s && o) {
       if (snap && snap.pending != null && L[snap.pending]) {
@@ -272,12 +299,85 @@
     document.querySelectorAll('#lvBlocks .ltile').forEach(t => {
       const i = +t.dataset.i;
       t.classList.toggle('cur', i === cur); t.classList.toggle('done', p && i < cur); t.classList.toggle('queued', !!snap && snap.pending === i);
+      t.querySelector('.tprog').style.width = i === cur && snap ? Math.min(100, snap.frame_in_section / Math.max(1, snap.section_frames) * 100) + '%' : '0';
     });
-    const ct = document.querySelector(`#lvBlocks .ltile[data-i="${cur}"]`);
-    if (p && ct && cur !== liveFollowed) { liveFollowed = cur; ct.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
+    // The strip follows the song: the playing block sits near the left, the one before it still in view.
+    const strip = $('#lvBlocks'), ct = strip.querySelector(`.ltile[data-i="${cur}"]`);
+    if (p && ct && cur !== liveFollowed) {
+      liveFollowed = cur;
+      const prev = strip.querySelector(`.ltile[data-i="${cur - 1}"]`);
+      strip.scrollTo({ left: Math.max(0, (prev ? prev.offsetLeft + prev.offsetWidth * 0.5 : ct.offsetLeft) - 8), behavior: 'smooth' });
+    }
     if (!p) liveFollowed = -1;
   }
   let liveFollowed = -1;
+
+  /* ---------- fades: ending and the way into the next song ---------- */
+  function setTransition(tr, ending) {
+    invoke('set_transition', { transition: tr, ending: ending === undefined ? V.song.ending : ending }).then(v => refresh(v)).catch(err);
+  }
+  function stepper(val, fmt, onChange, label) {
+    const w = el('span', 'num');
+    const dn = el('button', 'ib', '−'), up = el('button', 'ib', '+');
+    dn.setAttribute('aria-label', label + ' down'); up.setAttribute('aria-label', label + ' up');
+    dn.onclick = () => onChange(-1); up.onclick = () => onChange(1);
+    w.append(dn, el('b', null, fmt(val)), up);
+    return w;
+  }
+  function seg(opts, cur, onPick, label) {
+    const g = el('div', 'seg'); g.setAttribute('role', 'group'); g.setAttribute('aria-label', label);
+    opts.forEach(([v, t]) => { const b = el('button', v === cur ? 'on' : null, t); b.onclick = () => { if (v !== cur) onPick(v); }; g.append(b); });
+    return g;
+  }
+  function renderFades(box) {
+    box.innerHTML = '';
+    const s = V && V.song;
+    box.hidden = !s;
+    if (!s) return;
+    const tr = { ...s.transition }, en = s.ending;
+    const last = blocks[blocks.length - 1], lastSec = last && V.song.sections.find(x => x.name === last.section);
+    const lastBars = lastSec ? Math.max(1, Math.round(lastSec.bars)) : 4;
+    // Ending
+    const g1 = el('div', 'fgrp');
+    g1.append(el('span', 'flbl', 'Ending'));
+    g1.append(seg([['full', 'Play out'], ['fade', 'Fade out']], en ? 'fade' : 'full', v => {
+      if (playing()) { toast('Stop playback to change the ending.'); return; }
+      setTransition(tr, v === 'fade' ? { at: Math.max(0, lastBars - 4), bars: Math.min(4, lastBars) } : null);
+    }, 'Ending'));
+    if (en) {
+      const set = e2 => { if (playing()) { toast('Stop playback to change the ending.'); return; } setTransition(tr, e2); };
+      g1.append(el('span', 'fst', `${last ? last.section : 'last block'}: from bar`));
+      g1.append(stepper(en.at + 1, v => String(Math.round(v)), d => { const at = Math.max(0, Math.min(lastBars - 1, en.at + d)); set({ at, bars: Math.max(1, Math.min(en.bars, lastBars - at)) }); }, 'Fade start'));
+      g1.append(el('span', 'fst', 'over'));
+      g1.append(stepper(en.bars, v => String(v), d => set({ ...en, bars: Math.max(1, Math.min(lastBars - en.at, en.bars + d)) }), 'Fade length'));
+      g1.append(el('span', 'fst', 'bars'));
+    }
+    box.append(g1);
+    // Into the next song
+    const nx = V.current != null ? V.setlist[V.current + 1] : null;
+    const g2 = el('div', 'fgrp');
+    g2.append(el('span', 'flbl', nx ? 'Into ' + nx.name : 'Last song'));
+    if (nx) {
+      g2.append(seg([['Stop', 'Stop'], ['Segue', 'Segue'], ['Crossfade', 'Crossfade']], tr.mode, v => setTransition({ ...tr, mode: v }), 'Into the next song'));
+      if (tr.mode === 'Crossfade') {
+        g2.append(stepper(tr.bars, v => String(v), d => setTransition({ ...tr, bars: Math.max(1, Math.min(16, tr.bars + d)) }), 'Crossfade length'));
+        g2.append(el('span', 'fst', 'bars'));
+      }
+      if (tr.mode !== 'Stop') g2.append(el('span', 'fst' + (V.next_ready ? ' ok' : ''), V.next_ready ? '● ready' : 'loading…'));
+    }
+    box.append(g2);
+    // Pad underneath
+    const g3 = el('div', 'fgrp');
+    const pad = el('button', 'tog pad' + (tr.pad ? ' on' : ''), 'Pad under ending');
+    pad.title = "Brings the pad in (this song's key) when the last block starts, and keeps it going into the next song";
+    pad.onclick = () => { if (!V.pads.folder && !tr.pad) { toast('Choose your pads folder in Setup → Pads first.'); return; } setTransition({ ...tr, pad: !tr.pad }); };
+    g3.append(pad);
+    box.append(g3);
+    const now = el('button', 'btn fadenow', 'Fade out now');
+    now.title = 'Fade the song out over 2 bars and stop (also on a MIDI button)';
+    now.onclick = () => { if (playing()) send({ type: 'FadeOut', bars: 2 }); };
+    box.append(now);
+  }
 
   /* ---------- section rail (drag to arrange) ---------- */
   function renderRail() {
@@ -292,7 +392,7 @@
       const tools = el('div', 'tools');
       const dup = el('button', null, '⧉'); dup.title = 'Play this section twice'; dup.setAttribute('aria-label', 'Duplicate');
       dup.onpointerdown = e => e.stopPropagation();
-      dup.onclick = e => { e.stopPropagation(); const nb = blocks.slice(); nb.splice(o.i + 1, 0, { uid: uidSeq++, section: o.b.section, muted: [...o.b.muted] }); commit(nb); };
+      dup.onclick = e => { e.stopPropagation(); const nb = blocks.slice(); nb.splice(o.i + 1, 0, { uid: uidSeq++, section: o.b.section, muted: [...o.b.muted], trims: copyTrims(o.b) }); commit(nb); };
       const x = el('button', null, '✕'); x.title = 'Remove from the arrangement'; x.setAttribute('aria-label', 'Remove');
       x.onpointerdown = e => e.stopPropagation();
       x.onclick = e => { e.stopPropagation(); commit(blocks.filter((_, j) => j !== o.i)); };
@@ -310,7 +410,7 @@
       c.append(el('i'), document.createTextNode(s.name));
       const add = el('button', null, '+'); add.title = `Add ${s.name} at the end`; add.setAttribute('aria-label', `Add ${s.name}`);
       add.onpointerdown = e => e.stopPropagation();
-      add.onclick = () => commit([...blocks, { uid: uidSeq++, section: s.name, muted: [] }]);
+      add.onclick = () => commit([...blocks, { uid: uidSeq++, section: s.name, muted: [], trims: [] }]);
       c.append(add);
       c.onpointerdown = e => startDrag(e, { kind: 'chip', section: s.name, el: c });
       box.append(c);
@@ -364,7 +464,7 @@
       if (d.at == null || d.at === d.from || d.at === d.from + 1) return;
       const nb = blocks.slice(); const [m] = nb.splice(d.from, 1); nb.splice(d.at > d.from ? d.at - 1 : d.at, 0, m); commit(nb);
     } else if (d.at != null) {
-      const nb = blocks.slice(); nb.splice(d.at, 0, { uid: uidSeq++, section: d.section, muted: [] }); commit(nb);
+      const nb = blocks.slice(); nb.splice(d.at, 0, { uid: uidSeq++, section: d.section, muted: [], trims: [] }); commit(nb);
     }
   }
 
@@ -392,7 +492,7 @@
     commit(prev.map(b => ({ ...b })), true);
   }
   function toggleClip(bi, stemName) {
-    const nb = blocks.map(b => ({ ...b, muted: [...b.muted] }));
+    const nb = blocks.map(b => ({ ...b, muted: [...b.muted], trims: copyTrims(b) }));
     const b = nb[bi]; if (!b) return;
     b.muted = b.muted.includes(stemName) ? b.muted.filter(m => m !== stemName) : [...b.muted, stemName];
     commit(nb);
@@ -572,9 +672,36 @@
           }
         }
         h.globalAlpha = 1;
+        // Trim: the parts of the block where this track is out are shaded; fades are ramps.
+        const tr = !off && clipTrim(o, st.name);
+        if (tr && !tr.full) {
+          const bp = beatSec() * zoom.pps, xs = x0 + tr.from * bp, xe = x0 + tr.to * bp;
+          h.fillStyle = 'rgba(14,15,17,.82)';
+          if (xs > x0 + 1) h.fillRect(x0 + 1, top, xs - x0 - 1, ch);
+          if (xe < x1 - 1) h.fillRect(xe, top, x1 - 1 - xe, ch);
+          h.fillStyle = col; h.fillRect(Math.round(xs), top, 2, ch); h.fillRect(Math.round(xe) - 2, top, 2, ch);
+          const fi = tr.fade_in * bp, fo = tr.fade_out * bp;
+          h.fillStyle = 'rgba(0,0,0,.5)'; h.strokeStyle = '#ececec'; h.lineWidth = 1;
+          if (fi > 0) { h.beginPath(); h.moveTo(xs, top); h.lineTo(xs + fi, top); h.lineTo(xs, top + ch); h.closePath(); h.fill(); h.beginPath(); h.moveTo(xs, top + ch); h.lineTo(xs + fi, top); h.stroke(); }
+          if (fo > 0) { h.beginPath(); h.moveTo(xe, top); h.lineTo(xe - fo, top); h.lineTo(xe, top + ch); h.closePath(); h.fill(); h.beginPath(); h.moveTo(xe - fo, top); h.lineTo(xe, top + ch); h.stroke(); }
+        }
+        if (tr && x1 - x0 > 30) {
+          // fade handles at the top corners of the clip (or of its trim)
+          const bp = beatSec() * zoom.pps, xs = x0 + tr.from * bp + tr.fade_in * bp, xe = x0 + tr.to * bp - tr.fade_out * bp;
+          h.fillStyle = 'rgba(236,236,236,.7)'; h.fillRect(xs - 2, top, 5, 5); h.fillRect(xe - 3, top, 5, 5);
+        }
         if (off && x1 - x0 > 50) { h.fillStyle = '#5d6168'; h.font = '10px -apple-system, system-ui, sans-serif'; h.fillText(laneOff ? '' : 'off', x0 + 6, top + 13); }
         if (sel && sel.block === o.i && sel.stem === r) { h.strokeStyle = '#ececec'; h.lineWidth = 1.5; h.strokeRect(x0 + 1.5, top + 0.5, x1 - x0 - 3, ch); }
       });
+    });
+    // A block that fades out (the song's ending): a ramp over every lane.
+    L.forEach(o => {
+      if (!o.b.fade_out) return;
+      const xa = X(o.start + o.b.fade_out[0] * bs), xb = X(o.start + o.secs);
+      if (xb < 0 || xa > w2) return;
+      h.fillStyle = 'rgba(0,0,0,.45)'; h.beginPath(); h.moveTo(xa, 0); h.lineTo(xb, 0); h.lineTo(xb, H); h.closePath(); h.fill();
+      h.strokeStyle = '#ffd23f'; h.lineWidth = 1.5; h.beginPath(); h.moveTo(xa, 0); h.lineTo(xb, H); h.stroke();
+      g.fillStyle = '#ffd23f'; g.font = '10px ui-monospace, Menlo, monospace'; g.fillText('fade', xa + 3, RULER_H - 6);
     });
     // block boundaries + playhead + queued jump
     h.fillStyle = 'rgba(255,255,255,.06)'; L.forEach(o => { const x = X(o.start); if (x >= 0 && x <= w2) h.fillRect(Math.round(x), 0, 1, H); });
@@ -595,6 +722,76 @@
   function loop() { if (V && (dirty || playing() || scrub != null || (snap && snap.pending != null))) { draw(); dirty = false; } requestAnimationFrame(loop); }
   requestAnimationFrame(loop);
   window.addEventListener('resize', () => { dirty = true; });
+
+  const beatSec = () => 60 / playBpm();
+  /** This track's trim in a block, in beats from the block's start ({ full: true } if untrimmed). */
+  function clipTrim(o, name) {
+    const full = o.secs / beatSec();
+    const t = (o.b.trims || []).find(t => t.track === name);
+    return t ? { ...t, to: Math.min(t.to, full) } : { track: name, from: 0, to: full, fade_in: 0, fade_out: 0, full: true };
+  }
+  // Trim a clip by dragging its edges; drag the handle at a top corner for a fade.
+  let trimDrag = null;
+  function trimTarget(e) {
+    if (!V || !V.song) return null;
+    const { o, y } = hit(e, cvLanes); if (!o) return null;
+    const row = rows().find(r => y >= r.y && y < r.y + r.h);
+    if (!row || row.kind !== 'stem') return null;
+    const st = V.song.stems[row.i]; if (o.b.muted.includes(st.name)) return null;
+    const x = e.clientX - cvLanes.getBoundingClientRect().left, top = row.y + 3, bp = beatSec() * zoom.pps, x0 = X(o.start);
+    const tr = clipTrim(o, st.name), xs = x0 + tr.from * bp, xe = x0 + tr.to * bp;
+    const near = (a, n = 6) => Math.abs(x - a) <= n;
+    let mode = null;
+    if (y < top + 10 && near(xs + tr.fade_in * bp)) mode = 'fade_in';
+    else if (y < top + 10 && near(xe - tr.fade_out * bp)) mode = 'fade_out';
+    else if (near(xs)) mode = 'from';
+    else if (near(xe)) mode = 'to';
+    return mode && { o, name: st.name, mode, tr };
+  }
+  cvLanes.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || lanesScrub) return;
+    const r = cvLanes.getBoundingClientRect();
+    if (V && V.song && Math.abs(e.clientX - r.left - X(playTime(layout()))) <= 6) return; // the playhead wins
+    const t = trimTarget(e); if (!t) return;
+    e.preventDefault(); e.stopImmediatePropagation(); cvLanes.setPointerCapture(e.pointerId);
+    trimDrag = { ...t, before: blocks.map(b => ({ ...b, muted: [...b.muted], trims: copyTrims(b) })) };
+  }, true);
+  function applyTrim(e) {
+    const d = trimDrag, o = d.o, full = o.secs / beatSec();
+    const tb = (zoom.scroll + (e.clientX - cvLanes.getBoundingClientRect().left) / zoom.pps - o.start) / beatSec();
+    const q = e.altKey ? 1 / 16 : 1; // snap to the beat (Alt: fine)
+    const sn = v => Math.round(v / q) * q;
+    const t = { ...d.tr }; delete t.full;
+    if (d.mode === 'from') t.from = Math.max(0, Math.min(t.to - q, sn(tb)));
+    if (d.mode === 'to') t.to = Math.min(full, Math.max(t.from + q, sn(tb)));
+    if (d.mode === 'fade_in') t.fade_in = Math.max(0, Math.min(t.to - t.from - t.fade_out, sn(tb - t.from)));
+    if (d.mode === 'fade_out') t.fade_out = Math.max(0, Math.min(t.to - t.from - t.fade_in, sn(t.to - tb)));
+    t.fade_in = Math.min(t.fade_in, t.to - t.from); t.fade_out = Math.min(t.fade_out, t.to - t.from - t.fade_in);
+    const b = blocks[o.i];
+    const rest = (b.trims || []).filter(x => x.track !== d.name);
+    const isFull = t.from <= 0 && t.to >= full - 1e-6 && !t.fade_in && !t.fade_out;
+    blocks[o.i] = { ...b, trims: isFull ? rest : [...rest, t] };
+    dirty = true;
+  }
+  cvLanes.addEventListener('pointermove', e => {
+    if (trimDrag) { applyTrim(e); e.stopImmediatePropagation(); cvLanes.style.cursor = 'ew-resize'; return; }
+    if (!lanesScrub && e.buttons === 0 && trimTarget(e)) { cvLanes.style.cursor = 'ew-resize'; e.stopImmediatePropagation(); }
+  }, true);
+  cvLanes.addEventListener('pointerup', e => {
+    if (!trimDrag) return;
+    e.stopImmediatePropagation();
+    const d = trimDrag; trimDrag = null; suppressClick = true;
+    const nb = blocks; blocks = d.before; // commit() records the undo step from the state before the drag
+    if (JSON.stringify(strip(nb)) !== JSON.stringify(strip(d.before))) commit(nb.map(b => ({ ...b }))); else dirty = true;
+  }, true);
+  function clearTrim(bi, name) {
+    const b = blocks[bi]; if (!b || !(b.trims || []).some(t => t.track === name)) return false;
+    const nb = blocks.map(x => ({ ...x, trims: copyTrims(x) }));
+    nb[bi].trims = nb[bi].trims.filter(t => t.track !== name);
+    commit(nb); return true;
+  }
+
+  if (typeof window.__rigTest === 'function') window.__rigTest({ layout, X, rows }); // UI tests only
 
   function hit(e, cv) {
     const r = cv.getBoundingClientRect(), x = e.clientX - r.left, t = zoom.scroll + x / zoom.pps;
@@ -737,6 +934,10 @@
     const s = V.song;
     $('#songEmpty').hidden = !!s; $('#songBody').hidden = !s;
     if (!s) return;
+    renderFades($('#songFades'));
+    const tc = s.tempo_changes || [];
+    $('#tempoMap').hidden = tc.length < 2;
+    $('#tempoMap').textContent = tc.length < 2 ? '' : 'Tempo changes, read from the click (or the Ableton set): ' + tc.map(([b, t]) => `bar ${b}: ${+t.toFixed(1)}`).join(' · ') + '. The grid, click and bar jumps follow them. Changing the tempo by hand sets one steady tempo.';
     const sig = s.folder + JSON.stringify(s.markers);
     if (draftFor !== sig) { draftFor = sig; draftMarkers = s.markers.map(m => ({ ...m })); }
     $('#analyzeBtn').disabled = analyzing || !(s.has_guide || s.has_click);
@@ -836,11 +1037,11 @@
     { label: 'Pedal 4', tap: 'NextSong', hold: 'PadOnly', desc: 'Tap: next song · Hold: pad only' },
     { label: 'Play / stop button', tap: 'PlayStop' }, { label: 'Next button', tap: 'Next' }, { label: 'Repeat button', tap: 'Repeat' },
     { label: 'Vamp button', tap: 'ToggleVamp' }, { label: 'Next song button', tap: 'NextSong' }, { label: 'Click fader', tap: 'ClickLevel' },
-    { label: 'Live / Edit page button', tap: 'ToggleView' },
+    { label: 'Live / Edit page button', tap: 'ToggleView' }, { label: 'Fade out button', tap: 'FadeOut', desc: 'Fades the song out over 2 bars and stops' },
   ];
   function actionLabel(a) {
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
-    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', ToggleView: 'Live / Edit page' })[a] || String(a);
+    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out' })[a] || String(a);
   }
   const controlLabel = c => (c.Note ? `Note ${c.Note.key} · ch ${c.Note.ch + 1}` : c.Cc ? `CC ${c.Cc.num} · ch ${c.Cc.ch + 1}` : '?');
   function renderSetup() {
@@ -964,6 +1165,7 @@
     else if (k === '=' || k === '+') zoomBy(1.5);
     else if (k === '-') zoomBy(1 / 1.5);
     else if (k === '0' && sel && V.song && V.song.stems[sel.stem]) toggleClip(sel.block, V.song.stems[sel.stem].name);
+    else if ((k === 'Backspace' || k === 'Delete') && sel && V.song && V.song.stems[sel.stem]) { if (!clearTrim(sel.block, V.song.stems[sel.stem].name)) toast('That clip isn\'t trimmed.'); }
     else if (k === 'Escape') { if (anyDrawer()) Object.values(drawers).forEach(d => { $(d).hidden = true; }); else send({ type: 'CancelJump' }); }
     else if (/^[1-9]$/.test(k) && blocks[+k - 1]) send({ type: 'Goto', block: +k - 1 });
   });
@@ -1021,9 +1223,14 @@
   setTimeout(() => checkUpdate(false), 4000);
   setInterval(() => { if (!update) checkUpdate(false); }, 6 * 3600 * 1000);
 
+  let readyPoll = 0;
   setInterval(async () => {
     try {
       const s = await invoke('status'); snap = s.snapshot;
+      if (s.song_changed) { toast('Next song: ' + ((V.setlist[(V.current || 0) + 1] || {}).name || '')); await refresh(); return; }
+      if (s.pad_changed) { await refresh(); return; }
+      // The next song loads in the background: show when it's ready.
+      if (V && V.song && !V.next_ready && V.current != null && V.setlist[V.current + 1] && ++readyPoll % 50 === 0) await refresh();
       if (update && !updating) $('#updBtn').disabled = playing();
       if (learnWait != null && !s.learning) { learnWait = null; await refresh(); } else tick();
     } catch (e) { /* closing */ }

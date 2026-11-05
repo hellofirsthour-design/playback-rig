@@ -16,6 +16,10 @@ pub struct AlsInfo {
     pub locators: Vec<(f64, String)>,
     /// How arrangement beats map onto the audio files (from the first audio clip).
     pub clip: Option<ClipTiming>,
+    /// The master tempo's automation: (arrangement beat, BPM), in order. Live ramps
+    /// linearly between points; two points at the same beat are a jump. Empty when
+    /// the tempo isn't automated.
+    pub tempo_points: Vec<(f64, f64)>,
 }
 
 /// Timing of an arrangement audio clip: where it starts and how it is warped.
@@ -31,6 +35,93 @@ pub struct ClipTiming {
 }
 
 impl AlsInfo {
+    /// Tempo automation with more than one tempo in it.
+    pub fn tempo_varies(&self) -> bool {
+        self.tempo_points.windows(2).any(|w| (w[1].1 - w[0].1).abs() > 0.01)
+    }
+
+    /// Seconds of arrangement time at an arrangement beat, following tempo automation.
+    pub fn arr_sec(&self, beat: f64) -> f64 {
+        let base = self.bpm.unwrap_or(120.0);
+        let pts = &self.tempo_points;
+        if pts.is_empty() {
+            return beat * 60.0 / base;
+        }
+        // tempo at beat 0 and every point after it
+        let at = |b: f64| -> f64 {
+            match pts.iter().rposition(|p| p.0 <= b) {
+                None => pts[0].1,
+                Some(i) if i + 1 < pts.len() && pts[i + 1].0 > pts[i].0 => {
+                    let (b0, v0) = pts[i];
+                    let (b1, v1) = pts[i + 1];
+                    v0 + (v1 - v0) * (b - b0) / (b1 - b0)
+                }
+                Some(i) => pts[i].1,
+            }
+        };
+        let seg = |b0: f64, b1: f64| -> f64 {
+            // linear tempo from b0 to b1: integral of 60/bpm
+            let (v0, v1) = (at(b0), at(b1 - 1e-9));
+            if (v1 - v0).abs() < 1e-9 {
+                60.0 * (b1 - b0) / v0
+            } else {
+                60.0 * (b1 - b0) / (v1 - v0) * (v1 / v0).ln()
+            }
+        };
+        let (lo, hi, sign) = if beat >= 0.0 { (0.0, beat, 1.0) } else { (beat, 0.0, -1.0) };
+        let mut cuts: Vec<f64> = vec![lo];
+        cuts.extend(pts.iter().map(|p| p.0).filter(|&b| b > lo && b < hi));
+        cuts.push(hi);
+        sign * cuts.windows(2).map(|w| if w[1] > w[0] { seg(w[0], w[1]) } else { 0.0 }).sum::<f64>()
+    }
+
+    /// Seconds into the audio at an arrangement beat, following tempo automation.
+    /// A warped clip maps beats to audio through its warp markers; an unwarped one
+    /// plays in real time from where it starts.
+    pub fn audio_sec(&self, beat: f64) -> f64 {
+        if self.tempo_points.is_empty() {
+            return self.beat_to_sec(beat);
+        }
+        match &self.clip {
+            Some(c) if c.warped && c.warp.len() >= 2 => self.beat_to_sec(beat),
+            Some(c) => self.arr_sec(beat) - self.arr_sec(c.time) + c.start * 60.0 / self.bpm.unwrap_or(120.0),
+            None => self.arr_sec(beat),
+        }
+    }
+
+    /// The song's beat grid from the tempo automation (seconds into the audio of each
+    /// beat, beat 0 = bar 1 at `offset`), when the tempo changes. `song_bpm` is the
+    /// song's own tempo, to tell a set running at double time; `len` is the audio's length.
+    pub fn beat_grid(&self, song_bpm: f64, offset: f64, len: f64) -> Option<Vec<f64>> {
+        if !self.tempo_varies() {
+            return None;
+        }
+        let live = self.bpm.or_else(|| self.tempo_points.first().map(|p| p.1)).unwrap_or(song_bpm);
+        let r = (live / song_bpm).round().clamp(1.0, 4.0);
+        // The arrangement beat that plays at `offset` (bar 1): search, as audio_sec is monotonic.
+        let (mut a, mut b) = (-64.0, 100_000.0);
+        for _ in 0..80 {
+            let m = (a + b) / 2.0;
+            if self.audio_sec(m) < offset {
+                a = m;
+            } else {
+                b = m;
+            }
+        }
+        let b0 = (a + b) / 2.0;
+        let mut out = vec![];
+        let mut k = 0.0;
+        loop {
+            let t = self.audio_sec(b0 + r * k);
+            if t > len + 1.0 || out.len() > 20_000 {
+                break;
+            }
+            out.push(t);
+            k += 1.0;
+        }
+        (out.len() >= 2 && out.windows(2).all(|w| w[1] > w[0])).then_some(out)
+    }
+
     /// Seconds into the audio files at an arrangement position (beats).
     pub fn beat_to_sec(&self, beat: f64) -> f64 {
         let tempo = self.bpm.unwrap_or(120.0);
@@ -107,7 +198,30 @@ pub fn parse(xml: &str) -> AlsInfo {
         warp.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         Some(ClipTiming { time, start: loop_start + start_rel, warped, warp })
     });
-    AlsInfo { bpm, beats_per_bar, locators, clip }
+    // Tempo automation: the master tempo's automation target, and the envelope pointing at it.
+    let mut tempo_points: Vec<(f64, f64)> = vec![];
+    if let Some(id) = Regex::new(r#"(?s)<Tempo>.*?<AutomationTarget Id="(\d+)""#).unwrap().captures(master).map(|c| c[1].to_string()) {
+        let env = Regex::new(r#"(?s)<AutomationEnvelope Id="\d+">(.*?)</AutomationEnvelope>"#).unwrap();
+        let ev = Regex::new(r#"<FloatEvent Id="\d+" Time="([-0-9.eE+]+)" Value="([-0-9.eE+]+)""#).unwrap();
+        let target = format!(r#"<PointeeId Value="{id}" />"#);
+        let target2 = format!(r#"<PointeeId Value="{id}"/>"#);
+        for c in env.captures_iter(xml) {
+            let body = &c[1];
+            if body.contains(&target) || body.contains(&target2) {
+                for m in ev.captures_iter(body) {
+                    if let (Ok(t), Ok(v)) = (m[1].parse::<f64>(), m[2].parse::<f64>()) {
+                        if (20.0..=400.0).contains(&v) {
+                            // Live's "before the song" event sits at a huge negative time.
+                            tempo_points.push((t.max(0.0), v));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    tempo_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    AlsInfo { bpm, beats_per_bar, locators, clip, tempo_points }
 }
 
 pub fn read(path: &Path) -> Result<AlsInfo, String> {
@@ -137,6 +251,38 @@ pub fn find(folder: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_tempo_automation_and_integrates_it() {
+        let xml = r#"<Ableton><LiveSet><MasterTrack><DeviceChain><Mixer>
+            <Tempo><LomId Value="0" /><Manual Value="120" /><AutomationTarget Id="8"><LockEnvelope Value="0" /></AutomationTarget></Tempo>
+            </Mixer></DeviceChain>
+            <AutomationEnvelopes><Envelopes>
+              <AutomationEnvelope Id="0"><EnvelopeTarget><PointeeId Value="3" /></EnvelopeTarget><Automation><Events>
+                <FloatEvent Id="1" Time="0" Value="0.5" /></Events></Automation></AutomationEnvelope>
+              <AutomationEnvelope Id="1"><EnvelopeTarget><PointeeId Value="8" /></EnvelopeTarget><Automation><Events>
+                <FloatEvent Id="2" Time="-63072000" Value="120" />
+                <FloatEvent Id="3" Time="32" Value="120" />
+                <FloatEvent Id="4" Time="32" Value="150" />
+                <FloatEvent Id="5" Time="64" Value="150" />
+                <FloatEvent Id="6" Time="72" Value="75" />
+              </Events></Automation></AutomationEnvelope>
+            </Envelopes></AutomationEnvelopes></MasterTrack></LiveSet></Ableton>"#;
+        let info = parse(xml);
+        assert_eq!(info.tempo_points.len(), 5);
+        assert!(info.tempo_varies());
+        // 32 beats at 120 = 16 s, then 32 at 150 = 12.8 s
+        assert!((info.arr_sec(32.0) - 16.0).abs() < 1e-9);
+        assert!((info.arr_sec(64.0) - 28.8).abs() < 1e-9);
+        // a ramp from 150 down to 75 over 8 beats: 60*8/(75-150)*ln(75/150) s
+        let ramp = 60.0 * 8.0 / (75.0 - 150.0) * (75.0f64 / 150.0).ln();
+        assert!((info.arr_sec(72.0) - (28.8 + ramp)).abs() < 1e-9);
+        // no clip: the grid is the arrangement's own beats from 0
+        let g = info.beat_grid(120.0, 0.0, 40.0).unwrap();
+        assert!((g[32] - 16.0).abs() < 1e-6 && (g[64] - 28.8).abs() < 1e-6);
+        // a steady set has no grid
+        assert!(parse(SAMPLE).beat_grid(77.5, 0.0, 100.0).is_none());
+    }
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Ableton MajorVersion="5" MinorVersion="11.0_433">

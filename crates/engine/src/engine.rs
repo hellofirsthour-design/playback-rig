@@ -43,6 +43,11 @@ pub enum Command {
     SetClickGain(f32),
     SetClickRoute(Route),
     SetCountIn(bool),
+    /// Fades the whole song out over this many frames, then stops (song transitions).
+    FadeOut(u64),
+    /// Starts playing after this many frames of silence, with no count-in (a segue
+    /// that has to land on an exact frame).
+    PlayAfter(u64),
 }
 
 /// What the screen needs to draw, read after each `process` call.
@@ -60,6 +65,10 @@ pub struct Snapshot {
     pub pending: Option<usize>,
     pub frames_to_jump: Option<u64>,
     pub vamp: bool,
+    /// Bars until this block ends (follows tempo changes).
+    pub bars_left: f64,
+    /// Tempo at the playhead.
+    pub bpm: f64,
 }
 
 struct Pending {
@@ -94,9 +103,12 @@ pub struct Engine {
     click_route: Route,
     count_in: bool,
     playing: bool,
-    stopping: Option<u64>,
+    /// (frames left, fade length) of a fade-out that ends in a stop.
+    stopping: Option<(u64, u64)>,
     count_left: u64,
     count_total: u64,
+    /// Silent frames before playback starts (PlayAfter).
+    wait: u64,
     item: usize,
     fpos: u64,
     abs: u64,
@@ -143,6 +155,7 @@ impl Engine {
             stopping: None,
             count_left: 0,
             count_total: 0,
+            wait: 0,
             item: 0,
             fpos: 0,
             abs: 0,
@@ -221,7 +234,7 @@ impl Engine {
             }
             Command::Seek(i, frame) => {
                 if i < self.arr.items.len() {
-                    let frame = frame.min(self.section(i).len().saturating_sub(1));
+                    let frame = frame.min(self.block_len(i).saturating_sub(1));
                     if self.playing && self.count_left == 0 {
                         self.pending = Some(Pending { target: i, at: self.abs + self.fade, from: frame });
                     } else if !self.playing {
@@ -259,6 +272,27 @@ impl Engine {
             Command::SetClickGain(g) => self.click_gain = g.clamp(0.0, 2.0),
             Command::SetClickRoute(r) => self.click_route = r,
             Command::SetCountIn(v) => self.count_in = v,
+            Command::PlayAfter(n) => {
+                if !self.playing {
+                    let count_in = self.count_in;
+                    self.count_in = false;
+                    self.play();
+                    self.count_in = count_in;
+                    self.wait = n;
+                }
+            }
+            Command::FadeOut(n) => {
+                if self.playing {
+                    self.pending = None;
+                    if self.count_left > 0 {
+                        self.stop();
+                    } else {
+                        let n = n.max(1);
+                        let left = self.stopping.map_or(n, |(l, _)| l.min(n));
+                        self.stopping = Some((left, n.max(left)));
+                    }
+                }
+            }
         }
     }
 
@@ -278,7 +312,10 @@ impl Engine {
         self.last_beat = None;
         self.snap_gains();
         if self.count_in {
-            self.count_total = self.song.frames_per_bar().round() as u64;
+            // One bar at the tempo where playback starts.
+            let s = self.section(self.item).start as f64 + self.fpos as f64;
+            let fpb = self.song.sample_rate as f64 * 60.0 / self.song.bpm_at(s);
+            self.count_total = (fpb * self.song.beats_per_bar as f64).round() as u64;
             self.count_left = self.count_total;
         } else {
             self.count_left = 0;
@@ -295,12 +332,13 @@ impl Engine {
             return;
         }
         self.pending = None;
-        if self.count_left > 0 {
+        if self.count_left > 0 || self.wait > 0 {
             self.count_left = 0;
+            self.wait = 0;
             self.playing = false;
             self.click.left = 0;
         } else {
-            self.stopping = Some(self.fade);
+            self.stopping = Some((self.fade, self.fade));
         }
     }
 
@@ -321,20 +359,44 @@ impl Engine {
         &self.song.sections[self.arr.items[item].section]
     }
 
+    /// How long a block plays: its section, or less if it fades out early.
+    fn block_len(&self, item: usize) -> u64 {
+        let len = self.section(item).len();
+        match self.arr.items[item].fade_out {
+            Some((s, l)) => len.min(s + l).max(1),
+            None => len,
+        }
+    }
+
+    /// Frames until the song ends by itself, if nothing else is pressed. None while
+    /// vamping or stopping (a stop is never a cue for the next song).
+    pub fn frames_left(&self) -> Option<u64> {
+        if !self.playing || self.vamp || self.stopping.is_some() {
+            return None;
+        }
+        let (from_cur, next) = match &self.pending {
+            Some(p) => (p.at.saturating_sub(self.abs) + self.block_len(p.target).saturating_sub(p.from), p.target + 1),
+            None => (self.block_len(self.item).saturating_sub(self.fpos), self.item + 1),
+        };
+        let rest: u64 = (next..self.arr.items.len()).map(|i| self.block_len(i)).sum();
+        Some(self.wait + self.count_left + from_cur + rest)
+    }
+
     /// Absolute frame of the next allowed jump point.
     fn boundary(&self, q: Quantize) -> u64 {
         let sec = self.section(self.item);
-        let rem = sec.len().saturating_sub(self.fpos);
+        let rem = self.block_len(self.item).saturating_sub(self.fpos);
         let d = match q {
             Quantize::Now => self.fade,
             Quantize::SectionEnd => rem,
             Quantize::Bar => {
                 let s = (sec.start + self.fpos) as f64;
-                let off = self.song.offset as f64;
-                let bar = self.song.frames_per_bar();
-                let mut b = off + ((s - off) / bar).ceil() * bar;
+                let bpb = self.song.beats_per_bar as f64;
+                let mut nb = (self.song.beat_pos(s) / bpb).ceil() * bpb;
+                let mut b = self.song.beat_frame(nb);
                 if b - s < self.fade as f64 {
-                    b += bar;
+                    nb += bpb;
+                    b = self.song.beat_frame(nb);
                 }
                 ((b - s).round() as u64).max(self.fade)
             }
@@ -353,12 +415,12 @@ impl Engine {
     }
 
     fn contiguous(&self, a: usize, b: usize) -> bool {
-        self.section(a).end == self.section(b).start
+        self.block_len(a) == self.section(a).len() && self.section(a).end == self.section(b).start
     }
 
     /// Frames until the next point where the audio cuts to somewhere else.
     fn frames_to_cut(&self) -> Option<u64> {
-        let rem = self.section(self.item).len().saturating_sub(self.fpos);
+        let rem = self.block_len(self.item).saturating_sub(self.fpos);
         if let Some(p) = &self.pending {
             let d = p.at.saturating_sub(self.abs);
             if d == rem && self.contiguous(self.item, p.target) {
@@ -389,7 +451,7 @@ impl Engine {
         let sec = self.section(self.item);
         let (next, d) = match &self.pending {
             Some(p) => (Some(p.target), p.at.saturating_sub(self.abs)),
-            None => (self.natural_next(), sec.len().saturating_sub(self.fpos)),
+            None => (self.natural_next(), self.block_len(self.item).saturating_sub(self.fpos)),
         };
         if let Some(n) = next {
             let ns = self.arr.items[n].section;
@@ -400,7 +462,8 @@ impl Engine {
                 }
             }
         }
-        let silenced = self.song.calls.iter().flatten().any(|(cs, ce)| *ce == sec.end && src >= *cs && src < *ce);
+        let end = sec.start + self.block_len(self.item);
+        let silenced = self.song.calls.iter().flatten().any(|(cs, ce)| *ce == end && src >= *cs && src < *ce);
         if silenced {
             None
         } else {
@@ -410,11 +473,17 @@ impl Engine {
 
     fn target_gain(&self, i: usize) -> f32 {
         let m = &self.mix[i];
-        if m.muted || self.arr.items[self.item].muted_stems.contains(&i) {
-            0.0
-        } else {
-            m.gain
+        let it = &self.arr.items[self.item];
+        if m.muted || it.muted_stems.contains(&i) {
+            return 0.0;
         }
+        let mut g = m.gain;
+        for t in &it.trims {
+            if t.stem == i {
+                g *= t.gain(self.fpos);
+            }
+        }
+        g
     }
 
     fn snap_gains(&mut self) {
@@ -472,16 +541,24 @@ impl Engine {
         let ch = self.channels;
         let frames = out.len() / ch;
         let fade = self.fade as f32;
-        let fpb = self.song.frames_per_beat();
         let bpb = self.song.beats_per_bar as i64;
         for f in 0..frames {
             if !self.playing {
                 break;
             }
             let base = f * ch;
+            if self.wait > 0 {
+                self.wait -= 1;
+                self.abs += 1;
+                if self.wait == 0 {
+                    self.last_jump = Some(self.abs);
+                }
+                continue;
+            }
 
             // Count-in: one bar of click before the audio starts.
             if self.count_left > 0 {
+                let fpb = self.count_total as f64 / bpb.max(1) as f64;
                 let done = (self.count_total - self.count_left) as f64;
                 let beat = (done / fpb).floor() as i64;
                 if done - beat as f64 * fpb < 1.0 {
@@ -501,12 +578,12 @@ impl Engine {
             // Jumps and block changes.
             let due = self.pending.as_ref().filter(|p| self.abs >= p.at).map(|p| (p.target, p.from));
             if let Some((t, from)) = due {
-                let cut = from > 0 || !(self.fpos == self.section(self.item).len() && self.contiguous(self.item, t));
+                let cut = from > 0 || !(self.fpos == self.block_len(self.item) && self.contiguous(self.item, t));
                 self.pending = None;
                 self.enter(t, cut);
-                self.fpos = from.min(self.section(t).len().saturating_sub(1));
+                self.fpos = from.min(self.block_len(t).saturating_sub(1));
             }
-            if self.fpos >= self.section(self.item).len() {
+            if self.fpos >= self.block_len(self.item) {
                 match self.natural_next() {
                     Some(n) => {
                         let cut = !self.contiguous(self.item, n);
@@ -522,14 +599,20 @@ impl Engine {
 
             // Envelopes: stop fade, fade out before a cut, fade in after one.
             let mut master = 1.0f32;
-            if let Some(left) = self.stopping {
+            if let Some((left, total)) = self.stopping {
                 if left == 0 {
                     self.playing = false;
                     self.stopping = None;
                     break;
                 }
-                master = left as f32 / fade;
-                self.stopping = Some(left - 1);
+                master = left as f32 / total as f32;
+                self.stopping = Some((left - 1, total));
+            }
+            // A block that fades out (e.g. an ending cut short) takes the click with it.
+            if let Some((s, l)) = self.arr.items[self.item].fade_out {
+                if self.fpos >= s {
+                    master *= 1.0 - ((self.fpos - s) as f32 / l as f32).min(1.0);
+                }
             }
             let mut env = master;
             if let Some(d) = self.frames_to_cut() {
@@ -567,9 +650,9 @@ impl Engine {
             }
 
             // Click, locked to the song's own bar grid.
-            let rel = src as f64 - self.song.offset as f64;
-            let beat = (rel / fpb).floor() as i64;
-            if self.click_on && rel >= 0.0 && self.last_beat != Some(beat) && rel - beat as f64 * fpb < 1.0 {
+            let pos = self.song.beat_pos(src as f64);
+            let beat = pos.floor() as i64;
+            if self.click_on && pos >= 0.0 && self.last_beat != Some(beat) && src as f64 - self.song.beat_frame(beat as f64) < 1.0 {
                 self.trigger_click(beat.rem_euclid(bpb) == 0);
             }
             self.last_beat = Some(beat);
@@ -587,8 +670,10 @@ impl Engine {
         let it = self.item.min(self.arr.items.len() - 1);
         let sec = self.section(it);
         let src = (sec.start + self.fpos) as f64;
-        let beat = ((src - self.song.offset as f64) / self.song.frames_per_beat()).floor() as i64;
+        let pos = self.song.beat_pos(src);
+        let beat = pos.floor() as i64;
         let bpb = self.song.beats_per_bar as i64;
+        let end = self.song.beat_pos((sec.start + self.block_len(it)) as f64);
         Snapshot {
             playing: self.playing,
             counting_in: self.count_left > 0,
@@ -596,12 +681,14 @@ impl Engine {
             item: it,
             section: self.arr.items[it].section,
             frame_in_section: self.fpos,
-            section_frames: sec.len(),
+            section_frames: self.block_len(it),
             bar: beat.div_euclid(bpb) + 1,
             beat: beat.rem_euclid(bpb) as u32 + 1,
             pending: self.pending.as_ref().map(|p| p.target),
             frames_to_jump: self.pending.as_ref().map(|p| p.at.saturating_sub(self.abs)),
             vamp: self.vamp,
+            bars_left: ((end - pos) / bpb.max(1) as f64).max(0.0),
+            bpm: self.song.bpm_at(src),
         }
     }
 }
@@ -632,6 +719,7 @@ mod tests {
             stems: vec![StemInfo { name: "Ramp".into(), route: Route::Mono(0), gain: 1.0, muted: false }],
             guide_stem: None,
             calls: vec![],
+            beat_frames: vec![],
         };
         let arrangement = match arr {
             Some(names) => Arrangement::from_names(&song, names).unwrap(),
@@ -866,6 +954,125 @@ mod tests {
         let out = run(&mut e, 8000);
         // B has a call (6000..8000); the end of B now calls B again, not C
         assert_eq!(out[0][7000], 7000.0);
+    }
+
+    /// An engine for arrangement A, B, C with `edit` applied to its blocks.
+    fn rig_with(edit: impl FnOnce(&mut Arrangement)) -> Engine {
+        let e = rig(None);
+        let song = e.song().clone();
+        let mut arr = Arrangement::linear(&song);
+        edit(&mut arr);
+        let audio = StemAudio::mono((0..24000).map(|i| i as f32).collect());
+        let mut e = Engine::new(song, arr, vec![audio], CH).unwrap();
+        e.handle(Command::SetCountIn(false));
+        e.handle(Command::SetClick(false));
+        e
+    }
+
+    #[test]
+    fn a_trimmed_clip_plays_only_inside_its_trim() {
+        // Block B: the stem plays from 2000 to 6000 of the block, fading in over 1000.
+        let mut e = rig_with(|a| a.items[1].trims.push(Trim { stem: 0, start: 2000, end: 6000, fade_in: 1000, fade_out: 0 }));
+        e.handle(Command::Play);
+        let out = run(&mut e, 24000);
+        assert_eq!(out[0][7000], 7000.0, "A is untouched");
+        assert_eq!(out[0][8000 + 1500], 0.0, "B before the trim is silent");
+        let mid = out[0][8000 + 2500] / (8000.0 + 2500.0);
+        assert!((mid - 0.5).abs() < 0.02, "halfway through the fade-in: {mid}");
+        assert!((out[0][8000 + 4000] - 12000.0).abs() < 1.0, "fully in after the fade");
+        assert_eq!(out[0][8000 + 6500], 0.0, "silent after the trim ends");
+        assert!((out[0][16500] - 16500.0).abs() < 0.01, "C is untouched: {}", out[0][16500]);
+    }
+
+    #[test]
+    fn a_block_fade_out_ends_the_song_early() {
+        // The last block (C) fades out from 2000 over 4000 frames, then the song ends.
+        let mut e = rig_with(|a| a.items[2].fade_out = Some((2000, 4000)));
+        e.handle(Command::Play);
+        assert_eq!(e.frames_left(), Some(16000 + 6000));
+        let out = run(&mut e, 24000);
+        assert_eq!(out[0][16000 + 1000], 17000.0, "before the fade");
+        let half = out[0][16000 + 4000] / 20000.0;
+        assert!((half - 0.5).abs() < 0.01, "halfway down: {half}");
+        assert_eq!(out[0][16000 + 6000], 0.0);
+        assert!(!e.is_playing() && e.snapshot().finished, "the song ends when the fade does");
+    }
+
+    #[test]
+    fn a_faded_block_in_the_middle_moves_on_to_the_next() {
+        let mut e = rig_with(|a| a.items[0].fade_out = Some((4000, 2000)));
+        e.handle(Command::Play);
+        let out = run(&mut e, 7000);
+        assert!(out[0][5999] < 10.0, "A is faded out by 6000");
+        // B starts at frame 6000 of the output, with the usual short fade-in.
+        assert!((out[0][6000 + 100] - 8100.0).abs() < 1.0, "B follows straight after: {}", out[0][6100]);
+    }
+
+    #[test]
+    fn fade_out_command_fades_the_song_and_stops() {
+        let mut e = rig(None);
+        e.handle(Command::Play);
+        run(&mut e, 1000);
+        e.handle(Command::FadeOut(2000));
+        assert_eq!(e.frames_left(), None, "a fade-out is a stop, not the song ending");
+        let out = run(&mut e, 3000);
+        let half = out[0][1000] / 2000.0;
+        assert!((half - 0.5).abs() < 0.01, "{half}");
+        assert!(!e.is_playing());
+    }
+
+    #[test]
+    fn play_after_starts_on_the_exact_frame() {
+        let mut e = rig(None);
+        e.handle(Command::SetCountIn(true)); // ignored: a segue never counts in
+        e.handle(Command::PlayAfter(300));
+        assert_eq!(e.frames_left(), Some(300 + 24000));
+        let out = run(&mut e, 1000);
+        assert_eq!(out[0][299], 0.0);
+        assert!(out[0][300 + 100] == 100.0, "starts at frame 300 from the top: {}", out[0][400]);
+        assert!(e.is_playing());
+    }
+
+    #[test]
+    fn click_bars_and_jumps_follow_a_tempo_change() {
+        // 60 BPM for two bars (1000 frames a beat), then 120 BPM (500 a beat).
+        let mut e = rig(None);
+        let mut song = e.song().clone();
+        song.beat_frames = (0..=8).map(|k| k as f64 * 1000.0).chain((1..=32).map(|k| 8000.0 + k as f64 * 500.0)).collect();
+        let arr = Arrangement::linear(&song);
+        let audio = StemAudio::mono((0..24000).map(|i| i as f32).collect());
+        e = Engine::new(song, arr, vec![audio], CH).unwrap();
+        e.handle(Command::SetCountIn(false));
+        e.handle(Command::SetClick(true));
+        e.handle(Command::SetClickRoute(Route::Mono(3)));
+        e.handle(Command::Play);
+        let out = run(&mut e, 12000);
+        // A click is a sine starting at phase 0: its first non-zero sample is one after it starts.
+        let on: Vec<usize> = (1..12000).filter(|&i| out[3][i - 1] == 0.0 && out[3][i] != 0.0).map(|i| i - 1).collect();
+        assert_eq!(on, [0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500], "the click speeds up at bar 3");
+        let s = e.snapshot();
+        assert_eq!((s.bar, s.beat), (5, 1), "frame 12000: two bars at 60, then two at 120");
+        assert!((s.bpm - 120.0).abs() < 1e-9);
+        // "Next bar" lands on the next downbeat at the new tempo: bar 6, at frame 14000.
+        e.handle(Command::SetQuantize(Quantize::Bar));
+        run(&mut e, 300);
+        e.handle(Command::Next);
+        assert_eq!(e.snapshot().frames_to_jump, Some(14000 - 12300));
+        // B starts at 8000 and ends at 16000: (16000 - 12300) / 2000 frames a bar.
+        assert!((e.snapshot().bars_left - 1.85).abs() < 1e-9, "{}", e.snapshot().bars_left);
+    }
+
+    #[test]
+    fn frames_left_follows_jumps_and_vamps() {
+        let mut e = rig(None);
+        e.handle(Command::Play);
+        run(&mut e, 1000);
+        assert_eq!(e.frames_left(), Some(23000));
+        e.handle(Command::SetQuantize(Quantize::SectionEnd));
+        e.handle(Command::Goto(0)); // A again after A: one more block
+        assert_eq!(e.frames_left(), Some(7000 + 24000));
+        e.handle(Command::ToggleVamp);
+        assert_eq!(e.frames_left(), None);
     }
 
     #[test]

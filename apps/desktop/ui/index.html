@@ -72,7 +72,10 @@
       <div class="lprog"><i id="lvProg"></i></div>
     </div>
     <div class="lnext" id="lvNext"><div class="lbl" id="lvNextLbl">Next</div><div class="lnsec" id="lvNextSec">—</div></div>
-    <div class="lblocks" id="lvBlocks" aria-label="Arrangement: tap a section to go there"></div>
+    <div class="lstrip">
+      <div class="lblocks" id="lvBlocks" aria-label="Arrangement: tap a section to go there"></div>
+      <div class="fades" id="lvFades" aria-label="Fades and transition"></div>
+    </div>
   </div>
   <aside class="lset">
     <div class="lbl">Set</div>
@@ -101,6 +104,11 @@
   <div class="dhead"><h2>Song</h2><button class="ib" data-close>Close</button></div>
   <div id="songEmpty" class="hint">Load a song first.</div>
   <div id="songBody">
+    <div class="card">
+      <h3>Ending &amp; next song</h3>
+      <div class="fades stacked" id="songFades"></div>
+      <p class="hint">Set once per song. Trim a track inside a block by dragging its clip's edges in the lanes; drag the small handle at a clip's top corner for a fade.</p>
+    </div>
     <div class="card">
       <h3>Key &amp; tempo</h3>
       <div class="kt">
@@ -135,6 +143,7 @@
         <label>First downbeat (ms)<input id="f-off" type="number" min="0" step="1"></label>
       </div>
       <h3 class="gap">Grid</h3>
+      <p class="hint" id="tempoMap" hidden></p>
       <p class="hint">If every section starts early or late by the same amount, move the grid. Sections move with it.</p>
       <div class="row">
         <button class="btn" id="gBeatL">− 1 beat</button><button class="btn" id="gMsL">− 10 ms</button>

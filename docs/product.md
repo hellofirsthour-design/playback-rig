@@ -22,7 +22,7 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
 
 **Live / Edit** in the top bar (or L, or a learned MIDI button) switches pages; the app remembers the last one. The top bar (transport, display, Song, Setup) is the same on both.
 
-- **Live page** (Playback-style, readable from the keys): the current section huge, bars left, beat lights, a progress bar, then what's next ("Next", "In 2 bars → Chorus 2" when a jump is queued, "Vamping"). Below, every block as a big tile: tap one to go there. On the right, the set; the next song is highlighted.
+- **Live page** (Playback-style, readable from the keys): the current section huge, bars left, beat lights, a progress bar, then what's next ("Next", "In 2 bars → Chorus 2" when a jump is queued, "Vamping"). Below, the arrangement on one line that scrolls along with the song (tap a block to go there), and under it the **fades**: the song's ending, the way into the next song, pad under the ending and **Fade out now**. On the right, the set; the next song is highlighted, with → for a segue and ⤳ for a crossfade.
 - **Edit page:** the section rail and the arrangement view below.
 
 ## The main screen
@@ -46,6 +46,7 @@ It combines Ableton's arrangement view with MultiTracks Playback, in our own des
 - **Track order:** Click & guide, Drums, Percussion, Bass, Guitars, Keys, Other instruments, Vocals, FX. Within a group, numbers go in number order (EG 2 before EG 10).
 - **Buses:** built in are Click & guide, Drums & percussion (drums, loops, tambourine, shakers…), Bass, Guitars, Keys, Other instruments, Vocals and FX. Each has a header in the track list with level, mute and output; a bus output overrides its tracks' own outputs. **+ New bus** makes your own. Double-click a bus name to rename it. Drag a track's name onto a bus header to move it: that's remembered by track name, so it applies in every song. Deleting your own bus sends its tracks back to their usual bus. Buses are shared by every song.
 - **Drag and drop:** dropping a song folder on the window adds it to the set. Dropping audio files while a song is loaded copies them in next to its stems as new tracks, starting at bar 1 (export new parts from the song's start). A name clash gets a number, so nothing is overwritten.
+- **Tempo changes follow automatically.** When a song's tempo jumps or ramps, the app reads every beat off the Click track (eighth-note clicks included), or from the Ableton set's tempo automation when there's no click. The grid, the ruler, the built-in click, "Next bar" jumps, bar/beat, bars left and the guide's calls all follow it, and the Ableton markers are placed where they fall in the audio. A steady song (within 1%) keeps its simple grid. The Song panel lists the changes ("bar 9: 84"); setting a tempo by hand, or reading the guide, goes back to one steady tempo.
 - **Count-in is off by default.** The Count-in button turns it on.
 - **Pads:** Setup → Pads takes a folder with one sustained pad per key (MultiTracks pad packs). The Pad button (or pedal 4 hold) fades in the pad for the current song's key, including any key change. It crossfades when the next song is in a different key and keeps playing between songs.
 - **Click songs:** Set → New click song builds a song with no tracks from a tempo, key and a list of sections. It generates a Click stem and a spoken Guide (the Mac's voice counts in and calls each section in the bar before it), saved under Music → Playback Rig → Click Songs.
@@ -75,13 +76,18 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 - **Reorder** section blocks, and repeat or remove them.
 - **Change stems per block:** for example, drums out in verse 1 or keys only in the bridge.
 - **Tempo and key.** Pitch-shifting full stems gets audibly worse past about ±2 semitones, so for bigger key changes we recommend downloading the stems in the right key from MultiTracks.
-- **Clip editing** on a timeline: trim, fade and move clips.
+- **Clip editing** on the timeline: drag a clip's left or right edge to trim that track inside that block (snaps to the beat; Alt for fine). Drag the small handle at a clip's top corner for a fade-in or fade-out. Backspace on a selected clip removes its trim. Trims move with their block and work while playing.
 
 ## Songs and transitions
 
 - **Stems come from MultiTracks and Loop Community downloads.**
 - **The guide stem is cut by section.** Each section's call (the cue and its count, from just before the speech to the section's downbeat, at most two bars) belongs to that section. In the last stretch of any block, the guide plays the call for whatever block actually comes next: the planned next block, a live jump, a repeat or a vamp. Duplicate an Outro and the guide says "Outro" before the second one, then "Ending" after it. A call recorded there for a section that isn't coming is silenced. A section with no call gets silence, never a wrong call.
-- **Each song has its own transition setting:** segue into the next song, end and wait, or pad underneath. Pads follow the song's key.
+- **Each song has its own ending and transition**, set once (Live page fades bar, or Song → Ending & next song):
+  - **Ending:** play out, or fade out from bar N of the last block over M bars (for long endings like See a Victory's). The click fades with it, and the song ends when the fade does.
+  - **Into the next song:** Stop (wait), Segue (the next song starts the moment this one ends, exact to the sample), or Crossfade over N bars (the next song starts N bars before the end while this one fades out). At the handoff the old song's click and guide go silent, so the in-ears only hear the new song's click. A stop or a vamp never starts the next song.
+  - **Pad under ending:** the pad comes in (this song's key) when the last block starts and carries into the next song.
+  - **Fade out now:** fades the song over 2 bars and stops (also a learnable MIDI button).
+- **The next song is always loaded in the background,** so a segue is instant and switching songs after a stop doesn't wait.
 
 ## Rig
 
@@ -118,7 +124,7 @@ Every control is assigned by MIDI learn, so any pedal or controller works.
 2. **Song transitions:** crossfade or segue into the next song, with pads carrying across.
 3. ~~Dynamic guide cues~~ *Done in 0.6.0.*
 4. ~~Live page and Edit page~~ *Done in 0.6.1.*
-5. **Transitions per song:** crossfade or overlap into the next song, auto fade-out of long endings.
-6. **Clip trimming and automation:** trim a clip's start or end in a lane (e.g. vocals off for the first half), volume automation.
+5. ~~Transitions per song, ending fades~~ *Done in 0.6.2.*
+6. ~~Clip trimming and clip fades; tempo changes~~ *Done in 0.6.2.* Still to do: volume automation drawn over a whole lane.
 7. Song and key changes stay instant: preload the next song in the set, so switching never waits.
 8. Planning Center sync.
