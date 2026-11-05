@@ -29,6 +29,11 @@ jobs:
     runs-on: macos-15
     permissions:
       contents: write
+    env:
+      # Build the speech model library (whisper.cpp) for any Apple Silicon Mac, not
+      # tuned to the build machine's CPU: on macos-15 the tuning breaks the compile,
+      # and a build tuned to a newer chip could crash on an older Mac.
+      WHISPER_NATIVE: "OFF"
     steps:
       - uses: actions/checkout@v4
       - name: Is this version already released?
