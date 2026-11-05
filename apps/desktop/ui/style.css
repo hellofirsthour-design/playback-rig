@@ -219,7 +219,8 @@ body { grid-template-columns: minmax(0, 1fr) }
 }
 .busrow { height: 46px; display: flex; flex-direction: column; justify-content: center; gap: 3px; padding: 0 8px 0 4px; background: #191b1f; border-bottom: 1px solid var(--line) }
 .busrow .bt { display: grid; grid-template-columns: 18px minmax(0, 1fr) 18px 24px; gap: 4px; align-items: center }
-.busrow .bb { display: grid; grid-template-columns: minmax(0, 1fr) 96px; gap: 6px; align-items: center; padding-left: 22px }
+.busrow .bb { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding-left: 22px }
+.busrow .busout { font: 11px var(--f-mono); color: var(--muted); white-space: nowrap }
 .busrow b { font: 700 11px var(--f-ui); letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 .busrow.off b { color: var(--dim); text-decoration: line-through }
 .busrow .fold { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0 }

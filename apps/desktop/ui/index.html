@@ -170,10 +170,6 @@
       <div class="markers" id="markers"></div>
       <div class="row between"><button class="btn" id="addMarker">Add section</button><button class="btn accent" id="songSave">Save song</button></div>
     </div>
-    <div class="card">
-      <h3>Outputs</h3>
-      <div class="routes" id="routes"></div>
-    </div>
   </div>
 </aside>
 
@@ -184,7 +180,12 @@
     <h3>Audio output</h3>
     <div class="form one">
       <label>Interface<select id="outSel"></select></label>
-      <label>Click goes to<select id="clickRoute"></select></label>
+    </div>
+    <h3 class="gap">Outputs</h3>
+    <p class="hint">Route buses, not tracks: every track goes where its bus goes. This is one setting for every song, remembered for each interface.</p>
+    <div class="routes" id="busRoutes"></div>
+    <div class="form one" style="margin-top:8px">
+      <label>Built-in click goes to<select id="clickRoute"></select></label>
       <label>Click level<input id="clickGain" type="range" min="0" max="1.5" step="0.01"></label>
     </div>
     <p class="hint" id="outHint"></p>

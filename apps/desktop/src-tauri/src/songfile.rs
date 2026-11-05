@@ -146,10 +146,6 @@ pub struct SongFile {
     /// default mix in Settings.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub bus_mix: std::collections::BTreeMap<String, BusLevel>,
-    /// Track outputs chosen on a particular audio interface: interface name -> track
-    /// name -> output. Tracks not listed use their `route`.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub device_routes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Route>>,
 }
 
 /// Raise to make songs set up automatically by an older version set up again.
@@ -346,7 +342,6 @@ impl SongFile {
                 ending: None,
                 beat_times: vec![],
                 bus_mix: Default::default(),
-                device_routes: Default::default(),
             },
         };
         // Songs set up automatically by an older version are set up again: the tempo
@@ -753,7 +748,6 @@ mod tests {
                 ending: None,
                 beat_times: vec![],
                 bus_mix: Default::default(),
-                device_routes: Default::default(),
         };
         let (song, arr) = sf.build(1000, 20_000).unwrap();
         let names: Vec<&str> = song.sections.iter().map(|s| s.name.as_str()).collect();

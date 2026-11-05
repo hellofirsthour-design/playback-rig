@@ -53,6 +53,9 @@ struct Settings {
     routing_device: Option<String>,
     /// Routing remembered for every other interface, by name.
     device_routing: std::collections::BTreeMap<String, DeviceRouting>,
+    /// Outputs on the interface in use (not saved; set when it opens).
+    #[serde(skip)]
+    out_channels: usize,
     /// 0.5.0's per-group buses (read once to carry their settings over; never written).
     #[serde(skip_serializing)]
     buses: Vec<Bus>,
@@ -175,9 +178,13 @@ impl Settings {
     }
 }
 
-/// A track's own output on the interface in use (before any bus output).
-fn stem_route(settings: &Settings, file: &SongFile, st: &songfile::StemFile) -> Route {
-    settings.routing_device.as_ref().and_then(|d| file.device_routes.get(d)).and_then(|m| m.get(&st.name)).copied().unwrap_or(st.route)
+impl Settings {
+    /// Where a bus goes. Routing is by bus only: every track goes where its bus goes.
+    /// Not set: Click & guide to the in-ears (3-4 on an interface with 4+ outputs), the
+    /// rest to 1-2.
+    fn bus_route(&self, id: &str) -> Route {
+        self.bus_list.iter().find(|b| b.id == id).and_then(|b| b.route).unwrap_or(if id == "cues" { songfile::default_route("click", self.out_channels) } else { Route::Pair(0) })
+    }
 }
 
 /// What the engine plays for a stem once its bus is applied: (gain, muted, route).
@@ -186,7 +193,7 @@ fn effective(settings: &Settings, file: &SongFile, st: &songfile::StemFile) -> (
     let id = settings.bus_id_for(&st.name);
     let b = settings.bus_for(&st.name);
     let (g, m) = file.bus_mix.get(&id).map_or((b.gain, b.muted), |l| (l.gain, l.muted));
-    (st.gain * g, st.muted || m, b.route.unwrap_or_else(|| stem_route(settings, file, st)))
+    (st.gain * g, st.muted || m, settings.bus_route(&id))
 }
 
 /// Sends every stem's bus-applied level, mute and output to the engine.
@@ -218,6 +225,7 @@ impl Default for Settings {
             free_click_bpb: 4,
             routing_device: None,
             device_routing: Default::default(),
+            out_channels: 2,
             buses: vec![],
             bus_list: vec![],
             bus_of_track: Default::default(),
@@ -520,6 +528,7 @@ fn watch_audio(app: &AppHandle, st: &AppState) {
         }
         recover::Step::Open(name) => {
             if let Ok(info) = open_output(&st.core, app, name) {
+                st.settings.lock().unwrap().out_channels = info.channels;
                 if st.settings.lock().unwrap().switch_device(&info.name) {
                     st.save_settings();
                 }
@@ -1021,6 +1030,15 @@ struct AppView {
     free_click: FreeClickView,
     /// The loaded song has its own mix (bus levels saved with it).
     song_mix: bool,
+    /// Every bus and where it goes on the interface in use (Setup → Outputs).
+    all_buses: Vec<BusOut>,
+}
+
+#[derive(Serialize)]
+struct BusOut {
+    id: String,
+    name: String,
+    route: Route,
 }
 
 #[derive(Serialize)]
@@ -1071,13 +1089,7 @@ fn view(state: &AppState) -> AppView {
         let g = state.song.lock().unwrap();
         let names: Vec<String> = g.as_ref().map(|l| l.file.stems.iter().map(|st| st.name.clone()).collect()).unwrap_or_default();
         let mix = g.as_ref().map(|l| l.file.bus_mix.clone()).unwrap_or_default();
-        let sv = g.as_ref().map(|l| {
-            let mut v = SongView::from(l);
-            for (x, st) in v.stems.iter_mut().zip(&l.file.stems) {
-                x.route = stem_route(&s, &l.file, st);
-            }
-            v
-        });
+        let sv = g.as_ref().map(SongView::from);
         (sv, g.as_ref().and_then(|l| song_key_pc(&l.file)).map(|pc| pads::NAMES[pc as usize].to_string()), names, mix)
     };
     // Buses in their own order, each with this song's tracks in track-list order.
@@ -1087,7 +1099,7 @@ fn view(state: &AppState) -> AppView {
         .iter()
         .map(|b| {
             let (gain, muted) = bus_mix.get(&b.id).map_or((b.gain, b.muted), |l| (l.gain, l.muted));
-            BusView { id: b.id.clone(), custom: b.custom, name: b.name.clone(), gain, muted, route: b.route, stems: vec![] }
+            BusView { id: b.id.clone(), custom: b.custom, name: b.name.clone(), gain, muted, route: Some(s.bus_route(&b.id)), stems: vec![] }
         })
         .collect();
     for (i, n) in stem_names.iter().enumerate() {
@@ -1097,6 +1109,7 @@ fn view(state: &AppState) -> AppView {
         }
     }
     buses.retain(|b| b.custom || !b.stems.is_empty());
+    let all_buses: Vec<BusOut> = s.bus_list.iter().map(|b| BusOut { id: b.id.clone(), name: b.name.clone(), route: s.bus_route(&b.id) }).collect();
     let midi = state.midi.lock().unwrap().as_ref().map(|m| m.name.clone());
     let next_ready = state.next.lock().unwrap().loaded.is_some();
     let pad_choice = *state.pad_choice.lock().unwrap();
@@ -1139,6 +1152,7 @@ fn view(state: &AppState) -> AppView {
         },
         free_click,
         song_mix: !bus_mix.is_empty(),
+        all_buses,
     }
 }
 
@@ -1209,6 +1223,7 @@ async fn choose_output(app: AppHandle, state: State<'_, AppState>, name: Option<
     {
         let mut s = state.settings.lock().unwrap();
         s.output = Some(info.name.clone());
+        s.out_channels = info.channels;
         s.switch_device(&info.name);
     }
     state.save_settings();
@@ -1350,7 +1365,6 @@ enum UiCmd {
     BusMute { bus: String, muted: bool },
     /// None: the group's stems use their own outputs.
     BusRoute { bus: String, route: Option<Route> },
-    StemRoute { stem: usize, route: Route },
     /// Fade the song out over this many bars and stop.
     FadeOut { bars: f64 },
 }
@@ -1535,25 +1549,6 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 save_settings = true;
                 if let Some(l) = song.as_ref() {
                     push_mix(core, &s, &l.file);
-                }
-            }
-            UiCmd::StemRoute { stem, route } => {
-                // Remembered for this interface; other interfaces keep their own.
-                if let Some(l) = song.as_mut() {
-                    if let Some(name) = l.file.stems.get(stem).map(|st| st.name.clone()) {
-                        match s.routing_device.clone() {
-                            Some(dev) => {
-                                l.file.device_routes.entry(dev).or_default().insert(name, route);
-                            }
-                            None => l.file.stems[stem].route = route,
-                        }
-                        save_song = true;
-                    }
-                }
-                if let Some(l) = song.as_ref() {
-                    if let Some(st) = l.file.stems.get(stem) {
-                        core.send(Command::SetStemRoute(stem, effective(&s, &l.file, st).2));
-                    }
                 }
             }
         }
@@ -2192,6 +2187,7 @@ fn main() {
             let opened = open_output(&core, &handle, settings.output.clone()).or_else(|_| open_output(&core, &handle, None));
             match opened {
                 Ok(info) => {
+                    settings.out_channels = info.channels;
                     if settings.switch_device(&info.name) {
                         write_json(&core.config_dir.join("settings.json"), &settings);
                     }
@@ -2447,22 +2443,28 @@ mod tests {
         assert_eq!(effective(&st, &own, eg), (0.8, false, Route::Pair(4)), "the song's mix wins, the output stays the bus's");
         assert_eq!(effective(&st, f, eg).0, 0.5, "other songs keep the default mix");
 
-        // routing remembered per interface
+        // Routing is by bus only, one master setting for every song, remembered per interface.
         let mut st = Settings::default();
+        st.out_channels = 10;
+        let click = f.stems.iter().find(|s| s.name == "Click Track").unwrap().clone();
+        let bgv = f.stems.iter().find(|s| s.name == "BGV").unwrap().clone();
+        assert_eq!(effective(&st, f, &click).2, Route::Pair(2), "Click & guide bus: in-ears on 3-4 by default");
+        assert_eq!(effective(&st, f, &bgv).2, Route::Pair(0), "every other bus: 1-2 by default");
         assert!(!st.switch_device("UMC1820"), "the first interface keeps the routing set up so far");
         st.click_route = Some(Route::Pair(2));
-        st.bus_mut("guitars").unwrap().route = Some(Route::Pair(6));
-        let mut own = f.clone();
-        own.device_routes.entry("UMC1820".into()).or_default().insert("BGV".into(), Route::Pair(8));
-        let bgv = own.stems.iter().find(|s| s.name == "BGV").unwrap().clone();
-        assert_eq!(effective(&st, &own, &bgv).2, Route::Pair(8), "BGV to 9-10 on the Behringer");
+        st.bus_mut("vocals").unwrap().route = Some(Route::Pair(8));
+        assert_eq!(effective(&st, f, &bgv).2, Route::Pair(8), "BGV goes where the Vocals bus goes");
+        let mut other = f.clone();
+        other.stems.iter_mut().for_each(|s| s.route = Route::Pair(4)); // a track's own output doesn't matter
+        assert_eq!(effective(&st, &other, &bgv).2, Route::Pair(8), "same in every song");
         assert!(st.switch_device("MacBook Air Speakers"));
-        assert_eq!((st.click_route, st.bus_for("EG 1").route), (None, None), "a new interface starts from its defaults");
-        assert_eq!(effective(&st, &own, &bgv).2, bgv.route, "BGV's Behringer output doesn't follow it to the laptop");
+        st.out_channels = 2;
+        assert_eq!((st.click_route, st.bus_for("BGV").route), (None, None), "a new interface starts from its defaults");
+        assert_eq!(effective(&st, f, &click).2, Route::Pair(0), "2 outputs: everything on 1-2");
         st.click_route = Some(Route::Pair(0));
         assert!(st.switch_device("UMC1820"));
-        assert_eq!((st.click_route, st.bus_for("EG 1").route), (Some(Route::Pair(2)), Some(Route::Pair(6))), "the Behringer's routing comes back");
-        assert_eq!(effective(&st, &own, &bgv).2, Route::Pair(8));
+        st.out_channels = 10;
+        assert_eq!((st.click_route, st.bus_for("BGV").route), (Some(Route::Pair(2)), Some(Route::Pair(8))), "the Behringer's routing comes back");
         assert!(st.switch_device("MacBook Air Speakers"));
         assert_eq!(st.click_route, Some(Route::Pair(0)), "and the laptop's");
 

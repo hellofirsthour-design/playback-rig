@@ -87,6 +87,13 @@
     if (/string|orch|horn|brass|cello|violin/.test(n)) return '#36c9b0';
     return STEM_FALLBACK[i % STEM_FALLBACK.length];
   }
+  // "Out 3-4" / "Out 5" for a route, as in the output menus.
+  function routeLabel(r) {
+    if (!r) return '';
+    if (r.Pair != null) return `Out ${r.Pair + 1}-${r.Pair + 2}`;
+    if (r.Mono != null) return `Out ${r.Mono + 1}`;
+    return '';
+  }
   function routeOptions(sel, current) {
     const n = V.output ? V.output.channels : 2;
     sel.innerHTML = '';
@@ -688,16 +695,11 @@
         f.oninput = () => { b.gain = +f.value; send({ type: 'BusGain', bus: b.id, gain: b.gain }); };
         const m = el('button', 'm' + (b.muted ? ' on' : ''), 'M'); m.title = `Mute all of ${b.name}`; m.setAttribute('aria-pressed', b.muted);
         m.onclick = async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); if (solo.size) applySolo(); renderHeads(); dirty = true; };
-        const sel = el('select'); sel.setAttribute('aria-label', `${b.name} bus output`);
-        routeOptions(sel, b.route || { Pair: 0 });
-        sel.prepend(new Option('Own outputs', 'own')); if (!b.route) sel.value = 'own';
-        sel.title = 'Send this whole bus to one output';
-        sel.onchange = () => { b.route = sel.value === 'own' ? null : keyRoute(sel.value); send({ type: 'BusRoute', bus: b.id, route: b.route }); renderSongDrawer(); };
         const top = el('div', 'bt'); top.append(fold, nm);
         if (b.custom) { const x = el('button', 'del', '✕'); x.title = `Delete ${b.name} (its tracks go back to their usual bus)`; x.setAttribute('aria-label', x.title); x.onclick = () => busEdit({ type: 'Delete', bus: b.id }); top.append(x); }
         else top.append(el('span'));
         top.append(m);
-        const bot = el('div', 'bb'); bot.append(f, sel);
+        const bot = el('div', 'bb'); bot.append(f, el('span', 'busout', routeLabel(b.route)));
         r.append(top, bot);
         box.append(r);
         return;
@@ -1125,15 +1127,6 @@
     }
     renderMarkers();
     renderKeyTempo();
-    const rb = $('#routes'); rb.innerHTML = '';
-    s.stems.forEach((st, i) => {
-      const r = el('div', 'rt'); const sel = el('select'); sel.setAttribute('aria-label', `${st.name} output`); routeOptions(sel, st.route);
-      sel.onchange = () => { st.route = keyRoute(sel.value); send({ type: 'StemRoute', stem: i, route: st.route }); };
-      // A bus with its own output overrides the stem's.
-      const bus = (V.buses || []).find(b => b.stems.includes(i));
-      if (bus && bus.route) { sel.disabled = true; sel.title = `Going to the ${bus.name} bus output. Set that bus to "Own outputs" to choose per track.`; }
-      r.append(el('span', null, st.name + (bus && bus.route ? ` · via ${bus.name}` : '')), sel); rb.append(r);
-    });
   }
   let kt = null; // { transpose, bpm } being edited
   function renderKeyTempo() {
@@ -1223,9 +1216,16 @@
     V.outputs.forEach(o => os.append(new Option(`${o.name} (${o.channels} outputs)${o.is_default ? ' · default' : ''}`, o.name)));
     if (V.output) os.value = V.output.name;
     routeOptions($('#clickRoute'), V.click_route);
+    // Outputs: every bus, one master setting (per interface).
+    const br = $('#busRoutes'); br.innerHTML = '';
+    (V.all_buses || []).forEach(b => {
+      const r = el('div', 'rt'); const sel = el('select'); sel.setAttribute('aria-label', `${b.name} output`); routeOptions(sel, b.route);
+      sel.onchange = () => { b.route = keyRoute(sel.value); send({ type: 'BusRoute', bus: b.id, route: b.route }).then(() => refresh()); };
+      r.append(el('span', null, b.name), sel); br.append(r);
+    });
     if (document.activeElement !== $('#clickGain')) $('#clickGain').value = V.click_gain;
-    $('#outHint').textContent = ((V.output && V.output.channels >= 4) ? 'Stems start on Out 1-2 (front of house); click and guide on Out 3-4 (in-ears). Change any stem in Song → Outputs.' : 'Only 2 outputs. Pick your audio interface to send click and guide to the in-ears separately.')
-      + ' Outputs are remembered for each interface: plug in another one and it gets its own routing; plug this one back in and yours comes back. If it is unplugged mid-service, the set stays loaded and it reconnects by itself.';
+    $('#outHint').textContent = ((V.output && V.output.channels >= 4) ? 'By default Click & guide go to Out 3-4 (in-ears) and every other bus to Out 1-2 (front of house).' : 'Only 2 outputs, so everything plays on 1-2. Pick your audio interface to send click and guide to the in-ears.')
+      + ' Plug in another interface and it gets its own routing; plug this one back in and yours comes back. If it is unplugged mid-service, the set stays loaded and it reconnects by itself.';
     renderPads();
     const ms = $('#midiSel'); ms.innerHTML = ''; ms.append(new Option('None', '')); V.midi_inputs.forEach(m => ms.append(new Option(m, m))); ms.value = V.midi || '';
     const rows = [...LEARN, ...(V.song ? V.song.stems.map((st, i) => ({ label: `${st.name} fader`, tap: { StemLevel: i } })) : [])];
