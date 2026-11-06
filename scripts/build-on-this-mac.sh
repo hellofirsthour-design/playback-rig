@@ -36,15 +36,18 @@ if ! command -v cargo >/dev/null 2>&1; then
   . "$HOME/.cargo/env"
 fi
 
-# 3. CMake (needed for the speech model that reads the guide track).
+# 3. CMake (needed for the speech model that reads the guide track). A copy installed by an
+#    earlier run lives in Python's user folder: look there first.
+PYUSER_BIN="$(python3 -m site --user-base 2>/dev/null)/bin"
+[ -x "$PYUSER_BIN/cmake" ] && PATH="$PYUSER_BIN:$PATH" && export PATH
 if ! command -v cmake >/dev/null 2>&1; then
   if command -v brew >/dev/null 2>&1; then
     say "Installing CMake with Homebrew"
     brew install cmake
   else
     say "Installing CMake (for your user only)"
-    python3 -m pip install --user --quiet cmake
-    PATH="$(python3 -m site --user-base)/bin:$PATH"
+    python3 -m pip install --user --quiet --disable-pip-version-check cmake
+    PATH="$PYUSER_BIN:$PATH"
     export PATH
   fi
 fi
