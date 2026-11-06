@@ -178,7 +178,7 @@
   /* ---------- top bar ---------- */
   function renderSongMeta() {
     const s = V && V.song;
-    $('#songMeta').textContent = s ? `${tempoText(s)} · ${s.beats_per_bar}/${s.meter_den || 4}${s.key || s.transpose ? ' · ' + keyName(s.key, s.transpose) : ''}${s.transpose ? ` (${s.transpose > 0 ? '+' : ''}${s.transpose})` : ''}` : '';
+    $('#songMeta').textContent = s ? `${tempoText(s)} · ${s.beats_per_bar}/${s.meter_den || 4}${s.key ? ' · ' + keyName(s.key, s.transpose) : ''}` : '';
   }
   function renderBar() {
     const s = V.song;
@@ -301,8 +301,8 @@
     });
     renderFades($('#lvFades'));
     renderLiveTab();
-    const sk = V.song;
-    $('#lvKey').textContent = sk ? (sk.key ? keyName(sk.key, sk.transpose) : (sk.transpose ? (sk.transpose > 0 ? '+' : '') + sk.transpose : '—')) : '—';
+    if (keyFor !== (V.song && V.song.name)) { keyFor = V.song && V.song.name; keyTarget = null; }
+    showKey();
     liveFollowed = -1;
     const set = $('#lvSet'); set.innerHTML = '';
     (V ? V.setlist : []).forEach((s, i) => {
@@ -391,10 +391,23 @@
     } else if (liveTab === 'pads') {
       const pd = V.pads;
       if (!pd.folder) {
-        box.append(el('p', 'hint', 'Choose a folder with one pad per key (MultiTracks pad packs work).'));
+        box.append(el('p', 'hint', 'Choose a folder with one pad per key (MultiTracks pad packs work). Add as many sounds as you like; each one stays in the list.'));
         const b = el('button', 'btn', 'Choose pads folder'); b.onclick = () => invoke('choose_pads_folder').then(refresh).catch(err); box.append(b);
         return;
       }
+      // Sounds: every pad folder added stays here; tap one to switch (a playing pad crossfades).
+      const snd = el('div', 'psounds');
+      snd.append(el('span', 'lbl', 'Sound'));
+      (pd.sounds || []).forEach((n, i) => {
+        const b = el('button', 'psnd' + (i === pd.sound ? ' on' : ''), n); b.title = i === pd.sound ? `${n} (in use)` : `Switch to ${n}`;
+        b.onclick = () => { if (i !== pd.sound) invoke('pad_sound', { index: i, remove: null }).then(refresh).catch(err); };
+        b.oncontextmenu = e => { e.preventDefault(); if (confirm(`Remove "${n}" from the pad sounds? (The files stay where they are.)`)) invoke('pad_sound', { index: i, remove: true }).then(refresh).catch(err); };
+        snd.append(b);
+      });
+      const add = el('button', 'psnd add', '+ Add sound'); add.title = 'Add another pad folder (one file per key). Right-click a sound to remove it.';
+      add.onclick = () => invoke('choose_pads_folder').then(refresh).catch(err);
+      snd.append(add);
+      box.append(snd);
       const row = el('div', 'prow');
       const on = el('button', 'btn big tog pad' + (pd.on ? ' on' : ''), pd.on ? 'Pad on' : 'Pad off'); on.onclick = () => togglePad();
       const songBtn = el('button', 'btn big' + (pd.on && !pd.chosen ? ' on' : ''), pd.song_key ? `Song key (${pd.song_key})` : 'Song key');
@@ -407,14 +420,55 @@
       const playing = pd.on ? (pd.chosen || pd.song_key) : null;
       ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'].forEach(k => {
         const b = el('button', (k === playing ? 'on' : '') + (k === pd.song_key ? ' song' : ''), k);
-        b.disabled = !pd.keys.includes(k); b.title = b.disabled ? `No ${k} pad in your folder` : `Play the ${k} pad`;
+        b.disabled = !pd.keys.includes(k); b.title = b.disabled ? `No ${k} pad in this sound` : `Play the ${k} pad`;
         b.onclick = () => invoke('pad_key', { key: k }).then(refresh).catch(err);
         keys.append(b);
       });
       box.append(keys);
+      // This song: how the pad starts and ends it (saved with the song, done for you while it plays).
+      if (V.song) {
+        const tr = { ...V.song.transition };
+        const card = el('div', 'psong');
+        card.append(el('div', 'lbl', 'This song'));
+        const r1 = el('div', 'prow');
+        r1.append(el('span', 'plbl', 'Start'), seg([['Off', 'No pad'], ['Intro', 'Pad through intro'], ['Song', 'Pad whole song']], tr.pad_start || 'Off', v => {
+          if (v !== 'Off' && !pd.folder) { toast('Choose your pads folder first.'); return; }
+          setTransition({ ...tr, pad_start: v });
+        }, 'How the pad starts this song'));
+        const r2 = el('div', 'prow');
+        const end = el('button', 'tog pad' + (tr.pad ? ' on' : ''), 'Pad under ending');
+        end.title = "Brings the pad in when the last block starts and keeps it going into the next song";
+        end.onclick = () => setTransition({ ...tr, pad: !tr.pad });
+        r2.append(el('span', 'plbl', 'End'), end);
+        const hint = { Off: 'The song starts with no pad.', Intro: 'The pad comes in when you press play and fades out when the intro ends.', Song: 'The pad comes in when you press play and stays under the whole song.' }[tr.pad_start || 'Off'];
+        card.append(r1, el('p', 'hint', hint), r2);
+        box.append(card);
+      }
     } else {
       const fc = V.free_click || { on: false, bpm: 120, beats_per_bar: 4 };
-      const c = el('div', 'clk');
+      const cards = el('div', 'ccards');
+      // The song's click: the same switches as the top bar, plus level, output and big beat lights.
+      const sc = el('div', 'ccard');
+      sc.append(el('div', 'lbl', V.song ? `Song click · ${V.song.name}` : 'Song click'));
+      const beats = el('div', 'cbeats'); const nb = V.song ? Math.min(12, V.song.beats_per_bar) : 4;
+      for (let i = 0; i < nb; i++) beats.append(el('i', i ? null : 'one'));
+      sc.append(beats);
+      const r1 = el('div', 'crow');
+      const bc = el('button', 'tog big' + (V.song && V.song.click ? ' on' : ''), 'Built-in click'); bc.disabled = !V.song;
+      bc.title = "The app's own click for this song, in time with the tracks (the song's Click Track is on the Click & guide bus)";
+      bc.onclick = () => { $('#clickBtn').click(); renderLiveTab(); };
+      const ci = el('button', 'tog big' + (V.count_in ? ' on' : ''), 'Count-in'); ci.title = 'One bar of click before the song starts';
+      ci.onclick = () => { $('#countBtn').click(); renderLiveTab(); };
+      r1.append(bc, ci);
+      const r2 = el('div', 'crow');
+      const lv = el('input'); lv.type = 'range'; lv.min = 0; lv.max = 1.5; lv.step = 0.01; lv.value = V.click_gain; lv.setAttribute('aria-label', 'Click level');
+      const lvv = el('span', 'cval', Math.round(V.click_gain * 100) + '%');
+      lv.oninput = () => { V.click_gain = +lv.value; lvv.textContent = Math.round(V.click_gain * 100) + '%'; send({ type: 'ClickGain', gain: V.click_gain }); };
+      r2.append(el('span', 'plbl', 'Level'), lv, lvv);
+      sc.append(r1, r2, el('p', 'hint', 'Its output is set once for every song in Setup → Outputs.'));
+      // The free click: a click with no song.
+      const c = el('div', 'ccard');
+      c.append(el('div', 'lbl', 'Click with no song'));
       const set = (on, bpm, bpb) => invoke('free_click', { on, bpm, beatsPerBar: bpb }).then(refresh).catch(err);
       const dn = el('button', 'ib', '−'), up = el('button', 'ib', '+');
       dn.setAttribute('aria-label', 'Slower'); up.setAttribute('aria-label', 'Faster');
@@ -429,21 +483,44 @@
       go.onclick = () => set(!fc.on, fc.bpm, fc.beats_per_bar);
       const meter = seg([[2, '2/4'], [3, '3/4'], [4, '4/4'], [6, '6/8']], fc.beats_per_bar, v => set(fc.on, fc.bpm, v), 'Beats per bar');
       const song = el('button', 'btn', 'Song tempo'); song.disabled = !V.song; song.onclick = () => set(fc.on, Math.round(playBpm() * 100) / 100, V.song.beats_per_bar);
-      c.append(go, dn, el('span', 'bpm', String(+fc.bpm.toFixed(2))), up, el('span', 'lbl', 'BPM'), tap, meter, song);
-      box.append(c, el('p', 'hint', 'A click with no song: run it between songs, during announcements, or for a song with no tracks. It plays on the click output at the click level, and stops when a song starts. (Also on a MIDI button: Setup → MIDI.)'));
+      const tempo = el('div', 'clk');
+      tempo.append(dn, el('span', 'bpm screen', String(+fc.bpm.toFixed(2))), up, el('span', 'lbl', 'BPM'));
+      const ctl = el('div', 'clk');
+      ctl.append(go, tap, song);
+      c.append(tempo, el('div', 'crow', null), ctl, meter, el('p', 'hint', 'Between songs, during announcements, or for a song with no tracks. Plays on the click output at the click level and stops when a song starts. Also on a MIDI button (Setup → MIDI).'));
+      cards.append(sc, c);
+      box.append(cards);
     }
   }
   let taps = [];
-  async function liveKey(d) {
+  // Key change, staged: tap − / + as many times as you like (nothing happens to the tracks
+  // yet), then "Change key" re-pitches them once. Cancel goes back.
+  let keyTarget = null, keyFor = null;
+  const keyLabel = (s, t) => s.key ? keyName(s.key, t) : (t ? (t > 0 ? '+' : '') + t : '—');
+  function showKey() {
+    const s = V && V.song, pend = !!s && keyTarget != null && keyTarget !== s.transpose;
+    $('#lvKey').textContent = s ? keyLabel(s, pend ? keyTarget : s.transpose) : '—';
+    $('#lvKey').classList.toggle('pending', pend);
+    $('#lvKeyFrom').textContent = pend ? `from ${keyLabel(s, s.transpose)}` : '';
+    $('#lvKeyApply').hidden = $('#lvKeyCancel').hidden = !pend;
+  }
+  function liveKey(d) {
     if (!V.song) return;
-    if (playing()) { toast('Stop playback before changing the key.'); return; }
-    const t = Math.max(-12, Math.min(12, V.song.transpose + d));
+    keyTarget = Math.max(-12, Math.min(12, (keyTarget == null ? V.song.transpose : keyTarget) + d));
+    showKey();
+  }
+  async function applyKey() {
+    if (!V.song || keyTarget == null) return;
+    if (playing()) { toast('Stop playback to change the key.'); return; }
+    const t = keyTarget;
     showTask('Changing key', 0.3);
-    try { const v = await invoke('set_key_tempo', { transpose: t, bpm: playBpm() }); songKey = null; await refresh(v); toast(`Now in ${keyName(V.song.key, V.song.transpose)}.`); }
-    catch (e) { err(e); } finally { hideTask(); }
+    try { const v = await invoke('set_key_tempo', { transpose: t, bpm: playBpm() }); keyTarget = null; songKey = null; await refresh(v); toast(`Now in ${keyName(V.song.key, V.song.transpose)}.`); }
+    catch (e) { err(e); } finally { hideTask(); showKey(); }
   }
   $('#lvKeyDown').onclick = () => liveKey(-1);
   $('#lvKeyUp').onclick = () => liveKey(1);
+  $('#lvKeyApply').onclick = applyKey;
+  $('#lvKeyCancel').onclick = () => { keyTarget = null; showKey(); };
 
   function tickLive(L, cur, p) {
     if (page !== 'live') return;
@@ -461,6 +538,8 @@
     const bpb = s ? s.beats_per_bar : 4, beats = $('#lvBeats');
     if (beats.children.length !== bpb) { beats.innerHTML = ''; for (let i = 0; i < bpb; i++) beats.append(el('i')); }
     [...beats.children].forEach((d, i) => { d.className = (p && snap && snap.beat === i + 1 ? 'on' : '') + (i === 0 ? ' one' : ''); });
+    const cb = document.querySelector('#lvTab .cbeats');
+    if (cb) [...cb.children].forEach((d, i) => { d.className = (p && snap && snap.beat === i + 1 ? 'on' : '') + (i === 0 ? ' one' : ''); });
     // The Live page clock: time in the song as it plays, and the song's length.
     const lt = $('#lvTime'), ltot = $('#lvTotal'), tEnd = L.length ? L[L.length - 1].start + L[L.length - 1].secs : 0;
     const tNow = s ? fmt(playTime(L)) : '0:00', tTot = '/ ' + fmt(tEnd);
@@ -636,7 +715,7 @@
     }
     box.append(g2);
     // Pad underneath
-    const g3 = el('div', 'fgrp');
+    const g3 = el('div', 'fgrp padend');
     const pad = el('button', 'tog pad' + (tr.pad ? ' on' : ''), 'Pad under ending');
     pad.title = "Brings the pad in (this song's key) when the last block starts, and keeps it going into the next song";
     pad.onclick = () => { if (!V.pads.folder && !tr.pad) { toast('Choose your pads folder in Setup → Pads first.'); return; } setTransition({ ...tr, pad: !tr.pad }); };

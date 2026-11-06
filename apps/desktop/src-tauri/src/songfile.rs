@@ -80,6 +80,20 @@ pub struct Transition {
     /// across to the next song.
     #[serde(default)]
     pub pad: bool,
+    /// How the pad starts this song: no pad, a pad that fades out after the intro,
+    /// or a pad under the whole song.
+    #[serde(default)]
+    pub pad_start: PadStart,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub enum PadStart {
+    #[default]
+    Off,
+    /// The pad comes in with the song and fades out when the intro ends.
+    Intro,
+    /// The pad comes in with the song and stays.
+    Song,
 }
 
 fn two() -> f64 {
@@ -92,7 +106,7 @@ fn four() -> u32 {
 
 impl Default for Transition {
     fn default() -> Self {
-        Transition { mode: TransitionMode::Stop, bars: 2.0, pad: false }
+        Transition { mode: TransitionMode::Stop, bars: 2.0, pad: false, pad_start: PadStart::Off }
     }
 }
 

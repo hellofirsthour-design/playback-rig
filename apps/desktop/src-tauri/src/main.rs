@@ -19,7 +19,7 @@ use audio::{OpenOutput, Output, OutputInfo, ToAudio};
 use rig_engine::midi::{Action, Binding, Event, MidiMap};
 use rig_engine::{Arrangement, Command, Engine, Quantize, Route, Snapshot, Song, StemAudio};
 use serde::{Deserialize, Serialize};
-use songfile::{Block, Ending, Marker, SongFile, TrimSpec, Transition};
+use songfile::{Block, Ending, Marker, PadStart, SongFile, TrimSpec, Transition};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,6 +47,8 @@ struct Settings {
     version: u32,
     /// Folder of pad files, one per key.
     pads_folder: Option<PathBuf>,
+    /// Every pad sound added (one folder each); `pads_folder` is the one in use.
+    pad_sounds: Vec<PadSound>,
     pad_level: f32,
     pad_route: Option<Route>,
     /// The free click's last tempo and meter.
@@ -67,6 +69,29 @@ struct Settings {
     /// Tracks moved to a bus by hand, by track name (lowercase) -> bus id.
     /// Applies to that track name in every song.
     bus_of_track: std::collections::BTreeMap<String, String>,
+}
+
+/// A pad sound: a folder with one file per key.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct PadSound {
+    name: String,
+    folder: PathBuf,
+}
+
+impl Settings {
+    /// Settings from before pad sounds: the one pads folder becomes the first sound.
+    fn ensure_pad_sounds(&mut self) {
+        if let Some(f) = self.pads_folder.clone() {
+            if !self.pad_sounds.iter().any(|s| s.folder == f) {
+                self.pad_sounds.push(PadSound { name: pad_sound_name(&f), folder: f });
+            }
+        }
+    }
+}
+
+fn pad_sound_name(f: &Path) -> String {
+    f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Pads".into())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -223,6 +248,7 @@ impl Default for Settings {
             master_gain: 1.0,
             version: 1,
             pads_folder: None,
+            pad_sounds: vec![],
             pad_level: 0.6,
             pad_route: None,
             free_click_bpm: 120.0,
@@ -325,6 +351,8 @@ struct AppState {
     seen_segues: AtomicU64,
     /// The pad was brought in automatically for this song's ending.
     pad_auto: AtomicBool,
+    /// The song's pad start (see PadStart): 0 waiting, 1 brought in by the start, 2 done.
+    pad_start: std::sync::atomic::AtomicU8,
     /// A pad key picked on the Live page (None = the song's key). Back to the song's key
     /// when the song changes.
     pad_choice: Mutex<Option<u8>>,
@@ -838,14 +866,83 @@ fn take_segue(state: &AppState) -> bool {
         state.save_settings();
     }
     state.pad_auto.store(false, Ordering::Relaxed);
+    state.pad_start.store(0, Ordering::Relaxed);
     *state.pad_choice.lock().unwrap() = None;
     let _ = pad_update(state); // the pad follows the new song's key
     true
 }
 
-/// "Pad underneath": bring the pad in when the song's last block starts.
+/// The last block of the song's opening (count-in, pickup, intro), by name: the pad that
+/// starts "through the intro" fades out after it. A song that opens straight into a verse
+/// counts its first block as the intro.
+fn intro_last(names: &[&str]) -> usize {
+    let opening = |n: &&&str| {
+        let n = n.to_lowercase();
+        n.contains("intro") || n.contains("count") || n.contains("pickup") || n == "top"
+    };
+    names.iter().take_while(opening).count().saturating_sub(1)
+}
+
+/// What the song's pad start asks for now: Some(true) bring the pad in, Some(false) fade it
+/// out, None leave it. `stage` is AppState::pad_start and is updated here.
+fn pad_start_step(mode: PadStart, playing: bool, item: usize, intro_last: usize, stage: &mut u8) -> Option<bool> {
+    if !playing {
+        *stage = 0;
+        return None;
+    }
+    match (mode, *stage) {
+        (PadStart::Off, _) => None,
+        (_, 0) if mode == PadStart::Song || item <= intro_last => {
+            *stage = 1;
+            Some(true)
+        }
+        (_, 0) => {
+            *stage = 2; // started later in the song: leave the pad alone
+            None
+        }
+        (PadStart::Intro, 1) if item > intro_last => {
+            *stage = 2;
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+/// Switches the pad on or off for the automatic pad features; false if it couldn't.
+fn pad_switch(state: &AppState, on: bool) -> bool {
+    if on && state.settings.lock().unwrap().pads_folder.is_none() {
+        return false;
+    }
+    *state.pad_on.lock().unwrap() = on;
+    if pad_update(state).is_err() {
+        *state.pad_on.lock().unwrap() = false;
+        let _ = pad_update(state);
+        return false;
+    }
+    true
+}
+
+/// The pad's automatic parts: the song's pad start (none / through the intro / whole song)
+/// and "Pad underneath" (the pad comes in when the song's last block starts).
 fn auto_pad(state: &AppState, snap: &Option<Snapshot>) -> bool {
     let Some(sn) = snap else { return false };
+    let plan = {
+        let g = state.song.lock().unwrap();
+        g.as_ref().map(|l| {
+            let names: Vec<&str> = l.file.arrangement.iter().map(|b| b.section.as_str()).collect();
+            (l.file.transition.pad_start, intro_last(&names))
+        })
+    };
+    if let Some((mode, il)) = plan {
+        let mut stage = state.pad_start.load(Ordering::Relaxed);
+        let step = pad_start_step(mode, sn.playing && !sn.finished, sn.item, il, &mut stage);
+        state.pad_start.store(stage, Ordering::Relaxed);
+        if let Some(on) = step {
+            if on != *state.pad_on.lock().unwrap() && pad_switch(state, on) {
+                return true;
+            }
+        }
+    }
     let (want, last) = {
         let g = state.song.lock().unwrap();
         match g.as_ref() {
@@ -1117,6 +1214,9 @@ struct BusView {
 #[derive(Serialize)]
 struct PadsView {
     folder: Option<String>,
+    /// The pad sounds to choose from, and the one in use.
+    sounds: Vec<String>,
+    sound: Option<usize>,
     /// Keys with a pad file, e.g. ["C", "D", "A"].
     keys: Vec<String>,
     on: bool,
@@ -1198,6 +1298,8 @@ fn view(state: &AppState) -> AppView {
         buses,
         pads: PadsView {
             folder: s.pads_folder.as_ref().map(|p| p.display().to_string()),
+            sounds: s.pad_sounds.iter().map(|x| x.name.clone()).collect(),
+            sound: s.pad_sounds.iter().position(|x| Some(&x.folder) == s.pads_folder.as_ref()),
             keys: s.pads_folder.as_ref().map(|f| pads::scan(f).iter().enumerate().filter(|(_, p)| p.is_some()).map(|(i, _)| pads::NAMES[i].to_string()).collect()).unwrap_or_default(),
             on: pad_on,
             level: s.pad_level,
@@ -1965,11 +2067,41 @@ async fn choose_pads_folder(app: AppHandle, state: State<'_, AppState>) -> Resul
         if pads::scan(&p).iter().all(|f| f.is_none()) {
             return Err("No pad files found there. Each file's name needs its key in it, like \"A Pad.wav\" or \"Pad - Bb.m4a\".".into());
         }
-        state.settings.lock().unwrap().pads_folder = Some(p);
+        {
+            let mut s = state.settings.lock().unwrap();
+            if !s.pad_sounds.iter().any(|x| x.folder == p) {
+                s.pad_sounds.push(PadSound { name: pad_sound_name(&p), folder: p.clone() });
+            }
+            s.pads_folder = Some(p);
+        }
         state.save_settings();
         *state.pad_key.lock().unwrap() = None;
         let _ = pad_update(&state);
     }
+    Ok(view(&state))
+}
+
+/// Switches to another pad sound (Pads tab). A playing pad crossfades to the new sound.
+#[tauri::command]
+fn pad_sound(state: State<'_, AppState>, index: usize, remove: Option<bool>) -> Result<AppView, String> {
+    {
+        let mut s = state.settings.lock().unwrap();
+        let snd = s.pad_sounds.get(index).cloned().ok_or("That pad sound isn't there any more.")?;
+        if remove == Some(true) {
+            s.pad_sounds.remove(index);
+            if s.pads_folder.as_ref() == Some(&snd.folder) {
+                s.pads_folder = s.pad_sounds.first().map(|x| x.folder.clone());
+            }
+        } else {
+            if pads::scan(&snd.folder).iter().all(|f| f.is_none()) {
+                return Err(format!("Can't find the pad files for {} (was the folder moved?).", snd.name));
+            }
+            s.pads_folder = Some(snd.folder);
+        }
+    }
+    state.save_settings();
+    *state.pad_key.lock().unwrap() = None; // reload in the new sound
+    let _ = pad_update(&state);
     Ok(view(&state))
 }
 
@@ -2307,6 +2439,7 @@ fn main() {
             std::fs::create_dir_all(&data_dir)?;
             let mut settings: Settings = read_json(&dir.join("settings.json"));
             settings.ensure_buses();
+            settings.ensure_pad_sounds();
             if settings.version < 1 {
                 settings.count_in = false; // count-in is now off unless asked for
                 settings.version = 1;
@@ -2361,6 +2494,7 @@ fn main() {
                 next: Mutex::new(NextSong::default()),
                 seen_segues: AtomicU64::new(0),
                 pad_auto: AtomicBool::new(false),
+            pad_start: std::sync::atomic::AtomicU8::new(0),
                 pad_choice: Mutex::new(None),
                 resume: Mutex::new(None),
             });
@@ -2393,6 +2527,7 @@ fn main() {
             check_update,
             set_key_tempo,
             choose_pads_folder,
+            pad_sound,
             pad_set,
             bus_edit,
             pad_mix,
@@ -2437,6 +2572,7 @@ mod tests {
             next: Mutex::new(NextSong::default()),
             seen_segues: AtomicU64::new(0),
             pad_auto: AtomicBool::new(false),
+            pad_start: std::sync::atomic::AtomicU8::new(0),
             pad_choice: Mutex::new(None),
             resume: Mutex::new(None),
         }
@@ -2916,5 +3052,38 @@ mod tests {
         let v = finishes(move || view(&s4));
         assert_eq!(v.pads.song_key.as_deref(), Some("A"));
         assert!(v.song.is_some());
+    }
+
+    #[test]
+    fn the_intro_is_the_opening_run_of_intro_blocks() {
+        assert_eq!(intro_last(&["Count-in", "Intro", "Verse 1", "Chorus"]), 1);
+        assert_eq!(intro_last(&["Top", "Intro", "Intro", "Verse 1"]), 2);
+        assert_eq!(intro_last(&["Verse 1", "Chorus"]), 0, "no intro: the first block counts as one");
+        assert_eq!(intro_last(&["Intro"]), 0);
+        assert_eq!(intro_last(&[]), 0);
+    }
+
+    #[test]
+    fn the_pad_start_follows_the_song() {
+        // Through the intro: in when play starts, out when the verse starts, not back.
+        let mut st = 0;
+        assert_eq!(pad_start_step(PadStart::Intro, true, 0, 1, &mut st), Some(true));
+        assert_eq!(pad_start_step(PadStart::Intro, true, 1, 1, &mut st), None);
+        assert_eq!(pad_start_step(PadStart::Intro, true, 2, 1, &mut st), Some(false));
+        assert_eq!(pad_start_step(PadStart::Intro, true, 3, 1, &mut st), None);
+        assert_eq!(pad_start_step(PadStart::Intro, true, 0, 1, &mut st), None, "a jump back to the intro doesn't bring it back");
+        // Stopping resets it for the next play.
+        assert_eq!(pad_start_step(PadStart::Intro, false, 0, 1, &mut st), None);
+        assert_eq!(st, 0);
+        // Starting from the bridge: the intro pad isn't wanted.
+        assert_eq!(pad_start_step(PadStart::Intro, true, 4, 1, &mut st), None);
+        assert_eq!(pad_start_step(PadStart::Intro, true, 5, 1, &mut st), None);
+        // Whole song: in at the start, never taken out.
+        let mut st = 0;
+        assert_eq!(pad_start_step(PadStart::Song, true, 2, 1, &mut st), Some(true));
+        assert_eq!(pad_start_step(PadStart::Song, true, 6, 1, &mut st), None);
+        // No pad: nothing, ever.
+        let mut st = 0;
+        assert_eq!(pad_start_step(PadStart::Off, true, 0, 1, &mut st), None);
     }
 }

@@ -36,7 +36,6 @@
     <button class="tog pad" id="padBtn" title="Sustained pad in the song's key (pedal 4, hold)">Pad</button>
   </div>
   <div class="right">
-    <div class="seg" id="viewSeg" role="group" aria-label="Page" title="Live page or Edit page (L)"><button data-view="live">Live</button><button data-view="edit">Edit</button></div>
     <button class="ib" id="songBtn">Song</button>
     <button class="ib" id="setupBtn">Setup</button>
   </div>
@@ -90,7 +89,7 @@
         <div class="tabbody" id="lvTab"></div>
         <div class="vtabs" role="tablist" aria-label="Live controls" aria-orientation="vertical">
           <button role="tab" data-tab="mix">Mixer</button><button role="tab" data-tab="pads">Pads</button><button role="tab" data-tab="click">Click</button>
-          <span class="lkey vkey"><span class="lbl">Key</span><button class="ib" id="lvKeyDown" aria-label="Key down a semitone">−</button><b id="lvKey">—</b><button class="ib" id="lvKeyUp" aria-label="Key up a semitone">+</button></span>
+          <span class="lkey vkey"><span class="lbl">Key</span><button class="ib" id="lvKeyDown" aria-label="Key down a semitone">−</button><b id="lvKey">—</b><button class="ib" id="lvKeyUp" aria-label="Key up a semitone">+</button><small id="lvKeyFrom"></small><button class="ib kapply" id="lvKeyApply" hidden>Change key</button><button class="ib kcancel" id="lvKeyCancel" hidden>Cancel</button></span>
         </div>
         <div class="lmaster" id="lvMaster"></div>
       </div>
@@ -103,6 +102,7 @@
 </section>
 
 <footer class="status">
+  <div class="pageswitch" id="viewSeg" role="group" aria-label="Page" title="Live page or Edit page (L)"><button data-view="live"><svg viewBox="0 0 16 16"><path d="M2 3h12v7H2zM5 12h6v1.5H5z"/></svg>Live</button><button data-view="edit"><svg viewBox="0 0 16 16"><path d="M1 3h3v10H1zM6 5h4v6H6zM12 2h3v12h-3z"/></svg>Edit</button></div>
   <span id="stOut"></span>
   <span id="stMidi"></span>
   <span class="task" id="stTask" hidden><span id="stTaskText"></span><span class="pbar"><i id="stTaskBar"></i></span></span>

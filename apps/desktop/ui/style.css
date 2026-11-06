@@ -575,3 +575,54 @@ body.live-mode .bar .lcd { display: none }
 .vtabs .vkey .lbl { grid-column: 1 / -1 }
 .vtabs .vkey b { grid-column: 1 / -1; grid-row: 2; font: 800 22px/1 var(--f-round); min-width: 0 }
 .vtabs .vkey .ib { width: 100%; height: 34px; padding: 0; font-size: 16px }
+
+/* Pads tab: sounds to switch between, and this song's pad start / end */
+.psounds { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px }
+.psounds .lbl { margin-right: 4px }
+.psnd { height: 38px; padding: 0 16px; border-radius: 19px; border: 1px solid var(--line-2); background: var(--raised); color: var(--muted); font: 700 13px var(--f-ui); cursor: pointer; box-shadow: inset 0 1px 0 var(--hi), 0 1px 2px var(--sh) }
+.psnd:hover { color: var(--fg); background: var(--raised-2) }
+.psnd.on { color: #04140f; background: #36c9b0; border-color: #36c9b0; box-shadow: 0 0 12px color-mix(in srgb, #36c9b0 35%, transparent) }
+.psnd.add { border-style: dashed; background: none; box-shadow: none }
+.psong { margin-top: 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); max-width: 640px; box-shadow: inset 0 1px 0 var(--hi) }
+.psong .prow { margin: 8px 0 0 }
+.psong .hint { margin: 6px 0 0 }
+.plbl { width: 44px; font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--dim) }
+/* On the Live page the pad ending lives on the Pads tab with the pad start. */
+.tabbar .fades .padend { display: none }
+/* staged key change */
+.vtabs .vkey small { grid-column: 1 / -1; font: 11px var(--f-mono); color: var(--muted); min-height: 0 }
+.vtabs .vkey small:empty { display: none }
+.vtabs .vkey b.pending { color: var(--cue); text-shadow: 0 0 10px color-mix(in srgb, var(--cue) 40%, transparent) }
+.vtabs .vkey .kapply, .vtabs .vkey .kcancel { grid-column: 1 / -1; height: 32px; font-size: 12px; font-weight: 800 }
+.vtabs .vkey .kapply { background: var(--cue); border-color: var(--cue); color: #1b1503 }
+.vtabs .vkey .kcancel { height: 26px; font-weight: 600; color: var(--muted) }
+
+/* Click tab: the song's click and the click with no song, side by side */
+.ccards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; align-content: start }
+.ccard { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); box-shadow: inset 0 1px 0 var(--hi), 0 1px 3px var(--sh) }
+.crow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap }
+.crow:empty { display: none }
+.crow input[type=range] { flex: 1; min-width: 120px }
+.crow select { flex: 1; min-width: 0 }
+.cval { font: 12px var(--f-mono); color: var(--muted); min-width: 40px; text-align: right }
+.tog.big { height: 44px; padding: 0 18px; font-size: 14px; font-weight: 800 }
+.cbeats { display: flex; gap: 12px; padding: 4px 0 }
+.cbeats i { flex: 1; max-width: 64px; height: 28px; border-radius: 8px; background: var(--led-off); box-shadow: inset 0 1px 2px rgba(0,0,0,.4) }
+.cbeats i.on { background: var(--fg); box-shadow: 0 0 14px color-mix(in srgb, var(--fg) 45%, transparent) }
+.cbeats i.on.one { background: var(--go); box-shadow: 0 0 16px var(--go) }
+.ccard .clk .bpm.screen { padding: 6px 14px; border-radius: 8px; font-size: 40px }
+.ccard .seg { align-self: flex-start }
+
+/* ---------- The page switch: big, at the bottom centre, on both pages ---------- */
+.status { position: relative; min-height: 54px }
+.pageswitch { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; padding: 3px; gap: 3px; border-radius: 12px; background: var(--bg); border: 1px solid var(--line-2); box-shadow: inset 0 1px 3px rgba(0,0,0,.45), 0 1px 0 var(--hi) }
+.pageswitch button { display: inline-flex; align-items: center; gap: 8px; height: 40px; min-width: 132px; justify-content: center; padding: 0 18px; border: 0; border-radius: 9px; background: none; color: var(--muted); font: 800 15px var(--f-round); letter-spacing: .08em; text-transform: uppercase; cursor: pointer; transition: background-color .15s, color .15s }
+.pageswitch svg { width: 16px; height: 16px; fill: currentColor }
+.pageswitch button:hover { color: var(--fg) }
+.pageswitch button.on { color: #1a0d04; background: var(--go); box-shadow: inset 0 1px 0 rgba(255,255,255,.3), 0 0 16px color-mix(in srgb, var(--go) 40%, transparent) }
+@media (max-width: 900px) { .pageswitch button { min-width: 96px; padding: 0 12px } }
+/* ---------- The song name glows on its screen ---------- */
+.title.screen b { font-size: 17px; color: #fff; text-shadow: 0 0 6px color-mix(in srgb, var(--go) 55%, transparent), 0 0 18px color-mix(in srgb, var(--go) 30%, transparent) }
+.title.screen span { color: var(--scr-dim) }
+/* ---------- The time display never shrinks to a letter ---------- */
+@media (min-width: 1381px) { .lcd { min-width: 300px } }
