@@ -720,6 +720,11 @@
     pad.title = "Brings the pad in (this song's key) when the last block starts, and keeps it going into the next song";
     pad.onclick = () => { if (!V.pads.folder && !tr.pad) { toast('Choose your pads folder in Setup → Pads first.'); return; } setTransition({ ...tr, pad: !tr.pad }); };
     g3.append(pad);
+    // Pad start (also on the Live page's Pads tab)
+    g3.append(el('span', 'flbl', 'Pad start'), seg([['Off', 'No pad'], ['Intro', 'Through intro'], ['Song', 'Whole song']], tr.pad_start || 'Off', v => {
+      if (v !== 'Off' && !V.pads.folder) { toast('Choose your pads folder in Setup → Pads first.'); return; }
+      setTransition({ ...tr, pad_start: v });
+    }, 'How the pad starts this song'));
     box.append(g3);
     const now = el('button', 'btn fadenow', 'Fade out now');
     now.title = 'Fade the song out over 2 bars and stop (also on a MIDI button)';
