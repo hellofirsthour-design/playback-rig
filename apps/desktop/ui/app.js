@@ -315,7 +315,7 @@
   /* Live tabs: Mixer (buses), Pads, Click */
   let liveTab = 'mix';
   try { liveTab = localStorage.getItem('rig.liveTab') || 'mix'; } catch (e) { /* storage off */ }
-  document.querySelectorAll('.tabbar [role=tab]').forEach(b => { b.onclick = () => { liveTab = b.dataset.tab; try { localStorage.setItem('rig.liveTab', liveTab); } catch (e) { /* storage off */ } renderLiveTab(); }; });
+  document.querySelectorAll('.vtabs [role=tab]').forEach(b => { b.onclick = () => { liveTab = b.dataset.tab; try { localStorage.setItem('rig.liveTab', liveTab); } catch (e) { /* storage off */ } renderLiveTab(); }; });
   // A vertical fader (Playback-style): drag the cap, scroll, arrow keys; double-click = 100%.
   // `meter` names what its level meter shows ("bus:drums", "stem:3"), or null.
   function faderStrip(name, value, max, onInput, muted, onMute, label, meter) {
@@ -359,7 +359,15 @@
     return strip;
   }
   function renderLiveTab() {
-    document.querySelectorAll('.tabbar [role=tab]').forEach(b => { const on = b.dataset.tab === liveTab; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+    document.querySelectorAll('.vtabs [role=tab]').forEach(b => { const on = b.dataset.tab === liveTab; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+    // Master: everything the app sends out (songs, click, pad), on screen whatever the tab.
+    // No mute button here, on purpose: one mis-tap would silence the band.
+    const mb = $('#lvMaster');
+    if (mb && V && !mb.querySelector('.vfader[data-drag]')) {
+      const ms = faderStrip('Master', V.master_gain == null ? 1 : V.master_gain, 1.5, x => { V.master_gain = x; send({ type: 'MasterGain', gain: x }); }, false, null, 'Master level', 'master');
+      ms.classList.add('master'); ms.title = 'Master: everything the app sends out. Double-click for 100%.';
+      mb.replaceChildren(ms);
+    }
     const box = $('#lvTab'); if (!box || box.querySelector('.vfader[data-drag]') || (box.contains(document.activeElement) && document.activeElement.type === 'range')) return;
     box.innerHTML = '';
     if (liveTab === 'mix') {
@@ -378,11 +386,6 @@
         async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; }, null, 'bus:' + b.id))));
       g.append(faderStrip('Click (built-in)', V.click_gain, 1.5, x => { V.click_gain = x; send({ type: 'ClickGain', gain: x }); }, null, null));
       g.append(faderStrip('Pad', V.pads.level, 1.5, x => { V.pads.level = x; invoke('pad_mix', { level: x, route: null }).catch(err); }, !V.pads.on, () => togglePad()));
-      // Master: everything the app sends out (songs, click, pad). No mute button here, on purpose:
-      // one mis-tap would silence the band. It stays at the right edge while the buses scroll.
-      const ms = faderStrip('Master', V.master_gain == null ? 1 : V.master_gain, 1.5, x => { V.master_gain = x; send({ type: 'MasterGain', gain: x }); }, false, null, 'Master level', 'master');
-      ms.classList.add('master'); ms.title = 'Master: everything the app sends out. Double-click for 100%.';
-      g.append(ms);
       if (!(V.buses || []).length) box.append(el('p', 'hint', 'Load a song to see its buses.'));
       box.append(g);
     } else if (liveTab === 'pads') {
@@ -1513,7 +1516,7 @@
   /* ---------- events from Rust ---------- */
   T.event.listen('stem-level', e => { const [i, g] = e.payload; if (!V || !V.song || !V.song.stems[i]) return; V.song.stems[i].gain = g; const f = $('#fader-' + i); if (f) f.value = g; });
   T.event.listen('click-level', e => { if (V) V.click_gain = e.payload; });
-  T.event.listen('master-level', e => { if (V) { V.master_gain = e.payload; if (page === 'live' && liveTab === 'mix') renderLiveTab(); } });
+  T.event.listen('master-level', e => { if (V) { V.master_gain = e.payload; if (page === 'live') renderLiveTab(); } });
   T.event.listen('midi-learned', () => { learnWait = null; refresh().then(() => toast('Control assigned.')); });
   T.event.listen('audio-error', e => toast('Audio problem: ' + e.payload));
   // Unplugged and plugged back in: the app reconnects by itself.

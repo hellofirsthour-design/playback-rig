@@ -557,3 +557,21 @@ body.live-mode .bar .lcd { display: none }
 /* two tidy lines: tabs + key, then the ending / transition controls across the full width */
 .tabbar .lkey { margin-left: auto; order: 2 }
 .tabbar .fades { order: 3; flex: 1 1 100%; margin: 0; padding: 6px 4px 0; border-left: 0; border-top: 1px solid var(--line) }
+
+/* Live panel body: the tab's page, then the page switcher column, then the master (always there). */
+.lbody { display: flex; flex: 1 1 auto; min-height: 0 }
+.lbody > .tabbody { flex: 1 1 auto; min-width: 0 }
+.vtabs { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 12px 10px; border-left: 1px solid var(--line); width: 92px }
+.vtabs [role=tab] { height: 46px; border-radius: 8px; border: 1px solid var(--line); background: var(--raised); color: var(--muted); font: 700 12px var(--f-ui); letter-spacing: .06em; text-transform: uppercase; cursor: pointer;
+  background-image: linear-gradient(rgba(255,255,255,.03), rgba(0,0,0,.05)); box-shadow: inset 0 1px 0 var(--hi), 0 1px 2px var(--sh) }
+.vtabs [role=tab]:hover { background-color: var(--raised-2); color: var(--fg) }
+.vtabs [role=tab]:active { transform: translateY(1px); box-shadow: inset 0 2px 4px var(--sh) }
+.vtabs [role=tab].on { color: var(--fg); background-color: var(--raised-2); border-color: var(--go); box-shadow: inset 0 0 0 1px var(--go), 0 0 10px color-mix(in srgb, var(--go) 25%, transparent) }
+.lmaster { flex: none; display: flex; padding: 12px 14px 12px 0 }
+.lmaster .vstrip.master { position: static; margin: 0; box-shadow: inset 0 1px 0 var(--hi), 0 1px 3px var(--sh) }
+.tabbar .fades { border-top: 0; padding-top: 0 }
+/* Key change at the foot of the side column */
+.vtabs .vkey { margin: auto 0 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; justify-items: center; padding-top: 10px; border-top: 1px solid var(--line) }
+.vtabs .vkey .lbl { grid-column: 1 / -1 }
+.vtabs .vkey b { grid-column: 1 / -1; grid-row: 2; font: 800 22px/1 var(--f-round); min-width: 0 }
+.vtabs .vkey .ib { width: 100%; height: 34px; padding: 0; font-size: 16px }
