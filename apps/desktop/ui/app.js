@@ -112,10 +112,11 @@
   const felt = (s, bpm) => bpm / ((s && s.felt_per_beat) || 1);
   function tempoText(s) {
     const tc = (s.tempo_changes || []).map(([b, t]) => [b, felt(s, t)]);
-    if (tc.length < 2) return `${+felt(s, playBpm()).toFixed(2)} BPM`;
-    if (tc.length <= 3) return tc.map(t => +t[1].toFixed(1)).join(' → ') + ' BPM';
-    const lo = Math.min(...tc.map(t => t[1])), hi = Math.max(...tc.map(t => t[1]));
-    return `${+lo.toFixed(1)}–${+hi.toFixed(1)} BPM`;
+    const main = `${+felt(s, playBpm()).toFixed(2)} BPM`;
+    if (tc.length < 2) return main;
+    // A tempo map: the song's own tempo, and the playing tempo when it differs.
+    const now = playing() && snap && snap.bpm ? felt(s, snap.bpm) : null;
+    return now && Math.abs(now - felt(s, playBpm())) > 0.5 ? `${main} (now ${Math.round(now)}) · tempo changes` : `${main} · tempo changes`;
   }
   function downbeats(a, b) {
     // Songs whose tempo changes: the server sends every bar line.
@@ -176,10 +177,14 @@
   }
 
   /* ---------- top bar ---------- */
+  function renderSongMeta() {
+    const s = V && V.song;
+    $('#songMeta').textContent = s ? `${tempoText(s)} · ${s.beats_per_bar}/${s.meter_den || 4}${s.key || s.transpose ? ' · ' + keyName(s.key, s.transpose) : ''}${s.transpose ? ` (${s.transpose > 0 ? '+' : ''}${s.transpose})` : ''}` : '';
+  }
   function renderBar() {
     const s = V.song;
     $('#songTitle').textContent = loading ? 'Loading…' : s ? s.name : (V.setlist.length ? 'Pick a song' : 'No songs yet');
-    $('#songMeta').textContent = s ? `${tempoText(s)} · ${s.beats_per_bar}/${s.meter_den || 4}${s.key || s.transpose ? ' · ' + keyName(s.key, s.transpose) : ''}${s.transpose ? ` (${s.transpose > 0 ? '+' : ''}${s.transpose})` : ''}` : '';
+    renderSongMeta();
     document.querySelectorAll('#quant button').forEach(b => b.classList.toggle('on', b.dataset.q === V.quantize));
     $('#clickBtn').classList.toggle('on', !!(s && s.click)); $('#clickBtn').disabled = !s;
     $('#countBtn').classList.toggle('on', V.count_in);
@@ -189,6 +194,7 @@
   }
   function tick() {
     if (!V) return;
+    if (V.song && (V.song.tempo_changes || []).length > 1) renderSongMeta(); // the playing tempo follows the song
     const p = playing();
     const pb = $('#playBtn'); pb.classList.toggle('on', p); pb.setAttribute('aria-label', p ? 'Stop' : 'Play');
     $('#vampBtn').classList.toggle('on', !!(snap && snap.vamp));

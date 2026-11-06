@@ -947,6 +947,19 @@ struct SongView {
     tempo_changes: Vec<(u32, f64)>,
 }
 
+/// Grid notes per beat of the tempo shown, so it reads like the folder's own number
+/// (MultiTracks gives 6/8 songs in quarter notes, "More Than Able" 73: eighths at 146 → 2).
+/// Without a number in the folder name, compound meters show dotted quarters.
+fn shown_per_beat(l: &Loaded) -> f64 {
+    if let Some(f) = songfile::parse_folder_name(&songfile::song_title(&l.folder)).2 {
+        let r = l.file.bpm / f;
+        if let Some(c) = [1.0, 2.0, 3.0, 1.5].into_iter().find(|c| (r / c - 1.0).abs() < 0.02) {
+            return c;
+        }
+    }
+    l.file.felt_per_beat()
+}
+
 impl SongView {
     fn from(l: &Loaded) -> Self {
         let bar = l.song.frames_per_bar();
@@ -969,7 +982,7 @@ impl SongView {
             bpm: l.file.bpm,
             beats_per_bar: l.file.beats_per_bar,
             meter_den: l.file.meter_den,
-            felt_per_beat: l.file.felt_per_beat(),
+            felt_per_beat: shown_per_beat(l),
             offset_ms: l.file.offset_ms,
             key: l.file.key.clone(),
             click: l.file.click,

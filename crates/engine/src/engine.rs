@@ -76,6 +76,8 @@ struct Pending {
     at: u64,
     /// Frame inside the target block to start from (0 = its start).
     from: u64,
+    /// When the jump was asked for (absolute frame).
+    queued: u64,
 }
 
 #[derive(Default)]
@@ -236,7 +238,7 @@ impl Engine {
                 if i < self.arr.items.len() {
                     let frame = frame.min(self.block_len(i).saturating_sub(1));
                     if self.playing && self.count_left == 0 {
-                        self.pending = Some(Pending { target: i, at: self.abs + self.fade, from: frame });
+                        self.pending = Some(Pending { target: i, at: self.abs + self.fade, from: frame, queued: self.abs });
                     } else if !self.playing {
                         self.item = i;
                         self.fpos = frame;
@@ -352,7 +354,7 @@ impl Engine {
             return;
         }
         let at = self.boundary(q);
-        self.pending = Some(Pending { target, at, from: 0 });
+        self.pending = Some(Pending { target, at, from: 0, queued: self.abs });
     }
 
     fn section(&self, item: usize) -> &Section {
@@ -449,15 +451,25 @@ impl Engine {
     /// a different section is silenced.
     fn guide_src(&self, src: u64) -> Option<u64> {
         let sec = self.section(self.item);
-        let (next, d) = match &self.pending {
-            Some(p) => (Some(p.target), p.at.saturating_sub(self.abs)),
-            None => (self.natural_next(), self.block_len(self.item).saturating_sub(self.fpos)),
+        let (next, d, queued) = match &self.pending {
+            Some(p) => (Some(p.target), p.at.saturating_sub(self.abs), Some(p.queued)),
+            None => (self.natural_next(), self.block_len(self.item).saturating_sub(self.fpos), None),
         };
         if let Some(n) = next {
             let ns = self.arr.items[n].section;
             if let Some(Some((cs, ce))) = self.song.calls.get(ns) {
                 let l = ce.saturating_sub(*cs);
                 if d > 0 && d <= l {
+                    // A jump asked for with less time left than its call takes: say the
+                    // call from the start, from the moment it was asked for, so the band
+                    // hears the name ("Bridge…") rather than only the end of the count.
+                    if let Some(q) = queued {
+                        let window = d + self.abs.saturating_sub(q);
+                        if window < l {
+                            let gs = cs + self.abs.saturating_sub(q);
+                            return (gs < *ce).then_some(gs);
+                        }
+                    }
                     return Some(ce - d);
                 }
             }
@@ -944,6 +956,30 @@ mod tests {
         e.handle(Command::Play);
         let out = run(&mut e, 24100);
         assert_eq!(out[0][8000 + 7000], 15000.0, "second C announced at the end of the first");
+    }
+
+    #[test]
+    fn a_late_jump_says_the_name_of_where_it_goes() {
+        // Playing A (calls: B 6000..8000, C 14000..16000). At frame 7000 the MD asks for C on
+        // the next bar (8000): 1000 frames left, C's call takes 2000. The guide says C's
+        // call from its start (the name) straight away, not the last half of it.
+        let mut e = guide_rig(&["A", "B", "C"]);
+        e.handle(Command::SetQuantize(Quantize::Bar));
+        e.handle(Command::Play);
+        let before = run(&mut e, 7000);
+        assert_eq!(before[0][6500], 6500.0, "B's call while B is next");
+        e.handle(Command::Goto(2));
+        let out = run(&mut e, 1500);
+        assert_eq!(out[0][100], 14100.0, "C's call from the start, 100 frames after asking");
+        assert_eq!(out[0][900], 14900.0);
+        // A jump asked for in good time still lines the call up to end on the downbeat.
+        let mut e = guide_rig(&["A", "B", "C"]);
+        e.handle(Command::SetQuantize(Quantize::SectionEnd));
+        e.handle(Command::Play);
+        run(&mut e, 3000);
+        e.handle(Command::Goto(2));
+        let out = run(&mut e, 5000);
+        assert_eq!(out[0][4000], 15000.0, "frame 7000: C's call ends on the jump at 8000");
     }
 
     #[test]
