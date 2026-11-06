@@ -112,11 +112,10 @@
   const felt = (s, bpm) => bpm / ((s && s.felt_per_beat) || 1);
   function tempoText(s) {
     const tc = (s.tempo_changes || []).map(([b, t]) => [b, felt(s, t)]);
-    const main = `${+felt(s, playBpm()).toFixed(2)} BPM`;
-    if (tc.length < 2) return main;
-    // A tempo map: the song's own tempo, and the playing tempo when it differs.
-    const now = playing() && snap && snap.bpm ? felt(s, snap.bpm) : null;
-    return now && Math.abs(now - felt(s, playBpm())) > 0.5 ? `${main} (now ${Math.round(now)}) · tempo changes` : `${main} · tempo changes`;
+    if (tc.length < 2) return `${+felt(s, playBpm()).toFixed(2)} BPM`;
+    // A tempo map: just the tempo at the playhead, moving with the song (like Playback and Ableton).
+    const at = snap && snap.bpm ? snap.bpm : tc[0][1] * ((s.felt_per_beat) || 1);
+    return `${+felt(s, at).toFixed(1)} BPM`;
   }
   function downbeats(a, b) {
     // Songs whose tempo changes: the server sends every bar line.
