@@ -203,6 +203,11 @@
     const cur = snap && L.length ? Math.min(snap.item, L.length - 1) : -1;
     $('#lcdSec').textContent = cur >= 0 ? L[cur].b.section : '—';
     $('#lcdBB').textContent = !snap || !s ? '–' : snap.counting_in ? 'Count' : `${snap.bar}.${snap.beat}`;
+    // A light per beat, like a hardware beat counter: the one is orange.
+    const bd = $('#lcdBeats'), nb = s ? Math.min(12, s.beats_per_bar || 4) : 0;
+    if (bd.childElementCount !== nb) { bd.innerHTML = ''; for (let i = 0; i < nb; i++) bd.append(el('i')); }
+    const lit = p && snap ? snap.beat : 0;
+    for (let i = 0; i < nb; i++) bd.children[i].className = i + 1 === lit ? (i ? 'on' : 'on one') : '';
     const total = L.length ? L[L.length - 1].start + L[L.length - 1].secs : 0, now = playTime(L);
     $('#lcdTime').textContent = s ? `${fmt(now)} / ${fmt(total)}` : '';
     const left = cur >= 0 && snap ? barsLeft(snap) : 0;
@@ -334,13 +339,24 @@
     fd.ondblclick = () => set(1);
     fd.onwheel = e => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.preventDefault(); set(val - e.deltaY * 0.002); } };
     fd.onkeydown = e => { const k = { ArrowUp: 0.02, ArrowDown: -0.02, PageUp: 0.1, PageDown: -0.1 }[e.key]; if (k) { e.preventDefault(); e.stopPropagation(); set(val + k); } };
-    body.append(mt, fd);
+    // Scale marks beside the fader, in dB like a desk: +6, 0, -6, -12, off.
+    const sc = el('div', 'vscale');
+    [[2, '+6'], [1, '0'], [0.5, '-6'], [0.25, '-12'], [0, '∞']].filter(([g]) => g <= max + 1e-6).forEach(([g, t]) => {
+      const k = el('span', g === 1 ? 'u' : null, t); k.style.bottom = `calc(8px + ${g / max} * (100% - 16px))`; sc.append(k);
+    });
+    body.append(mt, sc, fd);
     const m = el('button', 'm' + (muted ? ' on' : ''), 'M'); m.title = `Mute ${name}`; m.setAttribute('aria-pressed', !!muted);
     if (onMute) m.onclick = onMute; else m.style.visibility = 'hidden';
     const nm = el('div', 'vname', name); nm.title = name;
     r.append(nm, body, v, m);
     show();
     return r;
+  }
+  // A bus strip wears the colour of its first track, so it matches the Edit page.
+  function tint(b, strip) {
+    const i = (b.stems || [])[0];
+    if (i != null && V.song && V.song.stems[i]) { strip.style.setProperty('--c', stemColor(V.song.stems[i].name, i)); strip.classList.add('tinted'); }
+    return strip;
   }
   function renderLiveTab() {
     document.querySelectorAll('.tabbar [role=tab]').forEach(b => { const on = b.dataset.tab === liveTab; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
@@ -358,8 +374,8 @@
         box.append(h);
       }
       const g = el('div', 'strips');
-      (V.buses || []).forEach(b => g.append(faderStrip(b.name, b.gain, 1.5, x => { b.gain = x; send({ type: 'BusGain', bus: b.id, gain: x }); if (V.song && !V.song_mix) { V.song_mix = true; } }, b.muted,
-        async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; }, null, 'bus:' + b.id)));
+      (V.buses || []).forEach(b => g.append(tint(b, faderStrip(b.name, b.gain, 1.5, x => { b.gain = x; send({ type: 'BusGain', bus: b.id, gain: x }); if (V.song && !V.song_mix) { V.song_mix = true; } }, b.muted,
+        async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; }, null, 'bus:' + b.id))));
       g.append(faderStrip('Click (built-in)', V.click_gain, 1.5, x => { V.click_gain = x; send({ type: 'ClickGain', gain: x }); }, null, null));
       g.append(faderStrip('Pad', V.pads.level, 1.5, x => { V.pads.level = x; invoke('pad_mix', { level: x, route: null }).catch(err); }, !V.pads.on, () => togglePad()));
       if (!(V.buses || []).length) box.append(el('p', 'hint', 'Load a song to see its buses.'));
@@ -857,7 +873,7 @@
     const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue(n).trim();
     palCache = { ruler: v('--cv-ruler'), lanes: v('--cv-lanes'), laneAlt: v('--cv-lane-alt'), laneLine: v('--cv-lane-line'), bus: v('--cv-bus'),
       tick: v('--cv-tick'), tickStrong: v('--cv-tick-strong'), text: v('--muted'), dim: v('--dim'), fg: v('--fg'), go: v('--go'),
-      grid: v('--cv-grid'), bar: v('--cv-bar'), beat: v('--cv-beat'), scrub: v('--cv-scrub'), shade: v('--cv-shade') };
+      grid: v('--cv-grid'), bar: v('--cv-bar'), beat: v('--cv-beat'), band: v('--cv-band'), scrub: v('--cv-scrub'), shade: v('--cv-shade') };
     return palCache;
   }
   const cvTop = $('#cvTop'), cvLanes = $('#cvLanes');
@@ -867,6 +883,10 @@
     const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); return [g, w];
   }
   const X = t => (t - zoom.scroll) * zoom.pps;
+  // Filled rectangle with soft corners (plain rectangle where the browser can't round).
+  function rrect(c, x, y, w, hh, r) {
+    if (c.roundRect && w > 2 * r) { c.beginPath(); c.roundRect(x, y, w, hh, r); c.fill(); } else c.fillRect(x, y, w, hh);
+  }
   function total(L) { return L.length ? L[L.length - 1].start + L[L.length - 1].secs : 0; }
   function clampScroll(L, w) { zoom.scroll = Math.max(0, Math.min(zoom.scroll, Math.max(0, total(L) - (w - 40) / zoom.pps))); }
   function fit() {
@@ -904,7 +924,7 @@
     L.forEach(o => {
       const x0 = X(o.start), x1 = X(o.start + o.secs); if (x1 < 0 || x0 > w) return;
       g.fillStyle = secColor(o.b.section); g.globalAlpha = o.i === cur ? 1 : 0.78;
-      g.fillRect(x0 + 1, RULER_H + 2, Math.max(1, x1 - x0 - 2), 26); g.globalAlpha = 1;
+      rrect(g, x0 + 1, RULER_H + 2, Math.max(1, x1 - x0 - 2), 26, 4); g.globalAlpha = 1;
       if (snap && snap.pending === o.i && Math.floor(performance.now() / 250) % 2) { g.strokeStyle = '#ffd23f'; g.lineWidth = 2; g.strokeRect(x0 + 2, RULER_H + 3, x1 - x0 - 4, 24); }
       g.save(); g.beginPath(); g.rect(x0 + 1, RULER_H, Math.max(0, x1 - x0 - 4), 30); g.clip();
       g.fillStyle = '#0b0b0c'; g.font = '800 12px ui-rounded, -apple-system, system-ui, sans-serif';
@@ -927,7 +947,7 @@
         const x0 = X(o.start), x1 = X(o.start + o.secs); if (x1 < 0 || x0 > w2) return;
         const off = laneOff || o.b.muted.includes(st.name);
         const top = y + 3, ch = LANE_H - 7;
-        h.globalAlpha = off ? 0.08 : 0.2; h.fillStyle = off ? C.text : col; h.fillRect(x0 + 1, top, Math.max(1, x1 - x0 - 2), ch);
+        h.globalAlpha = off ? 0.08 : 0.2; h.fillStyle = off ? C.text : col; rrect(h, x0 + 1, top, Math.max(1, x1 - x0 - 2), ch, 3);
         h.globalAlpha = off ? 0.3 : 1; h.fillRect(x0 + 1, top, Math.max(1, x1 - x0 - 2), 2);
         if (pk) {
           h.globalAlpha = off ? 0.25 : 0.9; h.fillStyle = off ? C.text : col;
@@ -993,6 +1013,17 @@
       }
     });
     // block boundaries + playhead + queued jump
+    // Every other four-bar phrase is shaded a touch, so phrases can be counted at a glance.
+    h.fillStyle = C.band;
+    L.forEach(o => {
+      const x0 = X(o.start), x1 = X(o.start + o.secs); if (x1 < 0 || x0 > w2) return;
+      for (let k = 0; k < o.beats.length; k++) {
+        if (Math.floor((o.bar + k - 1) / 4) % 2 !== 1) continue;
+        const a = Math.max(x0, X(o.start + (o.beats[k] - o.sec.start_sec)));
+        const b2 = k + 1 < o.beats.length ? X(o.start + (o.beats[k + 1] - o.sec.start_sec)) : x1;
+        h.fillRect(a, 0, Math.min(b2, x1) - a, H);
+      }
+    });
     h.fillStyle = C.grid; L.forEach(o => { const x = X(o.start); if (x >= 0 && x <= w2) h.fillRect(Math.round(x), 0, 1, H); });
     if (snap && snap.pending != null && p) {
       const jx = X(now + snap.frames_to_jump / s.sample_rate);
@@ -1542,6 +1573,7 @@
 
   // Level meters: each shows the loudest of its tracks, in dB (-60..+6), falling back smoothly.
   const meterShown = new Map();
+  const meterHold = new Map();
   function showMeters(levels) {
     document.querySelectorAll('[data-meter]').forEach(m => {
       const [kind, id] = m.dataset.meter.split(':');
@@ -1553,6 +1585,11 @@
       const prev = meterShown.get(m.dataset.meter) || 0;
       const shown = target >= prev ? target : Math.max(target, prev - 0.035);
       meterShown.set(m.dataset.meter, shown);
+      // Peak hold: a thin line that stays at the loudest point for a moment, then falls.
+      const now = performance.now(), hk = meterHold.get(m.dataset.meter) || { v: 0, t: 0 };
+      if (shown >= hk.v) { hk.v = shown; hk.t = now; } else if (now - hk.t > 1200) hk.v = Math.max(shown, hk.v - 0.012);
+      meterHold.set(m.dataset.meter, hk);
+      m.style.setProperty('--pk', hk.v);
       const bar = m.firstChild; if (bar) { bar.style.setProperty('--lv', shown); bar.classList.toggle('clip', db > 0); }
     });
   }

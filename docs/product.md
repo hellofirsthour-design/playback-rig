@@ -34,6 +34,7 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
 
 - **Five looks** (Setup → Look), like Ableton's themes: Graphite (default), Midnight, Studio (Ableton-style grey), Sanctuary (warm) and Daylight (light, for bright rooms). Every colour comes from the theme, the arrangement view's included. Both pages share the same top bar, type and colours, so Live and Edit read as one program.
 - **Play is green, stop is red.**
+- **Finish details** (the small things that make it feel like an instrument, not a web page): buttons have a soft top light and sink when pressed; Next / Repeat / Vamp carry small icons; Vamp glows while it's looping; Click, Count-in and Pad have an indicator light; the top display has a beat light per beat (the one is orange); meters are LED segments with a peak-hold line; faders sit in a groove with dB marks (+6, 0, -6, -12, off) and a ridged cap; clips and section blocks have soft corners. Track names on the Edit page sit on their track's colour, every other four-bar phrase is shaded so phrases can be counted at a glance, and each Live mixer bus wears the colour of its first track (name cap and fader line), so the two pages match. Nothing moved.
 - **Level meters** on the Live mixer's faders (each bus shows its loudest track) and under every track on the Edit page, so you can see what's playing (or muted) at a glance.
 
 ## The main screen
