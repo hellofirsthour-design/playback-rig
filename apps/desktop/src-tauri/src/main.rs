@@ -41,6 +41,8 @@ struct Settings {
     count_in: bool,
     click_gain: f32,
     click_route: Option<Route>,
+    /// The master fader: everything the app sends out.
+    master_gain: f32,
     /// Settings format; older settings are migrated on load.
     version: u32,
     /// Folder of pad files, one per key.
@@ -218,6 +220,7 @@ impl Default for Settings {
             count_in: false,
             click_gain: 0.8,
             click_route: None,
+            master_gain: 1.0,
             version: 1,
             pads_folder: None,
             pad_level: 0.6,
@@ -278,6 +281,8 @@ struct Core {
     audio_failed: Arc<AtomicBool>,
     /// Peak level of each stem since the screen last asked (meters).
     levels: Arc<Mutex<[f32; 64]>>,
+    /// The master fader's level (f32 bits), read by the audio thread every block.
+    master: Arc<std::sync::atomic::AtomicU32>,
     /// Waiting for the chosen audio interface / MIDI controller to come back.
     audio_lost: AtomicBool,
     midi_lost: AtomicBool,
@@ -417,6 +422,11 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
             core.send(Command::SetClickGain(g));
             let _ = app.emit("click-level", g);
         }
+        Event::Level(Action::MasterLevel, v) => {
+            let g = fader(v).min(1.5);
+            core.master.store(g.to_bits(), Ordering::Relaxed);
+            let _ = app.emit("master-level", g);
+        }
         Event::Level(..) => {}
         Event::Fire(a) => match a {
             Action::PlayStop => {
@@ -461,7 +471,7 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
                     let _ = app.emit("pedal", "refresh");
                 }
             }
-            Action::StemLevel(_) | Action::ClickLevel => {}
+            Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel => {}
         },
     }
 }
@@ -483,7 +493,7 @@ fn open_output(core: &Core, app: &AppHandle, name: Option<String>) -> Result<Ope
     let h = app.clone();
     let failed = core.audio_failed.clone();
     failed.store(false, Ordering::Release);
-    let out = audio::open(name, core.status.clone(), core.segues.clone(), core.metro_on.clone(), core.levels.clone(), move |e, gone| {
+    let out = audio::open(name, core.status.clone(), core.segues.clone(), core.metro_on.clone(), core.levels.clone(), core.master.clone(), move |e, gone| {
         if gone {
             failed.store(true, Ordering::Release); // the watcher takes it from here
         } else {
@@ -1061,6 +1071,7 @@ struct AppView {
     count_in: bool,
     click_gain: f32,
     click_route: Route,
+    master_gain: f32,
     bindings: Vec<Binding>,
     learning: bool,
     pads: PadsView,
@@ -1181,6 +1192,7 @@ fn view(state: &AppState) -> AppView {
         count_in: s.count_in,
         click_gain: s.click_gain,
         click_route: s.click_route.unwrap_or(songfile::default_route("click", ch)),
+        master_gain: s.master_gain,
         bindings,
         learning,
         buses,
@@ -1222,6 +1234,8 @@ struct Status {
     midi_lost: bool,
     /// Each stem's peak level (0-1+) since the last status, for meters.
     levels: Vec<f32>,
+    /// The master output's peak since the last status.
+    master_level: f32,
 }
 
 #[tauri::command]
@@ -1234,13 +1248,14 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
     let pad_changed = auto_pad(&state, &snapshot);
     sync_next(&app, &state);
     let learning = state.core.map.lock().unwrap().is_learning();
-    let n = state.song.lock().unwrap().as_ref().map_or(0, |l| l.file.stems.len()).min(64);
+    let n = state.song.lock().unwrap().as_ref().map_or(0, |l| l.file.stems.len()).min(audio::MASTER_SLOT);
     let levels = {
         let mut lv = state.core.levels.lock().unwrap();
-        let v = lv[..n].to_vec();
+        let v = (lv[..n].to_vec(), lv[audio::MASTER_SLOT]);
         lv.iter_mut().for_each(|x| *x = 0.0);
         v
     };
+    let (levels, master_level) = levels;
     Status {
         snapshot,
         learning,
@@ -1250,6 +1265,7 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
         audio_lost: state.core.audio_lost.load(Ordering::Acquire),
         midi_lost: state.core.midi_lost.load(Ordering::Acquire),
         levels,
+        master_level,
     }
 }
 
@@ -1410,6 +1426,7 @@ enum UiCmd {
     CountIn { on: bool },
     Click { on: bool },
     ClickGain { gain: f32 },
+    MasterGain { gain: f32 },
     ClickRoute { route: Route },
     StemGain { stem: usize, gain: f32 },
     StemMute { stem: usize, muted: bool },
@@ -1538,6 +1555,11 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 s.count_in = on;
                 save_settings = true;
                 core.send(Command::SetCountIn(on));
+            }
+            UiCmd::MasterGain { gain } => {
+                s.master_gain = if gain.is_finite() { gain.clamp(0.0, 1.5) } else { 1.0 };
+                save_settings = true;
+                core.master.store(s.master_gain.to_bits(), Ordering::Relaxed);
             }
             UiCmd::ClickGain { gain } => {
                 s.click_gain = gain;
@@ -2298,6 +2320,7 @@ fn main() {
                 metro_on: Arc::new(AtomicBool::new(false)),
                 audio_failed: Arc::new(AtomicBool::new(false)),
                 levels: Arc::new(Mutex::new([0.0; 64])),
+                master: Arc::new(std::sync::atomic::AtomicU32::new(settings.master_gain.to_bits())),
                 audio_lost: AtomicBool::new(false),
                 midi_lost: AtomicBool::new(false),
                 map: Mutex::new(map),
@@ -2398,6 +2421,7 @@ mod tests {
                 metro_on: Arc::new(AtomicBool::new(false)),
                 audio_failed: Arc::new(AtomicBool::new(false)),
                 levels: Arc::new(Mutex::new([0.0; 64])),
+                master: Arc::new(std::sync::atomic::AtomicU32::new(1f32.to_bits())),
                 audio_lost: AtomicBool::new(false),
                 midi_lost: AtomicBool::new(false),
                 map: Mutex::new(MidiMap::default()),

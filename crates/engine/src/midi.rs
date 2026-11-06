@@ -52,11 +52,13 @@ pub enum Action {
     StemLevel(usize),
     /// Continuous: a fader sets the click level.
     ClickLevel,
+    /// Continuous: a fader sets the master level (everything out).
+    MasterLevel,
 }
 
 impl Action {
     pub fn is_level(&self) -> bool {
-        matches!(self, Action::StemLevel(_) | Action::ClickLevel)
+        matches!(self, Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel)
     }
 }
 

@@ -378,6 +378,11 @@
         async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; }, null, 'bus:' + b.id))));
       g.append(faderStrip('Click (built-in)', V.click_gain, 1.5, x => { V.click_gain = x; send({ type: 'ClickGain', gain: x }); }, null, null));
       g.append(faderStrip('Pad', V.pads.level, 1.5, x => { V.pads.level = x; invoke('pad_mix', { level: x, route: null }).catch(err); }, !V.pads.on, () => togglePad()));
+      // Master: everything the app sends out (songs, click, pad). No mute button here, on purpose:
+      // one mis-tap would silence the band. It stays at the right edge while the buses scroll.
+      const ms = faderStrip('Master', V.master_gain == null ? 1 : V.master_gain, 1.5, x => { V.master_gain = x; send({ type: 'MasterGain', gain: x }); }, false, null, 'Master level', 'master');
+      ms.classList.add('master'); ms.title = 'Master: everything the app sends out. Double-click for 100%.';
+      g.append(ms);
       if (!(V.buses || []).length) box.append(el('p', 'hint', 'Load a song to see its buses.'));
       box.append(g);
     } else if (liveTab === 'pads') {
@@ -1356,12 +1361,12 @@
     { label: 'Pedal 3', tap: 'Repeat', hold: 'ToggleVamp', desc: 'Tap: repeat block · Hold: vamp' },
     { label: 'Pedal 4', tap: 'NextSong', hold: 'PadOnly', desc: 'Tap: next song · Hold: pad only' },
     { label: 'Play / stop button', tap: 'PlayStop' }, { label: 'Next button', tap: 'Next' }, { label: 'Repeat button', tap: 'Repeat' },
-    { label: 'Vamp button', tap: 'ToggleVamp' }, { label: 'Next song button', tap: 'NextSong' }, { label: 'Click fader', tap: 'ClickLevel' },
+    { label: 'Vamp button', tap: 'ToggleVamp' }, { label: 'Next song button', tap: 'NextSong' }, { label: 'Click fader', tap: 'ClickLevel' }, { label: 'Master fader', tap: 'MasterLevel', desc: 'Everything the app sends out' },
     { label: 'Live / Edit page button', tap: 'ToggleView' }, { label: 'Fade out button', tap: 'FadeOut', desc: 'Fades the song out over 2 bars and stops' }, { label: 'Free click button', tap: 'FreeClick', desc: 'Starts or stops the click with no song' },
   ];
   function actionLabel(a) {
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
-    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
+    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', MasterLevel: 'Master fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
   }
   const controlLabel = c => (c.Note ? `Note ${c.Note.key} · ch ${c.Note.ch + 1}` : c.Cc ? `CC ${c.Cc.num} · ch ${c.Cc.ch + 1}` : '?');
   function renderSetup() {
@@ -1503,6 +1508,7 @@
   /* ---------- events from Rust ---------- */
   T.event.listen('stem-level', e => { const [i, g] = e.payload; if (!V || !V.song || !V.song.stems[i]) return; V.song.stems[i].gain = g; const f = $('#fader-' + i); if (f) f.value = g; });
   T.event.listen('click-level', e => { if (V) V.click_gain = e.payload; });
+  T.event.listen('master-level', e => { if (V) { V.master_gain = e.payload; if (page === 'live' && liveTab === 'mix') renderLiveTab(); } });
   T.event.listen('midi-learned', () => { learnWait = null; refresh().then(() => toast('Control assigned.')); });
   T.event.listen('audio-error', e => toast('Audio problem: ' + e.payload));
   // Unplugged and plugged back in: the app reconnects by itself.
@@ -1574,11 +1580,12 @@
   // Level meters: each shows the loudest of its tracks, in dB (-60..+6), falling back smoothly.
   const meterShown = new Map();
   const meterHold = new Map();
-  function showMeters(levels) {
+  function showMeters(levels, master) {
     document.querySelectorAll('[data-meter]').forEach(m => {
       const [kind, id] = m.dataset.meter.split(':');
       let pk = 0;
       if (kind === 'stem') pk = levels[+id] || 0;
+      else if (kind === 'master') pk = master || 0;
       else { const b = (V.buses || []).find(x => x.id === id); if (b) b.stems.forEach(i => { pk = Math.max(pk, levels[i] || 0); }); }
       const db = pk > 0 ? 20 * Math.log10(pk) : -90;
       const target = Math.max(0, Math.min(1, (db + 60) / 66));
@@ -1600,7 +1607,7 @@
       if (s.song_changed) { toast('Next song: ' + ((V.setlist[(V.current || 0) + 1] || {}).name || '')); await refresh(); return; }
       if (s.pad_changed) { await refresh(); return; }
       renderConn(s);
-      if (s.levels) showMeters(s.levels);
+      if (s.levels) showMeters(s.levels, s.master_level);
       if (V && V.free_click && s.free_click !== V.free_click.on) { V.free_click.on = s.free_click; if (page === 'live') renderLiveTab(); }
       // The next song loads in the background: show when it's ready.
       if (V && V.song && !V.next_ready && V.current != null && V.setlist[V.current + 1] && ++readyPoll % 50 === 0) await refresh();

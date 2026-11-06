@@ -167,7 +167,7 @@ pub fn list_outputs() -> Vec<OutputInfo> {
 }
 
 /// Opens an output (by name, or the system default) using all of its channels.
-pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, levels: Arc<Mutex<[f32; 64]>>, on_error: impl Fn(String, bool) + Send + 'static) -> Result<Output, String> {
+pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, levels: Arc<Mutex<[f32; 64]>>, master: Arc<std::sync::atomic::AtomicU32>, on_error: impl Fn(String, bool) + Send + 'static) -> Result<Output, String> {
     let (tx, mut rx) = rtrb::RingBuffer::<ToAudio>::new(1024);
     let (mut gtx, garbage) = rtrb::RingBuffer::<Garbage>::new(32);
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -212,6 +212,7 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
             let mut decks = Decks::new(channels);
             let mut metro = crate::metronome::Metronome::new(sample_rate);
             let mut pads = crate::pads::PadPlayer::new(sample_rate);
+            let mut out_level = Master::new(sample_rate);
             let stream = dev.build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
@@ -275,7 +276,7 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                         }
                         // meters: the loudest each stem got since the screen last looked
                         if let Ok(mut lv) = levels.try_lock() {
-                            for (l, p) in lv.iter_mut().zip(e.peaks()) {
+                            for (l, p) in lv[..MASTER_SLOT].iter_mut().zip(e.peaks()) {
                                 if *p > *l {
                                     *l = *p;
                                 }
@@ -290,6 +291,13 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                     metro.process(data, channels);
                     if let Some(done) = pads.process(data, channels) {
                         let _ = gtx.push(Garbage::Pad(done));
+                    }
+                    // The master fader: last, on everything that goes out.
+                    let pk = out_level.process(data, channels, f32::from_bits(master.load(Ordering::Relaxed)));
+                    if let Ok(mut lv) = levels.try_lock() {
+                        if pk > lv[MASTER_SLOT] {
+                            lv[MASTER_SLOT] = pk;
+                        }
                     }
                 },
                 move |err| {
@@ -317,6 +325,40 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
 
     let info = ready_rx.recv().map_err(|_| "The audio thread stopped unexpectedly.".to_string())??;
     Ok(Output { info, tx, garbage, stop: stop_tx })
+}
+
+/// Where the master meter's peak is kept in the shared levels (stems use the slots before it).
+pub const MASTER_SLOT: usize = 63;
+
+/// The master fader: one level on everything the app sends out (songs, built-in click,
+/// pads). Moves are ramped over 30 ms so a fast fader move never clicks.
+pub struct Master {
+    cur: f32,
+    step: f32,
+}
+
+impl Master {
+    pub fn new(sample_rate: u32) -> Self {
+        Master { cur: 1.0, step: 1.0 / (0.03 * sample_rate as f32).max(1.0) }
+    }
+
+    /// Scales `data` (interleaved) toward `target`; returns the loudest sample afterwards.
+    pub fn process(&mut self, data: &mut [f32], channels: usize, target: f32) -> f32 {
+        let target = if target.is_finite() { target.clamp(0.0, 2.0) } else { 1.0 };
+        let mut peak = 0f32;
+        for frame in data.chunks_mut(channels.max(1)) {
+            if self.cur < target {
+                self.cur = (self.cur + self.step).min(target);
+            } else if self.cur > target {
+                self.cur = (self.cur - self.step).max(target);
+            }
+            for s in frame.iter_mut() {
+                *s *= self.cur;
+                peak = peak.max(s.abs());
+            }
+        }
+        peak
+    }
 }
 
 #[cfg(test)]
@@ -433,5 +475,36 @@ mod tests {
         let (a, _, n) = run(&mut d, 5000);
         assert_eq!(n, 0);
         assert_eq!(a[4500], 1.0, "still looping the first song");
+    }
+
+    #[test]
+    fn the_master_fader_ramps_to_its_level_without_a_jump() {
+        // SR 1000: the ramp takes 30 frames for a full 0..1 move.
+        let mut m = Master::new(1000);
+        let mut data = vec![1.0f32; 100 * CH];
+        let pk = m.process(&mut data, CH, 0.5);
+        // both channels of a frame get the same gain
+        assert_eq!(data[0], data[1]);
+        // no step: the first frame barely moves, and each frame moves at most one ramp step
+        assert!(data[0] > 0.96, "first frame {}", data[0]);
+        for f in 1..100 {
+            assert!((data[f * CH] - data[(f - 1) * CH]).abs() <= 1.0 / 30.0 + 1e-6);
+        }
+        // settled at half after 15 frames, and stays there
+        for f in 16..100 {
+            assert!((data[f * CH] - 0.5).abs() < 1e-6, "frame {f}: {}", data[f * CH]);
+        }
+        assert!((pk - data[0]).abs() < 1e-6, "peak is the loudest sample out");
+        // all the way down: silence; and back to unity
+        let mut data = vec![1.0f32; 100 * CH];
+        m.process(&mut data, CH, 0.0);
+        assert_eq!(data[99 * CH], 0.0);
+        let mut data = vec![0.8f32; 100 * CH];
+        m.process(&mut data, CH, 1.0);
+        assert!((data[99 * CH] - 0.8).abs() < 1e-6);
+        // a broken value never mutes the band
+        let mut data = vec![0.8f32; 100 * CH];
+        m.process(&mut data, CH, f32::NAN);
+        assert!((data[99 * CH] - 0.8).abs() < 1e-6);
     }
 }
