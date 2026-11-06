@@ -626,3 +626,19 @@ body.live-mode .bar .lcd { display: none }
 .title.screen span { color: var(--scr-dim) }
 /* ---------- The time display never shrinks to a letter ---------- */
 @media (min-width: 1381px) { .lcd { min-width: 300px } }
+
+/* ---------- Top bar: icons with small captions (like hardware), and nothing overlaps ---------- */
+.songsel { flex: 0 0 auto; width: 290px; min-width: 0; overflow: hidden }
+.songsel .title.screen { flex: 1 1 auto; min-width: 0 }
+.title.screen b, .title.screen span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.bar .icb { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; height: 54px; min-width: 60px; padding: 0 8px; font: 700 9.5px/1 var(--f-ui); letter-spacing: .08em; text-transform: uppercase; position: relative }
+.bar .icb svg, .bar .tp.icb .ti { width: 20px; height: 20px; fill: currentColor; opacity: .9; flex: none }
+.bar .tp.icb { min-width: 66px }
+.bar .tog.icb { color: var(--muted) }
+.bar .tog.icb.on { color: var(--fg) }
+.bar .tog.icb::before { position: absolute; top: 6px; right: 6px; width: 6px; height: 6px }
+.bar .ib.icb { height: 54px }
+.bar .seg { align-self: center }
+@media (max-width: 1280px) { .songsel { width: 240px } .bar .icb { min-width: 52px; padding: 0 6px } .bar .tp.icb { min-width: 56px } }
+@media (max-width: 1100px) { .songsel { width: 200px } }
+.bar .right { margin-left: auto }

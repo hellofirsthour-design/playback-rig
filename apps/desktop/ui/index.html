@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="style.css">
 <body>
 <header class="bar">
-  <button class="ib" id="setBtn" title="Set list">Set</button>
+  <button class="ib icb" id="setBtn" title="Set list"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h2v2H3zM7 4h10v2H7zM3 9h2v2H3zM7 9h10v2H7zM3 14h2v2H3zM7 14h10v2H7z"/></svg><span>Set</span></button>
   <div class="songsel">
     <button class="ib arrow" id="prevSong" aria-label="Previous song" title="Previous song">‹</button>
     <div class="title screen"><b id="songTitle">No song</b><span id="songMeta"></span></div>
@@ -18,9 +18,9 @@
       <svg class="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></svg>
       <svg class="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
     </button>
-    <button class="tp" data-cmd="Next" title="Next block (N). Press again to skip one more."><svg class="ti" viewBox="0 0 16 16"><path d="M2 3l6 5-6 5zM8 3l6 5-6 5z"/></svg>Next</button>
-    <button class="tp" data-cmd="Repeat" title="Play this block again (R)"><svg class="ti" viewBox="0 0 16 16"><path d="M8 2.5a5.5 5.5 0 1 1-5.2 3.7l1.6.6A3.8 3.8 0 1 0 8 4.2V6L4.8 3.4 8 .8z"/></svg>Repeat</button>
-    <button class="tp" id="vampBtn" data-cmd="Vamp" title="Loop this block until pressed again (V)"><svg class="ti" viewBox="0 0 16 16"><path d="M4.5 4.5C2.6 4.5 1 6.1 1 8s1.6 3.5 3.5 3.5c1.6 0 2.6-1.2 3.5-2.4.9 1.2 1.9 2.4 3.5 2.4C13.4 11.5 15 9.9 15 8s-1.6-3.5-3.5-3.5c-1.6 0-2.6 1.2-3.5 2.4-.9-1.2-1.9-2.4-3.5-2.4zm0 1.7c.9 0 1.6.8 2.4 1.8-.8 1-1.5 1.8-2.4 1.8a1.8 1.8 0 0 1 0-3.6zm7 0a1.8 1.8 0 0 1 0 3.6c-.9 0-1.6-.8-2.4-1.8.8-1 1.5-1.8 2.4-1.8z"/></svg>Vamp</button>
+    <button class="tp icb" data-cmd="Next" title="Next block (N). Press again to skip one more."><svg class="ti" viewBox="0 0 16 16"><path d="M2 3l6 5-6 5zM8 3l6 5-6 5z"/></svg><span>Next</span></button>
+    <button class="tp icb" data-cmd="Repeat" title="Play this block again (R)"><svg class="ti" viewBox="0 0 16 16"><path d="M8 2.5a5.5 5.5 0 1 1-5.2 3.7l1.6.6A3.8 3.8 0 1 0 8 4.2V6L4.8 3.4 8 .8z"/></svg><span>Repeat</span></button>
+    <button class="tp icb" id="vampBtn" data-cmd="Vamp" title="Loop this block until pressed again (V)"><svg class="ti" viewBox="0 0 16 16"><path d="M4.5 4.5C2.6 4.5 1 6.1 1 8s1.6 3.5 3.5 3.5c1.6 0 2.6-1.2 3.5-2.4.9 1.2 1.9 2.4 3.5 2.4C13.4 11.5 15 9.9 15 8s-1.6-3.5-3.5-3.5c-1.6 0-2.6 1.2-3.5 2.4-.9-1.2-1.9-2.4-3.5-2.4zm0 1.7c.9 0 1.6.8 2.4 1.8-.8 1-1.5 1.8-2.4 1.8a1.8 1.8 0 0 1 0-3.6zm7 0a1.8 1.8 0 0 1 0 3.6c-.9 0-1.6-.8-2.4-1.8.8-1 1.5-1.8 2.4-1.8z"/></svg><span>Vamp</span></button>
   </div>
 
   <div class="lcd screen" aria-live="polite">
@@ -31,13 +31,13 @@
 
   <div class="opts">
     <div class="seg" id="quant" role="group" aria-label="Jump timing"><button data-q="Now">Now</button><button data-q="Bar">Bar</button><button data-q="SectionEnd">End</button></div>
-    <button class="tog" id="clickBtn" title="Built-in click">Click</button>
-    <button class="tog" id="countBtn" title="One bar of click before the song">Count-in</button>
-    <button class="tog pad" id="padBtn" title="Sustained pad in the song's key (pedal 4, hold)">Pad</button>
+    <button class="tog icb" id="clickBtn" title="Built-in click"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 2h4l3.5 16h-11zM9.4 4 7 16h6l-.6-3.2-4.1-5.6 1-.7 2.6 3.5L10.6 4z"/></svg><span>Click</span></button>
+    <button class="tog icb" id="countBtn" title="One bar of click before the song"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 13h3v3H2zM6.5 10h3v6h-3zM11 7h3v9h-3zM15.5 4h3v12h-3z"/></svg><span>Count-in</span></button>
+    <button class="tog pad icb" id="padBtn" title="Sustained pad in the song's key (pedal 4, hold)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M1 10c2-5 4-5 6 0s4 5 6 0 4-5 6 0l-1.6.6C15.9 7 14.6 7 13 11c-2 5-4 5-6 0-1.6-4-2.9-4-4.4-.4z"/></svg><span>Pad</span></button>
   </div>
   <div class="right">
-    <button class="ib" id="songBtn">Song</button>
-    <button class="ib" id="setupBtn">Setup</button>
+    <button class="ib icb" id="songBtn" title="Song details, key and tempo"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 3l9-2v12.5a2.5 2.5 0 1 1-1.8-2.4V4.3L9.8 5.5v10a2.5 2.5 0 1 1-1.8-2.4z"/></svg><span>Song</span></button>
+    <button class="ib icb" id="setupBtn" title="Setup: audio, outputs, MIDI, pads, look"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.6 1h2.8l.5 2.5 1.6.7 2.1-1.4 2 2-1.4 2.1.7 1.6 2.5.5v2.8l-2.5.5-.7 1.6 1.4 2.1-2 2-2.1-1.4-1.6.7-.5 2.5H8.6l-.5-2.5-1.6-.7-2.1 1.4-2-2 1.4-2.1-.7-1.6L.6 11.4V8.6l2.5-.5.7-1.6-1.4-2.1 2-2 2.1 1.4 1.6-.7zM10 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg><span>Setup</span></button>
   </div>
 </header>
 

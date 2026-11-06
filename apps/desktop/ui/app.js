@@ -189,7 +189,7 @@
     $('#countBtn').classList.toggle('on', V.count_in);
     const pd = V.pads;
     $('#padBtn').classList.toggle('on', pd.on);
-    $('#padBtn').textContent = pd.on && pd.song_key ? `Pad · ${pd.song_key}` : 'Pad';
+    $('#padBtn span').textContent = pd.on && pd.song_key ? `Pad · ${pd.song_key}` : 'Pad';
   }
   function tick() {
     if (!V) return;
