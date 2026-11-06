@@ -84,6 +84,13 @@ pub struct Transition {
     /// or a pad under the whole song.
     #[serde(default)]
     pub pad_start: PadStart,
+    /// Medley: leave this song after this block (its place in the arrangement) instead
+    /// of playing to the end. Only with a segue or crossfade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leave_after: Option<usize>,
+    /// Medley: start the next song at this block of its arrangement instead of the top.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enter_at: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -106,7 +113,7 @@ fn four() -> u32 {
 
 impl Default for Transition {
     fn default() -> Self {
-        Transition { mode: TransitionMode::Stop, bars: 2.0, pad: false, pad_start: PadStart::Off }
+        Transition { mode: TransitionMode::Stop, bars: 2.0, pad: false, pad_start: PadStart::Off, leave_after: None, enter_at: None }
     }
 }
 

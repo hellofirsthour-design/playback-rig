@@ -204,7 +204,8 @@
       <label>Built-in click goes to<select id="clickRoute"></select></label>
       <label>Click level<input id="clickGain" type="range" min="0" max="1.5" step="0.01"></label>
     </div>
-    <label class="chk"><input type="checkbox" id="smoothJumps"> Smooth jumps: when the arrangement skips ahead or you jump, the music you left rings out for a moment instead of cutting off</label>
+    <div class="blendrow"><span class="lbl">Blend</span><div id="blendSeg"></div></div>
+    <p class="hint">How jumps sound. Inside a song (a skipped section, a jump, a repeat or vamp) the music you leave rings out under the new part for this long. When you cut to another song mid-song (tap it in the set while one plays), the new song comes in on the next bar and the old one fades under it for this long. Cut = straight in.</p>
     <p class="hint" id="outHint"></p>
   </div>
   <div class="card">

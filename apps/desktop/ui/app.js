@@ -310,13 +310,19 @@
       const li = el('li', (i === V.current ? 'cur' : i === V.current + 1 ? 'next' : '') + (s.found ? '' : ' missing'));
       li.append(el('span', 'snm', s.name + (i + 1 < V.setlist.length ? arrow : '')));
       if (s.key) li.append(el('span', 'skey', s.key));
-      li.onclick = () => { if (playing()) { toast('Stop the song to switch.'); return; } selectSong(i); };
+      if (V.jump_to === i) li.classList.add('cut');
+      li.onclick = () => { if (playing()) { cutTo(i); return; } selectSong(i); };
       set.append(li);
     });
     // Next song: what's coming, before you get there.
-    const nc = $('#lvNextSong'), nx = V && V.current != null ? V.setlist[V.current + 1] : null;
-    nc.hidden = !nx; nc.innerHTML = '';
-    if (nx) {
+    const cutting = V && V.jump_to != null ? V.setlist[V.jump_to] : null;
+    const nc = $('#lvNextSong'), nx = cutting || (V && V.current != null ? V.setlist[V.current + 1] : null);
+    nc.hidden = !nx; nc.innerHTML = ''; nc.classList.toggle('cutting', !!cutting);
+    if (cutting) {
+      nc.append(el('div', 'lbl', 'Cutting to'), el('div', 'nsn', cutting.name));
+      const facts = el('div', 'nsf'); if (cutting.key) facts.append(el('b', 'nsk', cutting.key)); if (cutting.bpm) facts.append(el('span', null, `${+cutting.bpm.toFixed(1)} BPM`));
+      nc.append(facts, el('div', 'nsh', (V.next_ready ? 'At the next bar' : 'Loading… then at the next bar') + ' · tap it again to cancel'));
+    } else if (nx) {
       const how = { Segue: 'Segues in', Crossfade: 'Crossfades in' }[(V.setlist[V.current] || {}).transition] || 'Starts on play';
       const pad = { Intro: 'pad through intro', Song: 'pad whole song' }[nx.pad_start];
       nc.append(el('div', 'lbl', 'Next song'), el('div', 'nsn', nx.name));
@@ -703,6 +709,11 @@
     opts.forEach(([v, t]) => { const b = el('button', v === cur ? 'on' : null, t); b.onclick = () => { if (v !== cur) onPick(v); }; g.append(b); });
     return g;
   }
+  // Cut to another song while one plays: it comes in on the next bar, blended (Setup → Blend).
+  function cutTo(i) {
+    if (!V || !V.setlist[i] || i === V.current && V.jump_to == null) return;
+    invoke('cut_to_song', { index: i }).then(v => { refresh(v); toast(v.jump_to === i ? `${V.setlist[i].name} comes in at the next bar.` : 'Cut cancelled.'); }).catch(err);
+  }
   function renderFades(box) {
     box.innerHTML = '';
     const s = V && V.song;
@@ -740,6 +751,23 @@
       if (tr.mode !== 'Stop') g2.append(el('span', 'fst' + (V.next_ready ? ' ok' : ''), V.next_ready ? '● ready' : 'loading…'));
     }
     box.append(g2);
+    // Medley: leave this song partway and enter the next one partway (with a segue or crossfade).
+    if (nx && tr.mode !== 'Stop') {
+      const gm = el('div', 'fgrp medley');
+      gm.append(el('span', 'flbl', 'Medley'), el('span', 'fst', 'leave after'));
+      const out = el('select'); out.setAttribute('aria-label', 'Leave this song after');
+      out.append(new Option('the end', ''));
+      blocks.forEach((b, i) => out.append(new Option(`${i + 1}. ${b.section}`, String(i))));
+      out.value = tr.leave_after != null ? String(tr.leave_after) : '';
+      out.onchange = () => setTransition({ ...tr, leave_after: out.value === '' ? null : +out.value });
+      const into = el('select'); into.setAttribute('aria-label', `Start ${nx.name} at`);
+      into.append(new Option('the top', ''));
+      (nx.blocks || []).forEach((b, i) => into.append(new Option(`${i + 1}. ${b}`, String(i))));
+      into.value = tr.enter_at != null ? String(tr.enter_at) : '';
+      into.onchange = () => setTransition({ ...tr, enter_at: into.value === '' ? null : +into.value });
+      gm.append(out, el('span', 'fst', `start ${nx.name} at`), into);
+      box.append(gm);
+    }
     // Pad underneath
     const g3 = el('div', 'fgrp padend');
     const pad = el('button', 'tog pad' + (tr.pad ? ' on' : ''), 'Pad under ending');
@@ -1523,7 +1551,8 @@
       r.append(el('span', null, b.name), sel); br.append(r);
     });
     if (document.activeElement !== $('#clickGain')) $('#clickGain').value = V.click_gain;
-    $('#smoothJumps').checked = V.smooth_jumps !== false;
+    const bs = $('#blendSeg'); bs.innerHTML = '';
+    bs.append(seg([['Cut', 'Cut'], ['Short', 'Short'], ['Beat', '1 beat'], ['Bar', '1 bar']], V.blend || 'Short', v => { V.blend = v; send({ type: 'Blend', blend: v }).then(() => renderSetup()); }, 'Blend'));
     $('#outHint').textContent = ((V.output && V.output.channels >= 4) ? 'By default Click & guide go to Out 3-4 (in-ears) and every other bus to Out 1-2 (front of house).' : 'Only 2 outputs, so everything plays on 1-2. Pick your audio interface to send click and guide to the in-ears.')
       + ' Plug in another interface and it gets its own routing; plug this one back in and yours comes back. If it is unplugged mid-service, the set stays loaded and it reconnects by itself.';
     renderPads();
@@ -1562,7 +1591,6 @@
   $('#padRoute').onchange = e => { V.pads.route = keyRoute(e.target.value); invoke('pad_mix', { level: null, route: V.pads.route }).catch(err); };
 
   $('#outSel').onchange = e => { if (playing()) { toast('Stop playback before changing the audio output.'); renderSetup(); return; } invoke('choose_output', { name: e.target.value }).then(v => { refresh(v); toast('Audio output changed.'); }).catch(err); };
-  $('#smoothJumps').onchange = e => { V.smooth_jumps = e.target.checked; send({ type: 'SmoothJumps', on: V.smooth_jumps }); };
   $('#clickRoute').onchange = e => { V.click_route = keyRoute(e.target.value); send({ type: 'ClickRoute', route: V.click_route }); };
   $('#clickGain').oninput = e => { V.click_gain = +e.target.value; send({ type: 'ClickGain', gain: V.click_gain }); };
   $('#midiSel').onchange = e => invoke('choose_midi', { name: e.target.value || null }).then(refresh).catch(err);
@@ -1693,7 +1721,7 @@
     else if (typeof e.payload === 'string' && e.payload.startsWith('song:')) {
       // A song button on the controller: straight to that song in the set.
       const i = +e.payload.slice(5); if (!V || !V.setlist[i]) { toast(`There's no song ${i + 1} in the set.`); return; }
-      if (playing()) { toast(`Stop this song to go to ${V.setlist[i].name}.`); return; }
+      if (playing()) { cutTo(i); return; }
       if (i !== V.current) selectSong(i);
     }
     else if (e.payload === 'pad-only') togglePad();

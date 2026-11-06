@@ -37,6 +37,9 @@ pub struct Handoff {
     /// The current song's click and guide stems, muted at the handoff so the in-ears
     /// only hear the new song's click.
     pub cues: [Option<usize>; 2],
+    /// Take over at the current song's next bar line instead of at its end (cutting to
+    /// another song mid-song); `fade` is then the blend.
+    pub at_bar: bool,
 }
 
 /// Things the audio thread hands back to be freed elsewhere. Only ever dropped.
@@ -60,6 +63,14 @@ impl Decks {
         // The next song starts `overlap` frames before the current one ends: in this
         // buffer, after `delay` frames, so the handoff lands on the exact frame.
         let delay = match (self.engine.as_ref(), self.queued.as_ref()) {
+            (Some(e), Some((_, h))) if h.at_bar => match (e.frames_to_bar(), e.frames_left()) {
+                // the next bar line, or the song's end if that comes first
+                (Some(b), left) => match left.map_or(b, |l| l.min(b)) {
+                    d if d <= frames => d,
+                    _ => return false,
+                },
+                _ => return false,
+            },
             (Some(e), Some((_, h))) => match e.frames_left() {
                 Some(left) if left <= h.overlap + frames => left.saturating_sub(h.overlap),
                 _ => return false,
@@ -73,7 +84,10 @@ impl Decks {
             for i in h.cues.into_iter().flatten() {
                 old.handle(Command::SetStemMute(i, true));
             }
-            if h.fade > 0 {
+            if h.at_bar {
+                // A cut: full to the bar line, then it fades under the new song.
+                old.handle(Command::FadeOutAt(delay, h.fade.max(1)));
+            } else if h.fade > 0 {
                 // Starts at this buffer, ends exactly where the song would have.
                 old.handle(Command::FadeOut(h.fade + delay));
             }
@@ -421,7 +435,7 @@ mod tests {
     fn a_segue_starts_the_next_song_on_the_exact_frame_after_the_last() {
         let mut d = Decks::new(CH);
         d.engine = Some(Box::new(song(1.0, 4)));
-        d.queued = Some((Box::new(song(2.0, 4)), Handoff { overlap: 0, fade: 0, cues: [Some(1), None] }));
+        d.queued = Some((Box::new(song(2.0, 4)), Handoff { overlap: 0, fade: 0, cues: [Some(1), None], at_bar: false }));
         d.engine.as_mut().unwrap().handle(Command::Play);
         let (a, _, n) = run(&mut d, 6000);
         assert_eq!(n, 1);
@@ -433,11 +447,28 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_to_another_song_takes_over_on_the_next_bar_and_blends() {
+        let mut d = Decks::new(CH);
+        d.engine = Some(Box::new(song(1.0, 8)));
+        d.engine.as_mut().unwrap().handle(Command::Play);
+        let _ = run(&mut d, 1500); // halfway through bar 2
+        // Cut to song 2: it takes over at the next bar line (frame 2000) and the first
+        // song fades out under it over half a bar.
+        d.queued = Some((Box::new(song(2.0, 8)), Handoff { overlap: 0, fade: 500, cues: [Some(1), None], at_bar: true }));
+        let (a, b, n) = run(&mut d, 1500); // frames 1500..2999
+        assert_eq!(n, 1);
+        assert_eq!(a[400], 1.0, "the first song up to the bar line");
+        assert!((a[500 + 250] - 2.5).abs() < 0.1, "blending: new at full, old at half: {}", a[750]);
+        assert!((b[750] - 2000.0).abs() < 1.0, "only the new song's click: {}", b[750]);
+        assert_eq!(a[1200], 2.0, "then just the new song");
+    }
+
+        #[test]
     fn a_crossfade_overlaps_and_fades_the_last_song_and_mutes_its_click() {
         let mut d = Decks::new(CH);
         d.engine = Some(Box::new(song(1.0, 8)));
         // Two-bar crossfade: the next song starts 2000 frames before the end.
-        d.queued = Some((Box::new(song(2.0, 8)), Handoff { overlap: 2000, fade: 2000, cues: [Some(1), None] }));
+        d.queued = Some((Box::new(song(2.0, 8)), Handoff { overlap: 2000, fade: 2000, cues: [Some(1), None], at_bar: false }));
         d.engine.as_mut().unwrap().handle(Command::Play);
         let (a, b, n) = run(&mut d, 9000);
         assert_eq!(n, 1);

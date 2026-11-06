@@ -56,6 +56,12 @@ pub enum Command {
     /// music from where it left keeps sounding briefly and fades away under the new block.
     /// 0 = a straight cut.
     SetJoinTail(u64),
+    /// A medley's way out: the song ends after this block (when it gets there in order),
+    /// so the next song can take over. None = play to the end.
+    SetEndAfter(Option<usize>),
+    /// Like FadeOut, but the fade starts this many frames from now (a cut to another
+    /// song lands on a bar line partway through an audio buffer).
+    FadeOutAt(u64, u64),
 }
 
 /// What the screen needs to draw, read after each `process` call.
@@ -143,6 +149,10 @@ pub struct Engine {
     tail_len: u64,
     /// Each stem's level when the ring-out started.
     tail_gains: Vec<f32>,
+    /// Medley exit: the song ends after this block.
+    end_after: Option<usize>,
+    /// Frames before a scheduled stop fade begins (FadeOutAt).
+    stop_delay: u64,
 }
 
 impl Engine {
@@ -173,6 +183,8 @@ impl Engine {
             tail_left: 0,
             tail_len: 0,
             tail_gains: vec![0.0; mix.len()],
+            end_after: None,
+            stop_delay: 0,
             song,
             arr,
             stems,
@@ -326,6 +338,15 @@ impl Engine {
                 }
             }
             Command::SetJoinTail(n) => self.tail_frames = n,
+            Command::FadeOutAt(delay, n) => {
+                if self.playing && self.count_left == 0 {
+                    self.pending = None;
+                    let n = n.max(1);
+                    self.stop_delay = delay;
+                    self.stopping = Some((n, n));
+                }
+            }
+            Command::SetEndAfter(e) => self.end_after = e.filter(|i| *i < self.arr.items.len()),
             Command::FadeOut(n) => {
                 if self.playing {
                     self.pending = None;
@@ -353,6 +374,7 @@ impl Engine {
         }
         self.playing = true;
         self.stopping = None;
+        self.stop_delay = 0;
         self.pending = None;
         self.track_fade = None;
         self.tail_left = 0;
@@ -380,6 +402,7 @@ impl Engine {
             return;
         }
         self.pending = None;
+        self.stop_delay = 0;
         if self.count_left > 0 || self.wait > 0 {
             self.count_left = 0;
             self.wait = 0;
@@ -426,8 +449,23 @@ impl Engine {
             Some(p) => (p.at.saturating_sub(self.abs) + self.block_len(p.target).saturating_sub(p.from), p.target + 1),
             None => (self.block_len(self.item).saturating_sub(self.fpos), self.item + 1),
         };
-        let rest: u64 = (next..self.arr.items.len()).map(|i| self.block_len(i)).sum();
+        let last = self.last_item(next.saturating_sub(1));
+        let rest: u64 = (next..=last).map(|i| self.block_len(i)).sum();
         Some(self.wait + self.count_left + from_cur + rest)
+    }
+
+    /// The song's last block from `item` on: the medley exit if it's still ahead, else the end.
+    fn last_item(&self, item: usize) -> usize {
+        match self.end_after {
+            Some(e) if item <= e => e,
+            _ => self.arr.items.len() - 1,
+        }
+    }
+
+    /// Frames to the next bar line (for a song that takes over on the bar). None when
+    /// not playing music yet (count-in, waiting).
+    pub fn frames_to_bar(&self) -> Option<u64> {
+        (self.playing && self.count_left == 0 && self.wait == 0 && self.stopping.is_none()).then(|| self.boundary(Quantize::Bar).saturating_sub(self.abs))
     }
 
     /// Absolute frame of the next allowed jump point.
@@ -455,6 +493,8 @@ impl Engine {
     fn natural_next(&self) -> Option<usize> {
         if self.vamp {
             Some(self.item)
+        } else if self.end_after == Some(self.item) {
+            None // the medley leaves here
         } else if self.item + 1 < self.arr.items.len() {
             Some(self.item + 1)
         } else {
@@ -665,7 +705,9 @@ impl Engine {
 
             // Envelopes: stop fade, fade out before a cut, fade in after one.
             let mut master = 1.0f32;
-            if let Some((left, total)) = self.stopping {
+            if self.stop_delay > 0 {
+                self.stop_delay -= 1; // a scheduled fade hasn't started yet
+            } else if let Some((left, total)) = self.stopping {
                 if left == 0 {
                     self.playing = false;
                     self.stopping = None;
@@ -1337,5 +1379,50 @@ mod tests {
         let mut buf = vec![0.0f32; 8100 * CH];
         e.process(&mut buf);
         assert_eq!(buf[8050 * CH], 16050.0);
+    }
+
+    #[test]
+    fn a_medley_leaves_after_its_exit_block() {
+        let mut e = rig(None); // A B C, 8000 frames each
+        e.handle(Command::SetEndAfter(Some(1)));
+        e.handle(Command::Play);
+        assert_eq!(e.frames_left(), Some(16000), "A and B, then out");
+        let mut buf = vec![0.0f32; 15990 * CH];
+        e.process(&mut buf);
+        assert_eq!(buf[12000 * CH], 12000.0, "B plays");
+        let mut buf = vec![0.0f32; 100 * CH];
+        e.process(&mut buf);
+        assert!(!e.snapshot().playing && e.snapshot().finished, "ended after B");
+        assert_eq!(buf[50 * CH], 0.0, "C never plays");
+        // Jumping past the exit plays on to the real end.
+        let mut e = rig(None);
+        e.handle(Command::SetEndAfter(Some(0)));
+        e.handle(Command::SetQuantize(Quantize::Now));
+        e.handle(Command::Play);
+        e.handle(Command::Goto(2));
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf);
+        assert_eq!(e.snapshot().item, 2);
+        assert!(e.frames_left().unwrap() <= 8000);
+        // Bar lines: at frame 1000 of a 4000-frame bar, 3000 to go.
+        let mut e = rig(None);
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf);
+        assert_eq!(e.frames_to_bar(), Some(3000));
+    }
+
+    #[test]
+    fn a_scheduled_fade_starts_exactly_where_asked() {
+        let mut e = rig(None);
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf);
+        e.handle(Command::FadeOutAt(300, 400)); // full until frame 1300, silent at 1700
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf);
+        assert_eq!(buf[299 * CH], 1299.0, "full level up to the start");
+        assert!((buf[500 * CH] - 1500.0 * 0.5).abs() < 3.0, "halfway down: {}", buf[500 * CH]);
+        assert!(!e.snapshot().playing, "stopped once faded");
     }
 }

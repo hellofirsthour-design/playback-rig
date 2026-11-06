@@ -43,8 +43,9 @@ struct Settings {
     click_route: Option<Route>,
     /// The master fader: everything the app sends out.
     master_gain: f32,
-    /// Jumps in the arrangement ring out briefly instead of cutting (see SetJoinTail).
-    smooth_jumps: bool,
+    /// How jumps blend: inside a song (the music you leave rings out, see SetJoinTail)
+    /// and when you cut to another song mid-song (the old one fades under the new).
+    blend: Blend,
     /// Settings format; older settings are migrated on load.
     version: u32,
     /// Folder of pad files, one per key.
@@ -71,6 +72,47 @@ struct Settings {
     /// Tracks moved to a bus by hand, by track name (lowercase) -> bus id.
     /// Applies to that track name in every song.
     bus_of_track: std::collections::BTreeMap<String, String>,
+}
+
+/// How jumps blend (Setup → Blend).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+enum Blend {
+    /// Straight cut (a 5 ms fade so it doesn't click).
+    Cut,
+    /// About a third of a second.
+    #[default]
+    Short,
+    Beat,
+    Bar,
+}
+
+/// The blend length in frames for a loaded song, at its playing tempo.
+fn blend_frames(b: Blend, l: &Loaded) -> u64 {
+    match b {
+        Blend::Cut => 0,
+        Blend::Short => (l.sample_rate as f64 * 0.3) as u64,
+        Blend::Beat => l.song.frames_per_beat().round() as u64,
+        Blend::Bar => l.song.frames_per_bar().round() as u64,
+    }
+}
+
+/// A block's place in the engine's arrangement, from its place in the song file's
+/// (blocks naming a section the song doesn't have are skipped by the engine).
+fn arr_index(l: &Loaded, file_index: usize) -> Option<usize> {
+    let known = |b: &Block| l.song.sections.iter().any(|s| s.name == b.section);
+    if !l.file.arrangement.get(file_index).is_some_and(known) {
+        return None;
+    }
+    Some(l.file.arrangement[..file_index].iter().filter(|b| known(b)).count())
+}
+
+/// Where a medley leaves this song (None = the end).
+fn medley_exit(l: &Loaded) -> Option<usize> {
+    let t = l.file.transition;
+    if t.mode == songfile::TransitionMode::Stop {
+        return None;
+    }
+    t.leave_after.and_then(|i| arr_index(l, i))
 }
 
 /// A pad sound: a folder with one file per key.
@@ -248,7 +290,7 @@ impl Default for Settings {
             click_gain: 0.8,
             click_route: None,
             master_gain: 1.0,
-            smooth_jumps: true,
+            blend: Blend::Short,
             version: 1,
             pads_folder: None,
             pad_sounds: vec![],
@@ -354,6 +396,8 @@ struct AppState {
     seen_segues: AtomicU64,
     /// The pad was brought in automatically for this song's ending.
     pad_auto: AtomicBool,
+    /// A song to cut to on the next bar while the current one plays (set list place).
+    jump_to: Mutex<Option<usize>>,
     /// The pad carried over from the last song by a manual switch: it keeps its key
     /// until play, then follows the new song.
     pad_hold: AtomicBool,
@@ -759,7 +803,8 @@ fn mix_commands(settings: &Settings, l: &Loaded, ch: usize) -> Vec<Command> {
         Command::SetClickGain(settings.click_gain),
         Command::SetClickRoute(settings.click_route.unwrap_or(songfile::default_route("click", ch))),
         // Ring-out at jumps (Setup → Smooth jumps): about a third of a second.
-        Command::SetJoinTail(if settings.smooth_jumps { (l.sample_rate as f64 * 0.3) as u64 } else { 0 }),
+        Command::SetJoinTail(blend_frames(settings.blend, l)),
+        Command::SetEndAfter(medley_exit(l)),
     ];
     for (i, st) in l.file.stems.iter().enumerate() {
         let (g, m, r) = effective(settings, &l.file, st);
@@ -780,15 +825,24 @@ fn make_engine(settings: &Settings, l: &Loaded, ch: usize) -> Result<Engine, Str
 /// Keeps the next song loaded and queued on the audio thread, following the set and
 /// the current song's transition. Called on every status poll; cheap when nothing changed.
 fn sync_next(app: &AppHandle, state: &AppState) {
+    let jump = *state.jump_to.lock().unwrap();
     let want = {
         let s = state.settings.lock().unwrap();
-        s.current.and_then(|c| s.setlist.get(c + 1)).cloned()
+        match jump {
+            Some(j) => s.setlist.get(j).cloned(),
+            None => s.current.and_then(|c| s.setlist.get(c + 1)).cloned(),
+        }
     };
     let cur = {
         let g = state.song.lock().unwrap();
         g.as_ref().map(|l| (l.folder.clone(), l.file.transition, end_bar(l), l.sample_rate, l.file.stems.iter().enumerate().filter(|(_, s)| songfile::is_click(&s.name) || songfile::is_guide(&s.name)).map(|(i, _)| i).collect::<Vec<_>>()))
     };
     let Some((cur_folder, tr, bar, sr, cues)) = cur else { return };
+    let cut_fade = {
+        let g = state.song.lock().unwrap();
+        let b = state.settings.lock().unwrap().blend;
+        g.as_ref().map_or(0, |l| blend_frames(b, l)).max((sr / 50) as u64)
+    };
     let want = want.filter(|w| *w != cur_folder);
     // Load it in the background if it isn't loaded (or is loaded for another output rate).
     let start_load = {
@@ -825,7 +879,8 @@ fn sync_next(app: &AppHandle, state: &AppState) {
     let settings = state.settings.lock().unwrap().clone();
     let mut n = state.next.lock().unwrap();
     let sig = match (&n.loaded, tr.mode) {
-        (Some(l), m) if m != songfile::TransitionMode::Stop => format!("{}|{}|{:?}|{}|{}", cur_folder.display(), l.folder.display(), m, tr.bars, bar),
+        (Some(l), _) if jump.is_some() => format!("cut|{}|{}|{}", cur_folder.display(), l.folder.display(), cut_fade),
+        (Some(l), m) if m != songfile::TransitionMode::Stop => format!("{}|{}|{:?}|{}|{}|{:?}", cur_folder.display(), l.folder.display(), m, tr.bars, bar, tr.enter_at),
         _ => "none".to_string(),
     };
     if n.queued.as_deref() == Some(sig.as_str()) {
@@ -835,8 +890,18 @@ fn sync_next(app: &AppHandle, state: &AppState) {
     let Some(o) = out.as_mut() else { return };
     let sent = match (&n.loaded, sig != "none") {
         (Some(l), true) => match make_engine(&settings, l, o.info.channels) {
+            Ok(mut e) if jump.is_some() => {
+                // Cut to another song: it takes over on the next bar, the old one fading under it.
+                e.handle(Command::SetCountIn(false));
+                let h = audio::Handoff { overlap: 0, fade: cut_fade, cues: [cues.first().copied(), cues.get(1).copied()], at_bar: true };
+                o.send(ToAudio::Queue(Box::new(e), h))
+            }
             Ok(mut e) => {
                 e.handle(Command::SetCountIn(false)); // it follows straight on
+                // A medley enters the next song partway in.
+                if let Some(k) = tr.enter_at.and_then(|i| arr_index(l, i)) {
+                    e.handle(Command::Locate(k));
+                }
                 let (overlap, fade) = match tr.mode {
                     songfile::TransitionMode::Crossfade => {
                         let f = (tr.bars.max(0.0) * bar).round() as u64;
@@ -844,7 +909,7 @@ fn sync_next(app: &AppHandle, state: &AppState) {
                     }
                     _ => (0, 0),
                 };
-                let h = audio::Handoff { overlap, fade, cues: [cues.first().copied(), cues.get(1).copied()] };
+                let h = audio::Handoff { overlap, fade, cues: [cues.first().copied(), cues.get(1).copied()], at_bar: false };
                 o.send(ToAudio::Queue(Box::new(e), h))
             }
             Err(_) => false,
@@ -877,6 +942,7 @@ fn take_segue(state: &AppState) -> bool {
         n.loaded.take()
     };
     let Some(l) = next else { return false };
+    *state.jump_to.lock().unwrap() = None;
     let settings = state.settings.lock().unwrap().clone();
     let ch = state.core.output.lock().unwrap().as_ref().map_or(2, |o| o.info.channels);
     // The queued engine was set up when it was queued; bring its mixer up to date.
@@ -1193,6 +1259,8 @@ struct SetItem {
     bpm: Option<f64>,
     /// How the pad starts it, for the Next song card.
     pad_start: PadStart,
+    /// Its arrangement, block by block (for picking a medley's way in).
+    blocks: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1209,7 +1277,9 @@ struct AppView {
     click_gain: f32,
     click_route: Route,
     master_gain: f32,
-    smooth_jumps: bool,
+    blend: Blend,
+    /// A song being cut to on the next bar (set list place), while one plays.
+    jump_to: Option<usize>,
     bindings: Vec<Binding>,
     learning: bool,
     pads: PadsView,
@@ -1325,8 +1395,9 @@ fn view(state: &AppState) -> AppView {
                 let key = file.as_ref().and_then(song_key_pc).map(|pc| pads::NAMES[pc as usize].to_string());
                 let bpm = file.as_ref().map(|f| f.play_bpm() / f.felt_per_beat().max(1e-9)).filter(|b| b.is_finite() && *b > 0.0);
                 let pad_start = file.as_ref().map_or(PadStart::Off, |f| f.transition.pad_start);
+                let blocks = file.as_ref().map(|f| f.arrangement.iter().map(|b| b.section.clone()).collect()).unwrap_or_default();
                 let name = file.map(|f| f.name).unwrap_or_else(|| p.file_name().and_then(|n| n.to_str()).unwrap_or("Song").to_string());
-                SetItem { name, path: p.display().to_string(), found, transition, key, bpm, pad_start }
+                SetItem { name, path: p.display().to_string(), found, transition, key, bpm, pad_start, blocks }
             })
             .collect(),
         current: s.current,
@@ -1337,7 +1408,8 @@ fn view(state: &AppState) -> AppView {
         click_gain: s.click_gain,
         click_route: s.click_route.unwrap_or(songfile::default_route("click", ch)),
         master_gain: f32::from_bits(state.core.master.load(Ordering::Relaxed)),
-        smooth_jumps: s.smooth_jumps,
+        blend: s.blend,
+        jump_to: *state.jump_to.lock().unwrap(),
         bindings,
         learning,
         buses,
@@ -1395,6 +1467,10 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
     // On the tick the next song takes over, the snapshot can still be the old song's:
     // the pad logic waits for the next tick.
     let pad_changed = !song_changed && auto_pad(&state, &snapshot);
+    // A cut to another song that hadn't happened yet is dropped when you stop.
+    if !snapshot.as_ref().is_some_and(|s| s.playing) && state.jump_to.lock().unwrap().take().is_some() {
+        sync_next(&app, &state);
+    }
     // A master level moved from a controller: keep the saved setting in step (saved once
     // the fader has stopped moving).
     let mg = f32::from_bits(state.core.master.load(Ordering::Relaxed));
@@ -1594,7 +1670,7 @@ enum UiCmd {
     Click { on: bool },
     ClickGain { gain: f32 },
     MasterGain { gain: f32 },
-    SmoothJumps { on: bool },
+    Blend { blend: Blend },
     ClickRoute { route: Route },
     StemGain { stem: usize, gain: f32 },
     StemMute { stem: usize, muted: bool },
@@ -1726,11 +1802,11 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 save_settings = true;
                 core.send(Command::SetCountIn(on));
             }
-            UiCmd::SmoothJumps { on } => {
-                s.smooth_jumps = on;
+            UiCmd::Blend { blend } => {
+                s.blend = blend;
                 save_settings = true;
                 if let Some(l) = song.as_ref() {
-                    core.send(Command::SetJoinTail(if on { (l.sample_rate as f64 * 0.3) as u64 } else { 0 }));
+                    core.send(Command::SetJoinTail(blend_frames(blend, l)));
                 }
             }
             UiCmd::MasterGain { gain } => {
@@ -1944,8 +2020,13 @@ fn set_transition(state: State<'_, AppState>, transition: Transition, ending: Op
         {
             let mut g = state.song.lock().unwrap();
             let l = g.as_mut().ok_or("Load a song first.")?;
+            if let (Some(i), false) = (t.leave_after, l.file.arrangement.is_empty()) {
+                t.leave_after = Some(i.min(l.file.arrangement.len() - 1));
+            }
             l.file.transition = t;
             l.file.save(&l.folder)?;
+            // The medley's way out applies to the song as it plays.
+            state.core.send(Command::SetEndAfter(medley_exit(l)));
         }
         return Ok(view(&state));
     }
@@ -2321,6 +2402,29 @@ async fn set_key_tempo(app: AppHandle, state: State<'_, AppState>, transpose: i3
     Ok(view(&state))
 }
 
+/// While a song plays: cut to another song in the set on the next bar, blended (Setup →
+/// Blend). The song loads in the background first. The same song again (or the one
+/// playing) cancels.
+#[tauri::command]
+fn cut_to_song(app: AppHandle, state: State<'_, AppState>, index: usize) -> Result<AppView, String> {
+    if !state.core.playing() {
+        return Err("Nothing is playing: pick the song to load it.".into());
+    }
+    let (len, cur) = {
+        let s = state.settings.lock().unwrap();
+        (s.setlist.len(), s.current)
+    };
+    if index >= len {
+        return Err("That song isn't in the set.".into());
+    }
+    {
+        let mut j = state.jump_to.lock().unwrap();
+        *j = if *j == Some(index) || cur == Some(index) { None } else { Some(index) };
+    }
+    sync_next(&app, &state);
+    Ok(view(&state))
+}
+
 /// Sets whether a track keeps its pitch on a key change; re-renders if the key is changed.
 #[tauri::command]
 async fn set_keep_pitch(app: AppHandle, state: State<'_, AppState>, stem: String, keep: bool) -> Result<AppView, String> {
@@ -2611,6 +2715,7 @@ fn main() {
                 seen_segues: AtomicU64::new(0),
                 pad_auto: AtomicBool::new(false),
             pad_hold: AtomicBool::new(false),
+            jump_to: Mutex::new(None),
             pad_start: std::sync::atomic::AtomicU8::new(0),
             master_seen: std::sync::atomic::AtomicU32::new(0),
                 pad_choice: Mutex::new(None),
@@ -2647,6 +2752,7 @@ fn main() {
             choose_pads_folder,
             pad_sound,
             set_keep_pitch,
+            cut_to_song,
             pad_set,
             bus_edit,
             pad_mix,
@@ -2692,6 +2798,7 @@ mod tests {
             seen_segues: AtomicU64::new(0),
             pad_auto: AtomicBool::new(false),
             pad_hold: AtomicBool::new(false),
+            jump_to: Mutex::new(None),
             pad_start: std::sync::atomic::AtomicU8::new(0),
             master_seen: std::sync::atomic::AtomicU32::new(0),
             pad_choice: Mutex::new(None),
@@ -3136,6 +3243,7 @@ mod tests {
         }
         *st.song.lock().unwrap() = Some(load(&a, 48_000, 2).unwrap());
         st.next.lock().unwrap().loaded = Some(load(&b, 48_000, 2).unwrap());
+        *st.jump_to.lock().unwrap() = Some(1); // as if cut to mid-song
         assert!(!take_segue(&st), "nothing happened yet");
         st.core.segues.fetch_add(1, Ordering::Release); // the audio thread handed over
         let s2 = st.clone();
@@ -3143,6 +3251,7 @@ mod tests {
         assert_eq!(st.song.lock().unwrap().as_ref().unwrap().folder, b);
         assert_eq!(st.settings.lock().unwrap().current, Some(1));
         assert!(st.next.lock().unwrap().loaded.is_none());
+        assert!(st.jump_to.lock().unwrap().is_none(), "the cut is done");
         assert!(!take_segue(&st), "applied once");
         let s3 = st.clone();
         let v = finishes(move || view(&s3));
@@ -3216,5 +3325,34 @@ mod tests {
         // No pad: nothing, ever.
         let mut st = 0;
         assert_eq!(pad_start_step(PadStart::Off, true, 0, 1, &mut st), None);
+    }
+
+    #[test]
+    fn medley_points_map_onto_the_arrangement_and_blend_lengths_follow_the_tempo() {
+        let root = std::env::temp_dir().join(format!("rig-medley-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let spec = clicksong::Spec { name: "M".into(), bpm: 60.0, beats_per_bar: 4, key: "E".into(), sections: vec![("Intro".into(), 2), ("Verse".into(), 2), ("Chorus".into(), 2)], guide: false };
+        let (a, _) = clicksong::create(&root, &spec, &|_: &str| Some(vec![0.2f32; 4000])).unwrap();
+        let mut l = load(&a, 48_000, 2).unwrap();
+        let blk = |n: &str| Block { section: n.into(), muted: vec![], trims: vec![], note: String::new() };
+        l.file.arrangement = vec![blk("Intro"), blk("Verse"), blk("Chorus")];
+        assert!(l.song.sections.iter().any(|s| s.name == "Verse"), "sections: {:?}", l.song.sections.iter().map(|s| &s.name).collect::<Vec<_>>());
+        assert_eq!(arr_index(&l, 1), Some(1));
+        // Stop: no medley, whatever is set.
+        l.file.transition.leave_after = Some(1);
+        assert_eq!(medley_exit(&l), None);
+        // Segue: leaves after the second block.
+        l.file.transition.mode = songfile::TransitionMode::Segue;
+        assert_eq!(medley_exit(&l), arr_index(&l, 1));
+        // A block naming a section the song doesn't have is skipped by the engine.
+        l.file.arrangement.insert(0, Block { section: "Nope".into(), muted: vec![], trims: vec![], note: String::new() });
+        assert_eq!(arr_index(&l, 0), None);
+        assert_eq!(arr_index(&l, 2), Some(1));
+        // Blend lengths at 60 BPM, 48 kHz.
+        assert_eq!(blend_frames(Blend::Cut, &l), 0);
+        assert_eq!(blend_frames(Blend::Short, &l), 14_400);
+        assert_eq!(blend_frames(Blend::Beat, &l), 48_000);
+        assert_eq!(blend_frames(Blend::Bar, &l), 192_000);
+        std::fs::remove_dir_all(&root).ok();
     }
 }
