@@ -857,7 +857,7 @@
     const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue(n).trim();
     palCache = { ruler: v('--cv-ruler'), lanes: v('--cv-lanes'), laneAlt: v('--cv-lane-alt'), laneLine: v('--cv-lane-line'), bus: v('--cv-bus'),
       tick: v('--cv-tick'), tickStrong: v('--cv-tick-strong'), text: v('--muted'), dim: v('--dim'), fg: v('--fg'), go: v('--go'),
-      grid: v('--cv-grid'), scrub: v('--cv-scrub'), shade: v('--cv-shade') };
+      grid: v('--cv-grid'), bar: v('--cv-bar'), beat: v('--cv-beat'), scrub: v('--cv-scrub'), shade: v('--cv-shade') };
     return palCache;
   }
   const cvTop = $('#cvTop'), cvLanes = $('#cvLanes');
@@ -972,6 +972,25 @@
       h.fillStyle = 'rgba(0,0,0,.45)'; h.beginPath(); h.moveTo(xa, 0); h.lineTo(xb, 0); h.lineTo(xb, H); h.closePath(); h.fill();
       h.strokeStyle = '#ffd23f'; h.lineWidth = 1.5; h.beginPath(); h.moveTo(xa, 0); h.lineTo(xb, H); h.stroke();
       g.fillStyle = '#ffd23f'; g.font = '10px ui-monospace, Menlo, monospace'; g.fillText('fade', xa + 3, RULER_H - 6);
+    });
+    // Grid lines down every lane, like Ableton: a line on every bar (every few bars when
+    // zoomed far out) and fainter beat lines once there's room. They sit on the song's
+    // own downbeats, so they follow tempo changes.
+    L.forEach(o => {
+      const x0 = X(o.start), x1 = X(o.start + o.secs); if (x1 < 0 || x0 > w2) return;
+      const n = o.beats.length, bpb = s.beats_per_bar || 4;
+      const every = [1, 2, 4, 8, 16, 32, 64].find(m => m * bs * zoom.pps >= 8) || 64;
+      for (let k = 0; k < n; k++) {
+        const t = o.start + (o.beats[k] - o.sec.start_sec), x = X(t);
+        const next = k + 1 < n ? X(o.start + (o.beats[k + 1] - o.sec.start_sec)) : x + bs * zoom.pps;
+        const bar = o.bar + k;
+        if (x > x0 + 1 && x < x1 - 1 && x >= 0 && x <= w2 && (bar - 1) % every === 0) { h.fillStyle = C.bar; h.fillRect(Math.round(x), 0, 1, H); }
+        const bw = (next - x) / bpb;
+        if (bw >= 9) {
+          h.fillStyle = C.beat;
+          for (let j = 1; j < bpb; j++) { const bx = x + j * bw; if (bx > x0 + 1 && bx < x1 - 1 && bx >= 0 && bx <= w2) h.fillRect(Math.round(bx), 0, 1, H); }
+        }
+      }
     });
     // block boundaries + playhead + queued jump
     h.fillStyle = C.grid; L.forEach(o => { const x = X(o.start); if (x >= 0 && x <= w2) h.fillRect(Math.round(x), 0, 1, H); });

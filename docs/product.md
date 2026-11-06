@@ -28,7 +28,7 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
   - **Pads:** on/off, level, and any of the 12 keys (the song's key is marked). Picking a key overrides the song's key until the song changes.
   - **Click (free click):** a click with no song, for announcements, between songs or a rehearsal with no tracks. Start/stop, BPM −/+, tap tempo, meter, "song tempo". It goes to the click output at the click level and stops by itself when a song starts. Also a learnable MIDI button.
   - **Key −/+** sits on the tab bar (stopped only, since the stems are re-rendered).
-- **Edit page:** the section rail and the arrangement view below.
+- **Edit page:** the section rail and the arrangement view below. Grid lines run down every lane like Ableton: a line on each bar (every few bars when zoomed far out), fainter beat lines when zoomed in, and a stronger line where each section starts. They sit on the song's real downbeats, so they follow tempo changes.
 
 ## Look
 

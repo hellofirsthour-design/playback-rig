@@ -10,7 +10,7 @@
   --play: #22c55e; --stop: #ef4444;
   --lcd: #0a0b0c; --mute-bg: #3b1b1b; --solo-bg: #3a3214; --toast-bg: #2a2410;
   --cv-ruler: #141518; --cv-lanes: #111214; --cv-lane-alt: #131417; --cv-lane-line: #22252a; --cv-bus: #191b1f;
-  --cv-tick: #2c2f35; --cv-tick-strong: #555a62; --cv-grid: rgba(255,255,255,.06); --cv-scrub: rgba(255,255,255,.55); --cv-shade: rgba(14,15,17,.82);
+  --cv-tick: #2c2f35; --cv-tick-strong: #555a62; --cv-grid: rgba(255,255,255,.22); --cv-bar: rgba(255,255,255,.17); --cv-beat: rgba(255,255,255,.08); --cv-scrub: rgba(255,255,255,.55); --cv-shade: rgba(14,15,17,.82);
   --meter-lo: #22c55e; --meter-mid: #eab308; --meter-hi: #ef4444; --meter-bg: #0c0d0f;
   --f-ui: -apple-system, "SF Pro Text", system-ui, "Segoe UI", sans-serif;
   --f-round: ui-rounded, "SF Pro Rounded", -apple-system, system-ui, sans-serif;
@@ -31,7 +31,7 @@
   --fg: #f0f0f0; --muted: #b3b3b3; --dim: #7f7f7f; --go: #ff9a3c; --cue: #ffe05a;
   --lcd: #1e1e1e; --mute-bg: #4a2a2a; --solo-bg: #4a4320; --toast-bg: #3f3820;
   --cv-ruler: #303030; --cv-lanes: #2a2a2a; --cv-lane-alt: #2e2e2e; --cv-lane-line: #3a3a3a; --cv-bus: #343434;
-  --cv-tick: #4a4a4a; --cv-tick-strong: #7a7a7a; --cv-grid: rgba(255,255,255,.07); --cv-shade: rgba(30,30,30,.82); --meter-bg: #1c1c1c;
+  --cv-tick: #4a4a4a; --cv-tick-strong: #7a7a7a; --cv-grid: rgba(255,255,255,.24); --cv-bar: rgba(255,255,255,.19); --cv-beat: rgba(255,255,255,.09); --cv-shade: rgba(30,30,30,.82); --meter-bg: #1c1c1c;
 }
 /* Sanctuary: warm browns, amber accent */
 :root[data-theme="sanctuary"] {
@@ -48,7 +48,7 @@
   --fg: #1c1d20; --muted: #5d6066; --dim: #8b8e94; --go: #e5560b; --cue: #b88600; --danger: #d93636; --focus: #2f6fd6;
   --lcd: #fbfbf8; --mute-bg: #f7d9d6; --solo-bg: #f5ebc7; --toast-bg: #fff6d6;
   --cv-ruler: #efefea; --cv-lanes: #e8e8e4; --cv-lane-alt: #e3e3de; --cv-lane-line: #d5d5cf; --cv-bus: #dcdcd6;
-  --cv-tick: #c9c9c3; --cv-tick-strong: #8e8e88; --cv-grid: rgba(0,0,0,.07); --cv-scrub: rgba(0,0,0,.45); --cv-shade: rgba(232,232,228,.85); --meter-bg: #d6d6d0;
+  --cv-tick: #c9c9c3; --cv-tick-strong: #8e8e88; --cv-grid: rgba(0,0,0,.26); --cv-bar: rgba(0,0,0,.2); --cv-beat: rgba(0,0,0,.09); --cv-scrub: rgba(0,0,0,.45); --cv-shade: rgba(232,232,228,.85); --meter-bg: #d6d6d0;
 }
 * { box-sizing: border-box }
 [hidden] { display: none !important }
