@@ -671,3 +671,13 @@ body.live-mode .bar .lcd { display: none }
 /* MIDI assignments: a gap before the faders */
 .lrow.first-fader { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line) }
 .lset li { font-size: 15px; gap: 8px; padding: 9px 8px }
+
+/* Fade out now: once the tracks are out, it says so (the click is still going) */
+.fades .fadenow.out { background: var(--go); color: #1a0d04; animation: vampGlow 1.2s ease-in-out infinite }
+/* Keep-pitch chips (Song → Key & tempo) */
+.kpitch { display: grid; gap: 6px; margin-top: 6px }
+.kpchips { display: flex; flex-wrap: wrap; gap: 6px }
+.kpc { padding: 5px 10px; border-radius: 14px; border: 1px solid var(--line-2); background: var(--raised); color: var(--muted); font: 600 12px var(--f-ui); cursor: pointer }
+.kpc.on { color: #1b1503; background: var(--cue); border-color: var(--cue) }
+.chk { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--muted); margin-top: 10px; line-height: 1.4 }
+.chk input { margin-top: 2px }

@@ -564,6 +564,8 @@
     [...beats.children].forEach((d, i) => { d.className = (p && snap && snap.beat === i + 1 ? 'on' : '') + (i === 0 ? ' one' : ''); });
     const cb = document.querySelector('#lvTab .cbeats');
     if (cb) [...cb.children].forEach((d, i) => { d.className = (p && snap && snap.beat === i + 1 ? 'on' : '') + (i === 0 ? ' one' : ''); });
+    const fb = $('#fadeNowBtn'), out = !!(snap && snap.tracks_out && p);
+    if (fb && fb.classList.contains('out') !== out) { fb.classList.toggle('out', out); fb.textContent = out ? 'Tracks out · click on' : 'Fade out now'; }
     // The Live page clock: time in the song as it plays, and the song's length.
     const lt = $('#lvTime'), ltot = $('#lvTotal'), tEnd = L.length ? L[L.length - 1].start + L[L.length - 1].secs : 0;
     const tNow = s ? fmt(playTime(L)) : '0:00', tTot = '/ ' + fmt(tEnd);
@@ -751,7 +753,8 @@
     }, 'How the pad starts this song'));
     box.append(g3);
     const now = el('button', 'btn fadenow', 'Fade out now');
-    now.title = 'Fade the song out over 2 bars and stop (also on a MIDI button)';
+    if (box.id === 'lvFades') now.id = 'fadeNowBtn';
+    now.title = 'Fades the tracks and guide over 2 bars; the click keeps going until you stop (also on a MIDI button)';
     now.onclick = () => { if (playing()) send({ type: 'FadeOut', bars: 2 }); };
     box.append(now);
   }
@@ -1400,7 +1403,24 @@
     renderKeyTempo();
   }
   let kt = null; // { transpose, bpm } being edited
+  // Tracks that keep their pitch on a key change (click and guide always do).
+  function renderKeepPitch() {
+    const box = $('#kpChips'); if (!box) return; box.innerHTML = '';
+    if (!V.song) return;
+    V.song.stems.forEach(st => {
+      if (/click|guide|cue/i.test(st.name)) return;
+      const b = el('button', 'kpc' + (st.keeps_pitch ? ' on' : ''), st.name); b.setAttribute('aria-pressed', !!st.keeps_pitch);
+      b.title = st.keeps_pitch ? `${st.name} stays as recorded when the key changes` : `${st.name} follows the key`;
+      b.onclick = async () => {
+        if (playing()) { toast('Stop playback to change this.'); return; }
+        showTask('Updating', 0.3);
+        try { await refresh(await invoke('set_keep_pitch', { stem: st.name, keep: !st.keeps_pitch })); } catch (e) { err(e); } finally { hideTask(); }
+      };
+      box.append(b);
+    });
+  }
   function renderKeyTempo() {
+    renderKeepPitch();
     const s = V.song; if (!s) return;
     if (!kt || kt.folder !== s.folder) kt = { folder: s.folder, transpose: s.transpose, bpm: playBpm() };
     $('#keyVal').textContent = keyName(s.key, kt.transpose) + (kt.transpose ? ` (${kt.transpose > 0 ? '+' : ''}${kt.transpose})` : '');
@@ -1479,7 +1499,10 @@
     { label: 'Live / Edit page', tap: 'ToggleView' },
     { label: 'Master fader', tap: 'MasterLevel', desc: 'Everything the app sends out', fader: true },
   ];
+  // Song buttons: one per place in the set (Song 1 = the first song, whatever it is that day).
+  const SONG_BUTTONS = 10;
   function actionLabel(a) {
+    if (a && a.Song !== undefined) return `Song ${a.Song + 1}`;
     if (a && a.BusLevel !== undefined) { const b = (V.all_buses || [])[a.BusLevel]; return `${b ? b.name : 'Bus ' + (a.BusLevel + 1)} fader`; }
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
     return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', MasterLevel: 'Master fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
@@ -1500,15 +1523,17 @@
       r.append(el('span', null, b.name), sel); br.append(r);
     });
     if (document.activeElement !== $('#clickGain')) $('#clickGain').value = V.click_gain;
+    $('#smoothJumps').checked = V.smooth_jumps !== false;
     $('#outHint').textContent = ((V.output && V.output.channels >= 4) ? 'By default Click & guide go to Out 3-4 (in-ears) and every other bus to Out 1-2 (front of house).' : 'Only 2 outputs, so everything plays on 1-2. Pick your audio interface to send click and guide to the in-ears.')
       + ' Plug in another interface and it gets its own routing; plug this one back in and yours comes back. If it is unplugged mid-service, the set stays loaded and it reconnects by itself.';
     renderPads();
     const ms = $('#midiSel'); ms.innerHTML = ''; ms.append(new Option('None', '')); V.midi_inputs.forEach(m => ms.append(new Option(m, m))); ms.value = V.midi || '';
     // Buttons, then the faders: master and each bus (tracks follow their bus).
-    const rows = [...LEARN, ...(V.all_buses || []).map((b, i) => ({ label: `${b.name} fader`, tap: { BusLevel: i }, fader: true }))];
+    const songs = Array.from({ length: SONG_BUTTONS }, (_, i) => ({ label: `Song ${i + 1}`, tap: { Song: i }, desc: V.setlist[i] ? `Now: ${V.setlist[i].name}` : 'Goes to this place in the set', song: true }));
+    const rows = [...LEARN.filter(r => !r.fader), ...songs, ...LEARN.filter(r => r.fader), ...(V.all_buses || []).map((b, i) => ({ label: `${b.name} fader`, tap: { BusLevel: i }, fader: true }))];
     const box = $('#learn'); box.innerHTML = '';
     rows.forEach((r, i) => {
-      const d = el('div', 'lrow' + (r.fader && !(rows[i - 1] || {}).fader ? ' first-fader' : '')); const t = el('div'); t.append(el('b', null, r.label)); if (r.desc) t.append(el('small', null, r.desc));
+      const d = el('div', 'lrow' + ((r.fader && !(rows[i - 1] || {}).fader) || (r.song && !(rows[i - 1] || {}).song) ? ' first-fader' : '')); const t = el('div'); t.append(el('b', null, r.label)); if (r.desc) t.append(el('small', null, r.desc));
       const b = el('button', 'btn' + (learnWait === i ? ' wait' : ''), learnWait === i ? 'Press it now…' : 'Learn');
       b.onclick = async () => {
         if (!V.midi) { toast('Choose your MIDI input first.'); return; }
@@ -1537,6 +1562,7 @@
   $('#padRoute').onchange = e => { V.pads.route = keyRoute(e.target.value); invoke('pad_mix', { level: null, route: V.pads.route }).catch(err); };
 
   $('#outSel').onchange = e => { if (playing()) { toast('Stop playback before changing the audio output.'); renderSetup(); return; } invoke('choose_output', { name: e.target.value }).then(v => { refresh(v); toast('Audio output changed.'); }).catch(err); };
+  $('#smoothJumps').onchange = e => { V.smooth_jumps = e.target.checked; send({ type: 'SmoothJumps', on: V.smooth_jumps }); };
   $('#clickRoute').onchange = e => { V.click_route = keyRoute(e.target.value); send({ type: 'ClickRoute', route: V.click_route }); };
   $('#clickGain').oninput = e => { V.click_gain = +e.target.value; send({ type: 'ClickGain', gain: V.click_gain }); };
   $('#midiSel').onchange = e => invoke('choose_midi', { name: e.target.value || null }).then(refresh).catch(err);
@@ -1664,6 +1690,12 @@
   });
   T.event.listen('pedal', e => {
     if (e.payload === 'next-song') { if (playing()) { toast('Next song loads when this one stops.'); return; } if (V && V.current != null && V.current + 1 < V.setlist.length) selectSong(V.current + 1); }
+    else if (typeof e.payload === 'string' && e.payload.startsWith('song:')) {
+      // A song button on the controller: straight to that song in the set.
+      const i = +e.payload.slice(5); if (!V || !V.setlist[i]) { toast(`There's no song ${i + 1} in the set.`); return; }
+      if (playing()) { toast(`Stop this song to go to ${V.setlist[i].name}.`); return; }
+      if (i !== V.current) selectSong(i);
+    }
     else if (e.payload === 'pad-only') togglePad();
     else if (e.payload === 'toggle-view') setPage(page === 'live' ? 'edit' : 'live');
     else if (e.payload === 'refresh') refresh();

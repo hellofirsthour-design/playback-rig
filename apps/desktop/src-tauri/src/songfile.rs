@@ -140,9 +140,16 @@ pub struct SongFile {
     /// Where the markers came from: None (not set up yet), "guide" or "manual".
     #[serde(default)]
     pub markers_from: Option<String>,
-    /// Key change in semitones (+2 = up a whole step). Click and guide keep their pitch.
+    /// Key change in semitones (+2 = up a whole step). Click and guide keep their pitch,
+    /// and so do effects tracks (see `keeps_pitch`).
     #[serde(default)]
     pub transpose: i32,
+    /// Tracks set by hand to keep their pitch on a key change, or to follow the key
+    /// (overriding the guess from the track's name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keep_pitch: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_key: Vec<String>,
     /// Playback tempo, when different from the recorded tempo (`bpm`).
     #[serde(default)]
     pub target_bpm: Option<f64>,
@@ -222,6 +229,26 @@ pub fn stem_sort_key(name: &str) -> (u8, Vec<(String, u64)>) {
     }
     parts.push((text, num.parse().unwrap_or(0)));
     (stem_category(name), parts)
+}
+
+/// Effects that aren't in a key (risers, sweeps, impacts, vocal FX): by name.
+pub fn is_fx(name: &str) -> bool {
+    const WORDS: [&str; 14] = ["fx", "sfx", "efx", "effect", "effects", "riser", "risers", "sweep", "sweeps", "impact", "impacts", "whoosh", "noise", "uplifter"];
+    name.to_ascii_lowercase().split(|c: char| !c.is_ascii_alphanumeric()).any(|w| WORDS.contains(&w))
+}
+
+impl SongFile {
+    /// Whether a track keeps its pitch when the key changes: click, guide and effects do
+    /// (unless set to follow the key), and any track set by hand.
+    pub fn keeps_pitch(&self, name: &str) -> bool {
+        if is_click(name) || is_guide(name) {
+            return true;
+        }
+        if self.follow_key.iter().any(|n| n == name) {
+            return false;
+        }
+        self.keep_pitch.iter().any(|n| n == name) || is_fx(name)
+    }
 }
 
 pub fn is_click(name: &str) -> bool {
@@ -358,6 +385,8 @@ impl SongFile {
                 arrangement: vec![],
                 markers_from: None,
                 transpose: 0,
+                keep_pitch: vec![],
+                follow_key: vec![],
                 target_bpm: None,
                 setup: SETUP_VERSION,
                 grid_version: 0,
@@ -880,6 +909,8 @@ mod tests {
             ],
             markers_from: None,
                 transpose: 0,
+                keep_pitch: vec![],
+                follow_key: vec![],
                 target_bpm: None,
                 setup: SETUP_VERSION,
                 grid_version: 0,
@@ -927,5 +958,44 @@ mod tests {
         assert_eq!(sf.stems[0].route, Route::Pair(2));
         assert_eq!(sf.stems[2].route, Route::Pair(0));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn effects_keep_their_pitch_unless_told_otherwise() {
+        for n in ["FX", "Vox FX", "SFX 2", "Risers", "Impact", "Noise Sweep", "Vocal Effects"] {
+            assert!(is_fx(n), "{n}");
+        }
+        for n in ["Keys 1", "Pad", "Bass", "Effie Vocal", "Atmos", "Fixed Synth"] {
+            assert!(!is_fx(n), "{n}");
+        }
+        let mut f = SongFile {
+            name: "S".into(),
+            bpm: 120.0,
+            beats_per_bar: 4,
+            meter_den: 4,
+            offset_ms: 0.0,
+            key: "E".into(),
+            click: true,
+            markers: vec![],
+            stems: vec![],
+            arrangement: vec![],
+            markers_from: None,
+            transpose: 2,
+            keep_pitch: vec![],
+            follow_key: vec![],
+            target_bpm: None,
+            setup: SETUP_VERSION,
+            grid_version: 0,
+            transition: Transition::default(),
+            ending: None,
+            beat_times: vec![],
+            bus_mix: Default::default(),
+        };
+        assert!(f.keeps_pitch("Click Track") && f.keeps_pitch("Guide") && f.keeps_pitch("Vox FX"));
+        assert!(!f.keeps_pitch("Keys 1"));
+        f.follow_key.push("Vox FX".into());
+        f.keep_pitch.push("Keys 1".into());
+        assert!(!f.keeps_pitch("Vox FX") && f.keeps_pitch("Keys 1"));
+        assert!(f.keeps_pitch("Click Track"), "the click never follows the key");
     }
 }

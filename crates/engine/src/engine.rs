@@ -48,6 +48,14 @@ pub enum Command {
     /// Starts playing after this many frames of silence, with no count-in (a segue
     /// that has to land on an exact frame).
     PlayAfter(u64),
+    /// "Fade out now" on stage: fades the tracks and the guide out over this many frames
+    /// but keeps playing, so the click (click stems and the built-in click) carries on
+    /// until you stop.
+    FadeTracks(u64),
+    /// Length (frames) of the ring-out at a jump: where the arrangement skips ahead, the
+    /// music from where it left keeps sounding briefly and fades away under the new block.
+    /// 0 = a straight cut.
+    SetJoinTail(u64),
 }
 
 /// What the screen needs to draw, read after each `process` call.
@@ -69,6 +77,8 @@ pub struct Snapshot {
     pub bars_left: f64,
     /// Tempo at the playhead.
     pub bpm: f64,
+    /// The tracks are fading or faded out ("Fade out now"); the click carries on.
+    pub tracks_out: bool,
 }
 
 struct Pending {
@@ -122,6 +132,17 @@ pub struct Engine {
     last_beat: Option<i64>,
     click: ClickVoice,
     finished: bool,
+    /// Stems that are a click track (kept by FadeTracks, left out of ring-outs).
+    is_click: Vec<bool>,
+    /// (frames left, length) of a tracks-only fade; stays at (0, n) once faded.
+    track_fade: Option<(u64, u64)>,
+    /// Ring-out at jumps: configured length, and the one sounding now.
+    tail_frames: u64,
+    tail_src: u64,
+    tail_left: u64,
+    tail_len: u64,
+    /// Each stem's level when the ring-out started.
+    tail_gains: Vec<f32>,
 }
 
 impl Engine {
@@ -145,6 +166,13 @@ impl Engine {
             smooth_k: 1.0 - (-1.0 / (0.005 * sr)).exp(),
             gains: vec![0.0; mix.len()],
             peaks: vec![0.0; mix.len()],
+            is_click: mix.iter().map(|m| m.name.to_lowercase().contains("click")).collect(),
+            track_fade: None,
+            tail_frames: 0,
+            tail_src: 0,
+            tail_left: 0,
+            tail_len: 0,
+            tail_gains: vec![0.0; mix.len()],
             song,
             arr,
             stems,
@@ -291,6 +319,13 @@ impl Engine {
                     self.wait = n;
                 }
             }
+            Command::FadeTracks(n) => {
+                if self.playing && self.track_fade.is_none() {
+                    let n = n.max(1);
+                    self.track_fade = Some((n, n));
+                }
+            }
+            Command::SetJoinTail(n) => self.tail_frames = n,
             Command::FadeOut(n) => {
                 if self.playing {
                     self.pending = None;
@@ -319,6 +354,8 @@ impl Engine {
         self.playing = true;
         self.stopping = None;
         self.pending = None;
+        self.track_fade = None;
+        self.tail_left = 0;
         self.last_beat = None;
         self.snap_gains();
         if self.count_in {
@@ -335,6 +372,7 @@ impl Engine {
 
     fn stop(&mut self) {
         if !self.playing {
+            self.track_fade = None;
             self.item = 0;
             self.fpos = 0;
             self.pending = None;
@@ -445,6 +483,13 @@ impl Engine {
     }
 
     fn enter(&mut self, item: usize, cut: bool) {
+        if cut && self.tail_frames > 0 && self.count_left == 0 {
+            // Ring-out: carry on from where the old block left, fading, under the new one.
+            self.tail_src = self.section(self.item).start + self.fpos;
+            self.tail_len = self.tail_frames;
+            self.tail_left = self.tail_frames;
+            self.tail_gains.copy_from_slice(&self.gains);
+        }
         self.item = item;
         self.fpos = 0;
         if cut {
@@ -624,6 +669,7 @@ impl Engine {
                 if left == 0 {
                     self.playing = false;
                     self.stopping = None;
+                    self.track_fade = None;
                     break;
                 }
                 master = left as f32 / total as f32;
@@ -636,7 +682,8 @@ impl Engine {
                 }
             }
             let mut env = master;
-            if let Some(d) = self.frames_to_cut() {
+            // (With a ring-out the old audio carries on through the cut, so no fade before it.)
+            if let Some(d) = self.frames_to_cut().filter(|_| self.tail_frames == 0) {
                 if (d as f32) < fade {
                     env *= d as f32 / fade;
                 }
@@ -645,6 +692,15 @@ impl Engine {
                 let since = (self.abs - lj) as f32;
                 if since < fade {
                     env *= (since + 1.0) / (fade + 1.0);
+                }
+            }
+
+            // "Fade out now": tracks and guide fade, click stems don't.
+            let mut tracks = 1.0f32;
+            if let Some((left, total)) = self.track_fade {
+                tracks = left as f32 / total as f32;
+                if left > 0 {
+                    self.track_fade = Some((left - 1, total));
                 }
             }
 
@@ -658,7 +714,10 @@ impl Engine {
                     *g = 0.0;
                     continue;
                 }
-                let gg = *g * env;
+                let gg = *g * env * if self.is_click[i] { 1.0 } else { tracks };
+                if gg == 0.0 {
+                    continue;
+                }
                 let (l, r) = if Some(i) == self.song.guide_stem && !self.song.calls.is_empty() {
                     match self.guide_src(src) {
                         Some(gs) => self.stems[i].frame(gs),
@@ -673,6 +732,26 @@ impl Engine {
                     self.peaks[i] = pk;
                 }
                 Self::write(out, base, ch, self.mix[i].route, ol, or);
+            }
+
+            // Ring-out from a jump: the music (not the click or guide) carries on from where
+            // it left, fading away under the new block.
+            if self.tail_left > 0 {
+                let k = self.tail_left as f32 / self.tail_len.max(1) as f32;
+                let w = k * k * (3.0 - 2.0 * k) * master * tracks;
+                for i in 0..self.stems.len() {
+                    if self.is_click[i] || Some(i) == self.song.guide_stem {
+                        continue;
+                    }
+                    let g = self.tail_gains[i] * w;
+                    if g == 0.0 {
+                        continue;
+                    }
+                    let (l, r) = self.stems[i].frame(self.tail_src);
+                    Self::write(out, base, ch, self.mix[i].route, l * g, r * g);
+                }
+                self.tail_src += 1;
+                self.tail_left -= 1;
             }
 
             // Click, locked to the song's own bar grid.
@@ -715,6 +794,7 @@ impl Engine {
             vamp: self.vamp,
             bars_left: ((end - pos) / bpb.max(1) as f64).max(0.0),
             bpm: self.song.bpm_at(src),
+            tracks_out: self.track_fade.is_some(),
         }
     }
 }
@@ -1160,5 +1240,102 @@ mod tests {
         let out = run(&mut e, 5100);
         assert_eq!(out[0][1000], 4000.0, "A keeps playing where it was");
         assert_eq!(out[0][5050], 16050.0, "then the new next block (C)");
+    }
+
+    /// A two-stem rig: stem 0 "Ramp" (value = frame index) on output 0, stem 1
+    /// "Click Track" (always 1.0) on output 1.
+    fn rig_with_click() -> Engine {
+        let song = Song {
+            name: "Test".into(),
+            sample_rate: SR,
+            bpm: 60.0,
+            beats_per_bar: 4,
+            offset: 0,
+            length: 24000,
+            sections: vec![
+                Section { name: "A".into(), start: 0, end: 8000 },
+                Section { name: "B".into(), start: 8000, end: 16000 },
+                Section { name: "C".into(), start: 16000, end: 24000 },
+            ],
+            stems: vec![
+                StemInfo { name: "Ramp".into(), route: Route::Mono(0), gain: 1.0, muted: false },
+                StemInfo { name: "Click Track".into(), route: Route::Mono(1), gain: 1.0, muted: false },
+            ],
+            guide_stem: None,
+            calls: vec![],
+            beat_frames: vec![],
+        };
+        let arr = Arrangement::linear(&song);
+        let ramp = StemAudio::mono((0..24000).map(|i| i as f32).collect());
+        let click = StemAudio::mono(vec![1.0; 24000]);
+        let mut e = Engine::new(song, arr, vec![ramp, click], CH).unwrap();
+        e.handle(Command::SetCountIn(false));
+        e.handle(Command::SetClick(false));
+        e
+    }
+
+    #[test]
+    fn fade_out_now_fades_the_tracks_and_keeps_the_click() {
+        let mut e = rig_with_click();
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf); // frames 0..999 (past the start fade-in)
+        e.handle(Command::FadeTracks(1000));
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf); // frames 1000..1999: the fade
+        // Halfway through the fade the ramp is at half level; the click is untouched.
+        let half = buf[500 * CH];
+        assert!((half - 1500.0 * 0.5).abs() < 2.0, "ramp at half level, got {half}");
+        assert_eq!(buf[500 * CH + 1], 1.0);
+        assert!(e.snapshot().tracks_out);
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf); // frames 2000..2999: faded
+        assert!(buf.iter().step_by(CH).all(|v| *v == 0.0), "the tracks are silent");
+        assert!(buf.iter().skip(1).step_by(CH).all(|v| *v == 1.0), "the click carries on");
+        assert!(e.snapshot().playing, "still playing until you stop");
+        // Stop, then play again: everything is back.
+        e.handle(Command::Stop);
+        let mut buf = vec![0.0f32; 100 * CH];
+        e.process(&mut buf);
+        assert!(!e.snapshot().playing);
+        assert!(!e.snapshot().tracks_out);
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 500 * CH];
+        e.process(&mut buf);
+        assert!(buf[400 * CH] > 0.0, "tracks back after play");
+    }
+
+    #[test]
+    fn a_jump_rings_out_instead_of_chopping() {
+        // A then C: B is skipped, so A's end jumps to C's start.
+        let tail = 300u64;
+        let mut e = rig(Some(&["A", "C"]));
+        e.handle(Command::SetJoinTail(tail));
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 8000 * CH];
+        e.process(&mut buf); // all of A
+        // A plays to its very last frame at full level (no fade before the jump).
+        assert_eq!(buf[7999 * CH], 7999.0);
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf);
+        // After the 5-frame fade-in, the output is C's audio plus B's opening (where A
+        // would have gone on to) fading away along a smoothstep.
+        for k in [10u64, 100, 150, 250] {
+            let kk = (tail - k) as f32 / tail as f32;
+            let w = kk * kk * (3.0 - 2.0 * kk);
+            let want = (16000 + k) as f32 + (8000 + k) as f32 * w;
+            let got = buf[k as usize * CH];
+            assert!((got - want).abs() < 1.0, "frame {k}: want {want}, got {got}");
+        }
+        // Once the ring-out is over, only C.
+        for k in [tail, tail + 1, 900] {
+            assert_eq!(buf[k as usize * CH], (16000 + k) as f32);
+        }
+        // With no ring-out it's the old straight cut.
+        let mut e = rig(Some(&["A", "C"]));
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 8100 * CH];
+        e.process(&mut buf);
+        assert_eq!(buf[8050 * CH], 16050.0);
     }
 }

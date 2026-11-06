@@ -43,6 +43,8 @@ struct Settings {
     click_route: Option<Route>,
     /// The master fader: everything the app sends out.
     master_gain: f32,
+    /// Jumps in the arrangement ring out briefly instead of cutting (see SetJoinTail).
+    smooth_jumps: bool,
     /// Settings format; older settings are migrated on load.
     version: u32,
     /// Folder of pad files, one per key.
@@ -246,6 +248,7 @@ impl Default for Settings {
             click_gain: 0.8,
             click_route: None,
             master_gain: 1.0,
+            smooth_jumps: true,
             version: 1,
             pads_folder: None,
             pad_sounds: vec![],
@@ -351,6 +354,9 @@ struct AppState {
     seen_segues: AtomicU64,
     /// The pad was brought in automatically for this song's ending.
     pad_auto: AtomicBool,
+    /// The pad carried over from the last song by a manual switch: it keeps its key
+    /// until play, then follows the new song.
+    pad_hold: AtomicBool,
     /// The song's pad start (see PadStart): 0 waiting, 1 brought in by the start, 2 done.
     pad_start: std::sync::atomic::AtomicU8,
     /// The master level at the last status (to save a controller move once it settles).
@@ -384,7 +390,7 @@ fn pad_update(state: &AppState) -> Result<(), String> {
     let on = *state.pad_on.lock().unwrap();
     let s = state.settings.lock().unwrap().clone();
     if let Some(o) = state.core.output.lock().unwrap().as_mut() {
-        o.send(ToAudio::PadLevel(s.pad_level));
+        o.send(ToAudio::PadLevel(pads::level_gain(s.pad_level)));
         o.send(ToAudio::PadRoute(s.pad_route.unwrap_or(Route::Pair(0))));
         o.send(ToAudio::PadOn(on));
     }
@@ -491,6 +497,9 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
             }
             Action::NextSong => {
                 let _ = app.emit("pedal", "next-song");
+            }
+            Action::Song(i) => {
+                let _ = app.emit("pedal", format!("song:{i}"));
             }
             Action::PadOnly => {
                 let _ = app.emit("pedal", "pad-only");
@@ -657,7 +666,7 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
             .iter()
             .map(|st| {
                 let p = folder.join(&st.file);
-                let semis = if songfile::is_click(&st.name) || songfile::is_guide(&st.name) { 0.0 } else { file.transpose as f32 };
+                let semis = if file.keeps_pitch(&st.name) { 0.0 } else { file.transpose as f32 };
                 s.spawn(move || decode::decode(&p, sample_rate).map(|a| stretch::apply(&a, sample_rate, length_factor, semis)))
             })
             .collect();
@@ -749,6 +758,8 @@ fn mix_commands(settings: &Settings, l: &Loaded, ch: usize) -> Vec<Command> {
         Command::SetClick(l.file.click),
         Command::SetClickGain(settings.click_gain),
         Command::SetClickRoute(settings.click_route.unwrap_or(songfile::default_route("click", ch))),
+        // Ring-out at jumps (Setup → Smooth jumps): about a third of a second.
+        Command::SetJoinTail(if settings.smooth_jumps { (l.sample_rate as f64 * 0.3) as u64 } else { 0 }),
     ];
     for (i, st) in l.file.stems.iter().enumerate() {
         let (g, m, r) = effective(settings, &l.file, st);
@@ -942,6 +953,12 @@ fn pad_switch(state: &AppState, on: bool) -> bool {
 /// and "Pad underneath" (the pad comes in when the song's last block starts).
 fn auto_pad(state: &AppState, snap: &Option<Snapshot>) -> bool {
     let Some(sn) = snap else { return false };
+    // Play pressed after a manual switch: the carried pad moves to this song's key.
+    if sn.playing && state.pad_hold.swap(false, Ordering::Relaxed) {
+        *state.pad_choice.lock().unwrap() = None;
+        let _ = pad_update(state);
+        return true;
+    }
     let plan = {
         let g = state.song.lock().unwrap();
         g.as_ref().map(|l| {
@@ -1032,6 +1049,8 @@ struct StemView {
     route: Route,
     gain: f32,
     muted: bool,
+    /// Keeps its pitch on a key change (click, guide, effects, or set by hand).
+    keeps_pitch: bool,
 }
 
 #[derive(Serialize)]
@@ -1126,7 +1145,7 @@ impl SongView {
                     secs: s.len() as f64 / l.sample_rate as f64,
                 })
                 .collect(),
-            stems: l.file.stems.iter().map(|s| StemView { name: s.name.clone(), route: s.route, gain: s.gain, muted: s.muted }).collect(),
+            stems: l.file.stems.iter().map(|s| StemView { name: s.name.clone(), route: s.route, gain: s.gain, muted: s.muted, keeps_pitch: l.file.keeps_pitch(&s.name) }).collect(),
             blocks: l
                 .arr
                 .items
@@ -1190,6 +1209,7 @@ struct AppView {
     click_gain: f32,
     click_route: Route,
     master_gain: f32,
+    smooth_jumps: bool,
     bindings: Vec<Binding>,
     learning: bool,
     pads: PadsView,
@@ -1317,6 +1337,7 @@ fn view(state: &AppState) -> AppView {
         click_gain: s.click_gain,
         click_route: s.click_route.unwrap_or(songfile::default_route("click", ch)),
         master_gain: f32::from_bits(state.core.master.load(Ordering::Relaxed)),
+        smooth_jumps: s.smooth_jumps,
         bindings,
         learning,
         buses,
@@ -1542,8 +1563,17 @@ async fn select_song(state: State<'_, AppState>, index: usize) -> Result<AppView
     *state.song.lock().unwrap() = Some(loaded);
     state.settings.lock().unwrap().current = Some(index);
     state.save_settings();
-    *state.pad_choice.lock().unwrap() = None;
-    let _ = pad_update(&state); // pad follows the new song's key
+    // A pad that's playing stays as it is when you switch songs by hand: it moves to the
+    // new song's key when you press play (or you turn it off).
+    if *state.pad_on.lock().unwrap() {
+        let sounding = *state.pad_key.lock().unwrap();
+        *state.pad_choice.lock().unwrap() = sounding;
+        state.pad_hold.store(sounding.is_some(), Ordering::Relaxed);
+    } else {
+        *state.pad_choice.lock().unwrap() = None;
+        state.pad_hold.store(false, Ordering::Relaxed);
+    }
+    let _ = pad_update(&state);
     Ok(view(&state))
 }
 
@@ -1564,6 +1594,7 @@ enum UiCmd {
     Click { on: bool },
     ClickGain { gain: f32 },
     MasterGain { gain: f32 },
+    SmoothJumps { on: bool },
     ClickRoute { route: Route },
     StemGain { stem: usize, gain: f32 },
     StemMute { stem: usize, muted: bool },
@@ -1633,11 +1664,12 @@ fn song_mix(state: State<'_, AppState>, action: String) -> Result<AppView, Strin
     Ok(view(&state))
 }
 
-/// Fades the playing song out over `bars` of its own bars.
+/// "Fade out now": the tracks and guide fade over `bars` of the song's bars; the click
+/// keeps going until you stop (like MultiTracks Playback).
 fn fade_out(state: &AppState, bars: f64) {
     let frames = state.song.lock().unwrap().as_ref().map(|l| (bars.max(0.25) * l.song.frames_per_bar()).round() as u64);
     if let Some(f) = frames {
-        state.core.send(Command::FadeOut(f));
+        state.core.send(Command::FadeTracks(f));
     }
 }
 
@@ -1673,8 +1705,9 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 core.send(Command::CancelJump);
             }
             UiCmd::FadeOut { bars } => {
+                // Tracks and guide fade; the click carries on until you stop.
                 if let Some(l) = song.as_ref() {
-                    core.send(Command::FadeOut((bars.max(0.25) * l.song.frames_per_bar()).round() as u64));
+                    core.send(Command::FadeTracks((bars.max(0.25) * l.song.frames_per_bar()).round() as u64));
                 }
             }
             UiCmd::Goto { block } => {
@@ -1692,6 +1725,13 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 s.count_in = on;
                 save_settings = true;
                 core.send(Command::SetCountIn(on));
+            }
+            UiCmd::SmoothJumps { on } => {
+                s.smooth_jumps = on;
+                save_settings = true;
+                if let Some(l) = song.as_ref() {
+                    core.send(Command::SetJoinTail(if on { (l.sample_rate as f64 * 0.3) as u64 } else { 0 }));
+                }
             }
             UiCmd::MasterGain { gain } => {
                 s.master_gain = if gain.is_finite() { gain.clamp(0.0, 1.5) } else { 1.0 };
@@ -2149,6 +2189,9 @@ fn pad_sound(state: State<'_, AppState>, index: usize, remove: Option<bool>) -> 
 
 #[tauri::command]
 fn pad_set(state: State<'_, AppState>, on: bool) -> Result<AppView, String> {
+    if !on && state.pad_hold.swap(false, Ordering::Relaxed) {
+        *state.pad_choice.lock().unwrap() = None;
+    }
     *state.pad_on.lock().unwrap() = on;
     if let Err(e) = pad_update(&state) {
         *state.pad_on.lock().unwrap() = false;
@@ -2166,6 +2209,7 @@ fn pad_key(state: State<'_, AppState>, key: Option<String>) -> Result<AppView, S
         None => None,
     };
     *state.pad_choice.lock().unwrap() = pc;
+    state.pad_hold.store(false, Ordering::Relaxed);
     *state.pad_on.lock().unwrap() = true;
     if let Err(e) = pad_update(&state) {
         *state.pad_on.lock().unwrap() = false;
@@ -2217,7 +2261,7 @@ fn pad_mix(state: State<'_, AppState>, level: Option<f32>, route: Option<Route>)
     state.save_settings();
     let s = state.settings.lock().unwrap().clone();
     if let Some(o) = state.core.output.lock().unwrap().as_mut() {
-        o.send(ToAudio::PadLevel(s.pad_level));
+        o.send(ToAudio::PadLevel(pads::level_gain(s.pad_level)));
         o.send(ToAudio::PadRoute(s.pad_route.unwrap_or(Route::Pair(0))));
     }
     Ok(())
@@ -2274,6 +2318,36 @@ async fn set_key_tempo(app: AppHandle, state: State<'_, AppState>, transpose: i3
     install(&state.core, &settings, &loaded)?;
     *state.song.lock().unwrap() = Some(loaded);
     let _ = pad_update(&state);
+    Ok(view(&state))
+}
+
+/// Sets whether a track keeps its pitch on a key change; re-renders if the key is changed.
+#[tauri::command]
+async fn set_keep_pitch(app: AppHandle, state: State<'_, AppState>, stem: String, keep: bool) -> Result<AppView, String> {
+    if state.core.playing() {
+        return Err("Stop playback before changing this.".into());
+    }
+    let (folder, sr, ch, rerender) = {
+        let mut song = state.song.lock().unwrap();
+        let l = song.as_mut().ok_or("Load a song first.")?;
+        let f = &mut l.file;
+        f.keep_pitch.retain(|n| n != &stem);
+        f.follow_key.retain(|n| n != &stem);
+        if keep != f.keeps_pitch(&stem) {
+            if keep { f.keep_pitch.push(stem.clone()) } else { f.follow_key.push(stem.clone()) }
+        }
+        f.save(&l.folder)?;
+        let out = state.core.output.lock().unwrap();
+        let o = out.as_ref().ok_or("No audio output is open.")?;
+        (l.folder.clone(), o.info.sample_rate, o.info.channels, f.transpose != 0)
+    };
+    if rerender {
+        let _ = app.emit("analysis", AnalysisProgress { stage: "Changing key".into(), progress: 0.4 });
+        let loaded = tauri::async_runtime::spawn_blocking(move || load(&folder, sr, ch)).await.map_err(|e| e.to_string())??;
+        let settings = state.settings.lock().unwrap().clone();
+        install(&state.core, &settings, &loaded)?;
+        *state.song.lock().unwrap() = Some(loaded);
+    }
     Ok(view(&state))
 }
 
@@ -2536,6 +2610,7 @@ fn main() {
                 next: Mutex::new(NextSong::default()),
                 seen_segues: AtomicU64::new(0),
                 pad_auto: AtomicBool::new(false),
+            pad_hold: AtomicBool::new(false),
             pad_start: std::sync::atomic::AtomicU8::new(0),
             master_seen: std::sync::atomic::AtomicU32::new(0),
                 pad_choice: Mutex::new(None),
@@ -2571,6 +2646,7 @@ fn main() {
             set_key_tempo,
             choose_pads_folder,
             pad_sound,
+            set_keep_pitch,
             pad_set,
             bus_edit,
             pad_mix,
@@ -2615,6 +2691,7 @@ mod tests {
             next: Mutex::new(NextSong::default()),
             seen_segues: AtomicU64::new(0),
             pad_auto: AtomicBool::new(false),
+            pad_hold: AtomicBool::new(false),
             pad_start: std::sync::atomic::AtomicU8::new(0),
             master_seen: std::sync::atomic::AtomicU32::new(0),
             pad_choice: Mutex::new(None),

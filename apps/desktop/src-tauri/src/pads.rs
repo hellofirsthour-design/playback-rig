@@ -104,7 +104,31 @@ pub fn make_voice(a: &StemAudio, sample_rate: u32) -> Result<PadVoice, String> {
         data[2 * i] = data[2 * i] * fi + l * fo;
         data[2 * i + 1] = data[2 * i + 1] * fi + r * fo;
     }
+    normalize(&mut data);
     Ok(PadVoice { data: data.into(), frames: len, pos: 0, gain: 0.0 })
+}
+
+/// Pad packs come mastered loud. Every pad is brought to the same moderate loudness
+/// (RMS about -20 dBFS), so 100% sits under the band instead of on top of it, and
+/// switching sounds or keys doesn't jump in level. Very quiet files are raised at most 4x.
+pub const PAD_RMS: f32 = 0.1;
+fn normalize(data: &mut [f32]) {
+    if data.is_empty() {
+        return;
+    }
+    let rms = (data.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / data.len() as f64).sqrt() as f32;
+    if rms < 1e-6 {
+        return;
+    }
+    let k = (PAD_RMS / rms).min(4.0);
+    data.iter_mut().for_each(|v| *v *= k);
+}
+
+/// The pad level slider (0-150%) as a gain, on an audio taper: the slider moves through
+/// loudness the way the ear hears it, so 8% is properly quiet and 50% is about -12 dB.
+pub fn level_gain(level: f32) -> f32 {
+    let l = level.clamp(0.0, 1.5);
+    l * l
 }
 
 /// Plays pads inside the audio callback. No allocation: voices arrive ready-made and
@@ -203,10 +227,27 @@ mod tests {
         p.process(&mut out, 2);
         assert!(out[2 * 100] > 0.0 && out[2 * 100] < 0.01, "fading in");
         // after the 4 s fade, through the loop point (16 s), the level stays put
-        assert!(out[2 * 5_000..].chunks(2).all(|f| (f[0] - 0.5).abs() < 1e-4), "steady and seamless");
+        // (DC at 0.5 is evened out to the standard pad loudness, PAD_RMS.)
+        assert!(out[2 * 5_000..].chunks(2).all(|f| (f[0] - PAD_RMS).abs() < 1e-4), "steady and seamless");
         p.on = false;
         let mut out = vec![0f32; 2 * 5_000];
         p.process(&mut out, 2);
         assert_eq!(out[2 * 4_500], 0.0, "faded out");
+    }
+
+    #[test]
+    fn pads_come_out_at_the_same_loudness() {
+        let sr = 1000;
+        let mk = |amp: f32| StemAudio::mono((0..20_000).map(|i| amp * ((i as f32) * 0.05).sin()).collect());
+        let rms = |v: &PadVoice| (v.data.iter().map(|x| x * x).sum::<f32>() / v.data.len() as f32).sqrt();
+        let loud = make_voice(&mk(0.9), sr).unwrap();
+        let soft = make_voice(&mk(0.2), sr).unwrap();
+        assert!((rms(&loud) - PAD_RMS).abs() < 0.01, "loud pad brought down: {}", rms(&loud));
+        assert!((rms(&soft) - PAD_RMS).abs() < 0.01, "soft pad brought up: {}", rms(&soft));
+        // the level slider is a taper: 8% is about -22 dB below 50%, 100% is unity
+        assert!((level_gain(1.0) - 1.0).abs() < 1e-6);
+        assert!((level_gain(0.5) - 0.25).abs() < 1e-6);
+        assert!(level_gain(0.08) < 0.007);
+        assert_eq!(level_gain(-1.0), 0.0);
     }
 }

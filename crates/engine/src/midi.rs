@@ -56,6 +56,8 @@ pub enum Action {
     MasterLevel,
     /// Continuous: a fader sets a bus's level (the bus's place in the bus list).
     BusLevel(usize),
+    /// Go to this song in the set (0 = the first).
+    Song(usize),
 }
 
 impl Action {

@@ -146,6 +146,7 @@
         <span class="hint" id="bpmOrig"></span>
       </div>
       <p class="hint">Click and guide keep their pitch. Changes of more than 3 semitones start to sound processed.</p>
+      <div class="kpitch"><span class="lbl">Keep their pitch</span><div class="kpchips" id="kpChips"></div><p class="hint">Lit tracks stay as recorded when the key changes. Effects (FX, risers, sweeps, impacts) start lit; tap a track to change it. Applies when the song is stopped.</p></div>
       <div class="row between"><button class="btn" id="ktReset">Original</button><button class="btn accent" id="ktApply">Apply</button></div>
     </div>
     <div class="card">
@@ -203,6 +204,7 @@
       <label>Built-in click goes to<select id="clickRoute"></select></label>
       <label>Click level<input id="clickGain" type="range" min="0" max="1.5" step="0.01"></label>
     </div>
+    <label class="chk"><input type="checkbox" id="smoothJumps"> Smooth jumps: when the arrangement skips ahead or you jump, the music you left rings out for a moment instead of cutting off</label>
     <p class="hint" id="outHint"></p>
   </div>
   <div class="card">
