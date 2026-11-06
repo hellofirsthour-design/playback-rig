@@ -307,10 +307,24 @@
     const set = $('#lvSet'); set.innerHTML = '';
     (V ? V.setlist : []).forEach((s, i) => {
       const arrow = s.transition === 'Segue' ? '  →' : s.transition === 'Crossfade' ? '  ⤳' : '';
-      const li = el('li', (i === V.current ? 'cur' : i === V.current + 1 ? 'next' : '') + (s.found ? '' : ' missing'), s.name + (i + 1 < V.setlist.length ? arrow : ''));
+      const li = el('li', (i === V.current ? 'cur' : i === V.current + 1 ? 'next' : '') + (s.found ? '' : ' missing'));
+      li.append(el('span', 'snm', s.name + (i + 1 < V.setlist.length ? arrow : '')));
+      if (s.key) li.append(el('span', 'skey', s.key));
       li.onclick = () => { if (playing()) { toast('Stop the song to switch.'); return; } selectSong(i); };
       set.append(li);
     });
+    // Next song: what's coming, before you get there.
+    const nc = $('#lvNextSong'), nx = V && V.current != null ? V.setlist[V.current + 1] : null;
+    nc.hidden = !nx; nc.innerHTML = '';
+    if (nx) {
+      const how = { Segue: 'Segues in', Crossfade: 'Crossfades in' }[(V.setlist[V.current] || {}).transition] || 'Starts on play';
+      const pad = { Intro: 'pad through intro', Song: 'pad whole song' }[nx.pad_start];
+      nc.append(el('div', 'lbl', 'Next song'), el('div', 'nsn', nx.name));
+      const facts = el('div', 'nsf');
+      if (nx.key) facts.append(el('b', 'nsk', nx.key));
+      if (nx.bpm) facts.append(el('span', null, `${+nx.bpm.toFixed(1)} BPM`));
+      nc.append(facts, el('div', 'nsh', how + (pad ? ' · ' + pad : '')));
+    }
   }
   /* Live tabs: Mixer (buses), Pads, Click */
   let liveTab = 'mix';
@@ -1315,7 +1329,7 @@
   /* ---------- status bar ---------- */
   function renderStatus() {
     $('#stOut').textContent = V.output ? `${V.output.name} · ${V.output.channels} outs · ${(V.output.sample_rate / 1000).toFixed(1)} kHz` : 'No audio output';
-    $('#stMidi').textContent = V.midi ? `MIDI: ${V.midi}` : 'No pedals connected';
+    $('#stMidi').textContent = V.midi ? `MIDI: ${V.midi}` : 'No MIDI controller';
     $('#followBtn').classList.toggle('on', zoom.follow);
   }
   function showTask(text, p) { $('#stTask').hidden = false; $('#stTaskText').textContent = text; $('#stTaskBar').style.width = Math.round(p * 100) + '%'; }
@@ -1458,15 +1472,15 @@
 
   /* ---------- setup drawer ---------- */
   const LEARN = [
-    { label: 'Pedal 1', tap: 'PlayStop', hold: 'Panic', desc: 'Tap: play / stop · Hold: panic stop' },
-    { label: 'Pedal 2', tap: 'Next', hold: 'SkipAhead', desc: 'Tap: next block · Hold: skip ahead' },
-    { label: 'Pedal 3', tap: 'Repeat', hold: 'ToggleVamp', desc: 'Tap: repeat block · Hold: vamp' },
-    { label: 'Pedal 4', tap: 'NextSong', hold: 'PadOnly', desc: 'Tap: next song · Hold: pad only' },
-    { label: 'Play / stop button', tap: 'PlayStop' }, { label: 'Next button', tap: 'Next' }, { label: 'Repeat button', tap: 'Repeat' },
-    { label: 'Vamp button', tap: 'ToggleVamp' }, { label: 'Next song button', tap: 'NextSong' }, { label: 'Click fader', tap: 'ClickLevel' }, { label: 'Master fader', tap: 'MasterLevel', desc: 'Everything the app sends out' },
-    { label: 'Live / Edit page button', tap: 'ToggleView' }, { label: 'Fade out button', tap: 'FadeOut', desc: 'Fades the song out over 2 bars and stops' }, { label: 'Free click button', tap: 'FreeClick', desc: 'Starts or stops the click with no song' },
+    { label: 'Play / stop', tap: 'PlayStop' }, { label: 'Next block', tap: 'Next' }, { label: 'Repeat block', tap: 'Repeat' },
+    { label: 'Vamp', tap: 'ToggleVamp' }, { label: 'Skip ahead', tap: 'SkipAhead', desc: 'Skips the next block too' }, { label: 'Next song', tap: 'NextSong' },
+    { label: 'Fade out', tap: 'FadeOut', desc: 'Fades the song out over 2 bars and stops' }, { label: 'Panic stop', tap: 'Panic', desc: 'Stops everything at once' },
+    { label: 'Pad only', tap: 'PadOnly', desc: 'Stops the song, keeps the pad' }, { label: 'Free click', tap: 'FreeClick', desc: 'Starts or stops the click with no song' },
+    { label: 'Live / Edit page', tap: 'ToggleView' },
+    { label: 'Master fader', tap: 'MasterLevel', desc: 'Everything the app sends out', fader: true },
   ];
   function actionLabel(a) {
+    if (a && a.BusLevel !== undefined) { const b = (V.all_buses || [])[a.BusLevel]; return `${b ? b.name : 'Bus ' + (a.BusLevel + 1)} fader`; }
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
     return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', MasterLevel: 'Master fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
   }
@@ -1490,10 +1504,11 @@
       + ' Plug in another interface and it gets its own routing; plug this one back in and yours comes back. If it is unplugged mid-service, the set stays loaded and it reconnects by itself.';
     renderPads();
     const ms = $('#midiSel'); ms.innerHTML = ''; ms.append(new Option('None', '')); V.midi_inputs.forEach(m => ms.append(new Option(m, m))); ms.value = V.midi || '';
-    const rows = [...LEARN, ...(V.song ? V.song.stems.map((st, i) => ({ label: `${st.name} fader`, tap: { StemLevel: i } })) : [])];
+    // Buttons, then the faders: master and each bus (tracks follow their bus).
+    const rows = [...LEARN, ...(V.all_buses || []).map((b, i) => ({ label: `${b.name} fader`, tap: { BusLevel: i }, fader: true }))];
     const box = $('#learn'); box.innerHTML = '';
     rows.forEach((r, i) => {
-      const d = el('div', 'lrow'); const t = el('div'); t.append(el('b', null, r.label)); if (r.desc) t.append(el('small', null, r.desc));
+      const d = el('div', 'lrow' + (r.fader && !(rows[i - 1] || {}).fader ? ' first-fader' : '')); const t = el('div'); t.append(el('b', null, r.label)); if (r.desc) t.append(el('small', null, r.desc));
       const b = el('button', 'btn' + (learnWait === i ? ' wait' : ''), learnWait === i ? 'Press it now…' : 'Learn');
       b.onclick = async () => {
         if (!V.midi) { toast('Choose your MIDI input first.'); return; }
@@ -1610,6 +1625,13 @@
   /* ---------- events from Rust ---------- */
   T.event.listen('stem-level', e => { const [i, g] = e.payload; if (!V || !V.song || !V.song.stems[i]) return; V.song.stems[i].gain = g; const f = $('#fader-' + i); if (f) f.value = g; });
   T.event.listen('click-level', e => { if (V) V.click_gain = e.payload; });
+  // A bus fader moved on the controller: the Live mixer follows (redrawn once per frame at most).
+  let busRedraw = 0;
+  T.event.listen('bus-level', e => {
+    const [id, g] = e.payload; if (!V) return;
+    [V.buses || [], V.all_buses || []].forEach(l => l.forEach(b => { if (b.id === id) b.gain = g; }));
+    if (page === 'live' && liveTab === 'mix' && !busRedraw) busRedraw = requestAnimationFrame(() => { busRedraw = 0; renderLiveTab(); });
+  });
   T.event.listen('master-level', e => { if (V) { V.master_gain = e.payload; if (page === 'live') renderMaster(); } });
   T.event.listen('midi-learned', () => { learnWait = null; refresh().then(() => toast('Control assigned.')); });
   T.event.listen('audio-error', e => toast('Audio problem: ' + e.payload));

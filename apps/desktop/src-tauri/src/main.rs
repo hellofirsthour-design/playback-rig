@@ -452,6 +452,17 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
             core.send(Command::SetClickGain(g));
             let _ = app.emit("click-level", g);
         }
+        Event::Level(Action::BusLevel(i), v) => {
+            // A controller fader on a bus: the same as moving that bus's fader on screen.
+            let g = fader(v).min(1.5);
+            if let Some(st) = app.try_state::<AppState>() {
+                let id = st.settings.lock().unwrap().bus_list.get(i).map(|b| b.id.clone());
+                if let Some(id) = id {
+                    let _ = cmd(st, UiCmd::BusGain { bus: id.clone(), gain: g });
+                    let _ = app.emit("bus-level", (id, g));
+                }
+            }
+        }
         Event::Level(Action::MasterLevel, v) => {
             let g = fader(v).min(1.5);
             core.master.store(g.to_bits(), Ordering::Relaxed);
@@ -501,7 +512,7 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
                     let _ = app.emit("pedal", "refresh");
                 }
             }
-            Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel => {}
+            Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_) => {}
         },
     }
 }
@@ -1158,6 +1169,11 @@ struct SetItem {
     path: String,
     found: bool,
     transition: songfile::TransitionMode,
+    /// The key as played (with any key change) and the tempo as counted, for the set list.
+    key: Option<String>,
+    bpm: Option<f64>,
+    /// How the pad starts it, for the Next song card.
+    pad_start: PadStart,
 }
 
 #[derive(Serialize)]
@@ -1286,8 +1302,11 @@ fn view(state: &AppState) -> AppView {
                 let found = p.is_dir();
                 let file = std::fs::read_to_string(SongFile::path(p)).ok().and_then(|t| serde_json::from_str::<SongFile>(&t).ok());
                 let transition = file.as_ref().map_or(songfile::TransitionMode::Stop, |f| f.transition.mode);
+                let key = file.as_ref().and_then(song_key_pc).map(|pc| pads::NAMES[pc as usize].to_string());
+                let bpm = file.as_ref().map(|f| f.play_bpm() / f.felt_per_beat().max(1e-9)).filter(|b| b.is_finite() && *b > 0.0);
+                let pad_start = file.as_ref().map_or(PadStart::Off, |f| f.transition.pad_start);
                 let name = file.map(|f| f.name).unwrap_or_else(|| p.file_name().and_then(|n| n.to_str()).unwrap_or("Song").to_string());
-                SetItem { name, path: p.display().to_string(), found, transition }
+                SetItem { name, path: p.display().to_string(), found, transition, key, bpm, pad_start }
             })
             .collect(),
         current: s.current,

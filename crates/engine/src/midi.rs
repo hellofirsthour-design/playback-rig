@@ -1,4 +1,4 @@
-//! MIDI control: foot pedals and fader controllers (e.g. an Akai MIDImix or APC mini).
+//! MIDI control: controller buttons and faders (e.g. an Akai MIDImix or APC mini).
 //! Any controller works through MIDI learn: pick an action, press or move a control.
 //! Buttons can have a tap action and a hold action, like the pedal plan:
 //! tap = next section, hold = skip ahead.
@@ -54,11 +54,13 @@ pub enum Action {
     ClickLevel,
     /// Continuous: a fader sets the master level (everything out).
     MasterLevel,
+    /// Continuous: a fader sets a bus's level (the bus's place in the bus list).
+    BusLevel(usize),
 }
 
 impl Action {
     pub fn is_level(&self) -> bool {
-        matches!(self, Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel)
+        matches!(self, Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_))
     }
 }
 
