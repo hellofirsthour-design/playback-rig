@@ -276,6 +276,8 @@ struct Core {
     metro_on: Arc<AtomicBool>,
     /// The open audio device reported itself gone (unplugged).
     audio_failed: Arc<AtomicBool>,
+    /// Peak level of each stem since the screen last asked (meters).
+    levels: Arc<Mutex<[f32; 64]>>,
     /// Waiting for the chosen audio interface / MIDI controller to come back.
     audio_lost: AtomicBool,
     midi_lost: AtomicBool,
@@ -481,7 +483,7 @@ fn open_output(core: &Core, app: &AppHandle, name: Option<String>) -> Result<Ope
     let h = app.clone();
     let failed = core.audio_failed.clone();
     failed.store(false, Ordering::Release);
-    let out = audio::open(name, core.status.clone(), core.segues.clone(), core.metro_on.clone(), move |e, gone| {
+    let out = audio::open(name, core.status.clone(), core.segues.clone(), core.metro_on.clone(), core.levels.clone(), move |e, gone| {
         if gone {
             failed.store(true, Ordering::Release); // the watcher takes it from here
         } else {
@@ -1218,6 +1220,8 @@ struct Status {
     /// Waiting for the audio interface / MIDI controller to be plugged back in.
     audio_lost: bool,
     midi_lost: bool,
+    /// Each stem's peak level (0-1+) since the last status, for meters.
+    levels: Vec<f32>,
 }
 
 #[tauri::command]
@@ -1230,6 +1234,13 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
     let pad_changed = auto_pad(&state, &snapshot);
     sync_next(&app, &state);
     let learning = state.core.map.lock().unwrap().is_learning();
+    let n = state.song.lock().unwrap().as_ref().map_or(0, |l| l.file.stems.len()).min(64);
+    let levels = {
+        let mut lv = state.core.levels.lock().unwrap();
+        let v = lv[..n].to_vec();
+        lv.iter_mut().for_each(|x| *x = 0.0);
+        v
+    };
     Status {
         snapshot,
         learning,
@@ -1238,6 +1249,7 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
         free_click: state.core.metro_on.load(Ordering::Acquire),
         audio_lost: state.core.audio_lost.load(Ordering::Acquire),
         midi_lost: state.core.midi_lost.load(Ordering::Acquire),
+        levels,
     }
 }
 
@@ -2285,6 +2297,7 @@ fn main() {
                 segues: Arc::new(AtomicU64::new(0)),
                 metro_on: Arc::new(AtomicBool::new(false)),
                 audio_failed: Arc::new(AtomicBool::new(false)),
+                levels: Arc::new(Mutex::new([0.0; 64])),
                 audio_lost: AtomicBool::new(false),
                 midi_lost: AtomicBool::new(false),
                 map: Mutex::new(map),
@@ -2384,6 +2397,7 @@ mod tests {
                 segues: Arc::new(AtomicU64::new(0)),
                 metro_on: Arc::new(AtomicBool::new(false)),
                 audio_failed: Arc::new(AtomicBool::new(false)),
+                levels: Arc::new(Mutex::new([0.0; 64])),
                 audio_lost: AtomicBool::new(false),
                 midi_lost: AtomicBool::new(false),
                 map: Mutex::new(MidiMap::default()),

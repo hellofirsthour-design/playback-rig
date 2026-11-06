@@ -246,6 +246,26 @@
   }
   document.addEventListener('wheel', e => { if (e.target.closest && e.target.closest('#rail')) railHandScroll = Date.now(); }, { passive: true });
 
+  /* ---------- Look (themes) ---------- */
+  const THEMES = [['graphite', 'Graphite', '#17181b', '#ff6a1a'], ['midnight', 'Midnight', '#101724', '#4c9dff'], ['studio', 'Studio', '#3b3b3b', '#ff9a3c'],
+    ['sanctuary', 'Sanctuary', '#1b1612', '#e8913a'], ['daylight', 'Daylight', '#f3f3ef', '#e5560b']];
+  let theme = 'graphite';
+  try { theme = localStorage.getItem('rig.theme') || 'graphite'; } catch (e) { /* storage off */ }
+  function setTheme(t) {
+    theme = THEMES.some(x => x[0] === t) ? t : 'graphite';
+    if (theme === 'graphite') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem('rig.theme', theme); } catch (e) { /* storage off */ }
+    palCache = null; dirty = true;
+    const box = $('#themes'); if (!box) return;
+    box.innerHTML = '';
+    THEMES.forEach(([id, name, bg, accent]) => {
+      const b = el('button', 'theme' + (id === theme ? ' on' : '')); b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', id === theme);
+      const sw = el('span', 'sw'); sw.style.background = bg; const dot = el('i'); dot.style.background = accent; sw.append(dot);
+      b.append(sw, el('span', null, name)); b.onclick = () => setTheme(id);
+      box.append(b);
+    });
+  }
+
   /* ---------- Live page / Edit page ---------- */
   let page = 'edit';
   try { page = localStorage.getItem('rig.page') === 'live' ? 'live' : 'edit'; } catch (e) { /* storage off */ }
@@ -291,19 +311,40 @@
   let liveTab = 'mix';
   try { liveTab = localStorage.getItem('rig.liveTab') || 'mix'; } catch (e) { /* storage off */ }
   document.querySelectorAll('.tabbar [role=tab]').forEach(b => { b.onclick = () => { liveTab = b.dataset.tab; try { localStorage.setItem('rig.liveTab', liveTab); } catch (e) { /* storage off */ } renderLiveTab(); }; });
-  function faderStrip(name, value, max, onInput, muted, onMute, label) {
-    const r = el('div', 'strip' + (muted ? ' off' : ''));
+  // A vertical fader (Playback-style): drag the cap, scroll, arrow keys; double-click = 100%.
+  // `meter` names what its level meter shows ("bus:drums", "stem:3"), or null.
+  function faderStrip(name, value, max, onInput, muted, onMute, label, meter) {
+    const r = el('div', 'vstrip' + (muted ? ' off' : ''));
+    const v = el('span', 'vval', Math.round(value * 100) + '%');
+    const body = el('div', 'vbody');
+    const mt = el('div', 'vmeter'); mt.append(el('i'));
+    if (meter) mt.dataset.meter = meter; else mt.classList.add('none');
+    const fd = el('div', 'vfader'); fd.tabIndex = 0; fd.setAttribute('role', 'slider'); fd.setAttribute('aria-label', label || `${name} level`);
+    fd.setAttribute('aria-valuemin', 0); fd.setAttribute('aria-valuemax', Math.round(max * 100));
+    const track = el('div', 'vtrack'), fill = el('div', 'vfill'), unity = el('div', 'vunity'), cap = el('div', 'vcap');
+    track.append(fill); fd.append(track, unity, cap);
+    unity.style.bottom = `calc(8px + ${1 / max} * (100% - 16px))`;
+    let val = value;
+    const show = () => { const f = Math.max(0, Math.min(1, val / max)); cap.style.bottom = `calc(8px + ${f} * (100% - 16px))`; fill.style.height = (f * 100) + '%'; v.textContent = Math.round(val * 100) + '%'; fd.setAttribute('aria-valuenow', Math.round(val * 100)); };
+    const set = x => { val = Math.max(0, Math.min(max, Math.round(x * 100) / 100)); show(); onInput(val); };
+    const fromY = e => { const rc = track.getBoundingClientRect(); return (1 - (e.clientY - rc.top) / rc.height) * max; };
+    fd.onpointerdown = e => { if (e.button !== 0) return; e.preventDefault(); fd.setPointerCapture(e.pointerId); fd.focus(); fd.dataset.drag = '1'; set(fromY(e)); };
+    fd.onpointermove = e => { if (fd.dataset.drag) set(fromY(e)); };
+    fd.onpointerup = fd.onpointercancel = () => { delete fd.dataset.drag; };
+    fd.ondblclick = () => set(1);
+    fd.onwheel = e => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.preventDefault(); set(val - e.deltaY * 0.002); } };
+    fd.onkeydown = e => { const k = { ArrowUp: 0.02, ArrowDown: -0.02, PageUp: 0.1, PageDown: -0.1 }[e.key]; if (k) { e.preventDefault(); e.stopPropagation(); set(val + k); } };
+    body.append(mt, fd);
     const m = el('button', 'm' + (muted ? ' on' : ''), 'M'); m.title = `Mute ${name}`; m.setAttribute('aria-pressed', !!muted);
     if (onMute) m.onclick = onMute; else m.style.visibility = 'hidden';
-    const f = el('input'); f.type = 'range'; f.min = 0; f.max = max; f.step = 0.01; f.value = value; f.setAttribute('aria-label', label || `${name} level`);
-    const v = el('span', 'val', Math.round(value * 100) + '%');
-    f.oninput = () => { v.textContent = Math.round(+f.value * 100) + '%'; onInput(+f.value); };
-    r.append(m, el('b', null, name), f, v);
+    const nm = el('div', 'vname', name); nm.title = name;
+    r.append(nm, body, v, m);
+    show();
     return r;
   }
   function renderLiveTab() {
     document.querySelectorAll('.tabbar [role=tab]').forEach(b => { const on = b.dataset.tab === liveTab; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
-    const box = $('#lvTab'); if (!box || box.contains(document.activeElement) && document.activeElement.type === 'range') return;
+    const box = $('#lvTab'); if (!box || box.querySelector('.vfader[data-drag]') || (box.contains(document.activeElement) && document.activeElement.type === 'range')) return;
     box.innerHTML = '';
     if (liveTab === 'mix') {
       if (V.song) {
@@ -318,7 +359,7 @@
       }
       const g = el('div', 'strips');
       (V.buses || []).forEach(b => g.append(faderStrip(b.name, b.gain, 1.5, x => { b.gain = x; send({ type: 'BusGain', bus: b.id, gain: x }); if (V.song && !V.song_mix) { V.song_mix = true; } }, b.muted,
-        async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; })));
+        async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; }, null, 'bus:' + b.id)));
       g.append(faderStrip('Click (built-in)', V.click_gain, 1.5, x => { V.click_gain = x; send({ type: 'ClickGain', gain: x }); }, null, null));
       g.append(faderStrip('Pad', V.pads.level, 1.5, x => { V.pads.level = x; invoke('pad_mix', { level: x, route: null }).catch(err); }, !V.pads.on, () => togglePad()));
       if (!(V.buses || []).length) box.append(el('p', 'hint', 'Load a song to see its buses.'));
@@ -765,7 +806,8 @@
       const sb = el('button', 's' + (solo.has(i) ? ' on' : ''), 'S'); sb.title = 'Solo'; sb.setAttribute('aria-pressed', solo.has(i));
       sb.onclick = () => { solo.has(i) ? solo.delete(i) : solo.add(i); applySolo(); renderHeads(); dirty = true; };
       ms.append(m, sb);
-      r.append(el('div', 'sw'), ln, ms);
+      const hm = el('div', 'hmeter'); hm.dataset.meter = 'stem:' + i; hm.append(el('i'));
+      r.append(el('div', 'sw'), ln, ms, hm);
       box.append(r);
     });
     const nb = el('button', 'newbus', '+ New bus'); nb.title = 'Make a bus, then drag tracks onto it';
@@ -808,6 +850,16 @@
   }
 
   /* ---------- arrangement canvases ---------- */
+  // The arrangement view's colours come from the theme (CSS variables), read once per theme.
+  let palCache = null;
+  function pal() {
+    if (palCache) return palCache;
+    const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue(n).trim();
+    palCache = { ruler: v('--cv-ruler'), lanes: v('--cv-lanes'), laneAlt: v('--cv-lane-alt'), laneLine: v('--cv-lane-line'), bus: v('--cv-bus'),
+      tick: v('--cv-tick'), tickStrong: v('--cv-tick-strong'), text: v('--muted'), dim: v('--dim'), fg: v('--fg'), go: v('--go'),
+      grid: v('--cv-grid'), scrub: v('--cv-scrub'), shade: v('--cv-shade') };
+    return palCache;
+  }
   const cvTop = $('#cvTop'), cvLanes = $('#cvLanes');
   function size(cv, h) {
     const dpr = window.devicePixelRatio || 1, w = cv.clientWidth;
@@ -825,10 +877,10 @@
   function draw() {
     const L = layout(), s = V && V.song;
     const [g, w] = size(cvTop, 50);
-    g.fillStyle = '#141518'; g.fillRect(0, 0, w, 50);
+    const C = pal(); g.fillStyle = C.ruler; g.fillRect(0, 0, w, 50);
     const R = rows(), H = rowsHeight(R);
     const [h, w2] = size(cvLanes, Math.max(1, H));
-    h.fillStyle = '#111214'; h.fillRect(0, 0, w2, H);
+    h.fillStyle = C.lanes; h.fillRect(0, 0, w2, H);
     if (!s || !L.length) return;
     const p = playing(), now = playTime(L), bs = barSec();
     if (p && zoom.follow) { const x = X(now); if (x > w * 0.72 || x < 0) zoom.scroll = now - (w * 0.2) / zoom.pps; }
@@ -843,9 +895,9 @@
       for (let k = 0; k < o.beats.length; k++) {
         const x = X(o.start + (o.beats[k] - o.sec.start_sec)); if (x < -2 || x > w + 2) continue;
         const bar = o.bar + k;
-        g.fillStyle = (bar - 1) % step === 0 ? '#555a62' : '#2c2f35';
+        g.fillStyle = (bar - 1) % step === 0 ? C.tickStrong : C.tick;
         g.fillRect(Math.round(x), (bar - 1) % step === 0 ? 4 : 13, 1, (bar - 1) % step === 0 ? 16 : 7);
-        if ((bar - 1) % step === 0) { g.fillStyle = '#8d9198'; g.fillText(String(bar), x + 3, 10); }
+        if ((bar - 1) % step === 0) { g.fillStyle = C.text; g.fillText(String(bar), x + 3, 10); }
       }
     });
     // section lane
@@ -862,23 +914,23 @@
     const per = peaks ? peaks.per_sec : 100;
     R.forEach(row => {
       if (row.kind === 'bus') {
-        h.fillStyle = '#191b1f'; h.fillRect(0, row.y, w2, BUS_H);
-        h.fillStyle = '#2c2f35'; h.fillRect(0, row.y + BUS_H - 1, w2, 1);
+        h.fillStyle = C.bus; h.fillRect(0, row.y, w2, BUS_H);
+        h.fillStyle = C.tick; h.fillRect(0, row.y + BUS_H - 1, w2, 1);
         return;
       }
       const r = row.i, st = s.stems[r], y = row.y, col = stemColor(st.name, r);
       const laneOff = st.muted || row.b.muted || (solo.size > 0 && !solo.has(r));
-      h.fillStyle = r % 2 ? '#131417' : '#111214'; h.fillRect(0, y, w2, LANE_H);
-      h.fillStyle = '#22252a'; h.fillRect(0, y + LANE_H - 1, w2, 1);
+      h.fillStyle = r % 2 ? C.laneAlt : C.lanes; h.fillRect(0, y, w2, LANE_H);
+      h.fillStyle = C.laneLine; h.fillRect(0, y + LANE_H - 1, w2, 1);
       const pk = peaks && peaks.stems[r];
       L.forEach(o => {
         const x0 = X(o.start), x1 = X(o.start + o.secs); if (x1 < 0 || x0 > w2) return;
         const off = laneOff || o.b.muted.includes(st.name);
         const top = y + 3, ch = LANE_H - 7;
-        h.globalAlpha = off ? 0.08 : 0.2; h.fillStyle = off ? '#8d9198' : col; h.fillRect(x0 + 1, top, Math.max(1, x1 - x0 - 2), ch);
+        h.globalAlpha = off ? 0.08 : 0.2; h.fillStyle = off ? C.text : col; h.fillRect(x0 + 1, top, Math.max(1, x1 - x0 - 2), ch);
         h.globalAlpha = off ? 0.3 : 1; h.fillRect(x0 + 1, top, Math.max(1, x1 - x0 - 2), 2);
         if (pk) {
-          h.globalAlpha = off ? 0.25 : 0.9; h.fillStyle = off ? '#8d9198' : col;
+          h.globalAlpha = off ? 0.25 : 0.9; h.fillStyle = off ? C.text : col;
           const mid = top + 2 + (ch - 2) / 2, amp = (ch - 6) / 2;
           const a = Math.max(0, Math.floor(x0) + 1), b = Math.min(w2, Math.ceil(x1) - 1);
           for (let px = a; px < b; px++) {
@@ -894,12 +946,12 @@
         const tr = !off && clipTrim(o, st.name);
         if (tr && !tr.full) {
           const bp = beatSec() * zoom.pps, xs = x0 + tr.from * bp, xe = x0 + tr.to * bp;
-          h.fillStyle = 'rgba(14,15,17,.82)';
+          h.fillStyle = C.shade;
           if (xs > x0 + 1) h.fillRect(x0 + 1, top, xs - x0 - 1, ch);
           if (xe < x1 - 1) h.fillRect(xe, top, x1 - 1 - xe, ch);
           h.fillStyle = col; h.fillRect(Math.round(xs), top, 2, ch); h.fillRect(Math.round(xe) - 2, top, 2, ch);
           const fi = tr.fade_in * bp, fo = tr.fade_out * bp;
-          h.fillStyle = 'rgba(0,0,0,.5)'; h.strokeStyle = '#ececec'; h.lineWidth = 1;
+          h.fillStyle = 'rgba(0,0,0,.5)'; h.strokeStyle = C.fg; h.lineWidth = 1;
           if (fi > 0) { h.beginPath(); h.moveTo(xs, top); h.lineTo(xs + fi, top); h.lineTo(xs, top + ch); h.closePath(); h.fill(); h.beginPath(); h.moveTo(xs, top + ch); h.lineTo(xs + fi, top); h.stroke(); }
           if (fo > 0) { h.beginPath(); h.moveTo(xe, top); h.lineTo(xe - fo, top); h.lineTo(xe, top + ch); h.closePath(); h.fill(); h.beginPath(); h.moveTo(xe - fo, top); h.lineTo(xe, top + ch); h.stroke(); }
         }
@@ -908,8 +960,8 @@
           const bp = beatSec() * zoom.pps, xs = x0 + tr.from * bp + tr.fade_in * bp, xe = x0 + tr.to * bp - tr.fade_out * bp;
           h.fillStyle = 'rgba(236,236,236,.7)'; h.fillRect(xs - 2, top, 5, 5); h.fillRect(xe - 3, top, 5, 5);
         }
-        if (off && x1 - x0 > 50) { h.fillStyle = '#5d6168'; h.font = '10px -apple-system, system-ui, sans-serif'; h.fillText(laneOff ? '' : 'off', x0 + 6, top + 13); }
-        if (sel && sel.block === o.i && sel.stem === r) { h.strokeStyle = '#ececec'; h.lineWidth = 1.5; h.strokeRect(x0 + 1.5, top + 0.5, x1 - x0 - 3, ch); }
+        if (off && x1 - x0 > 50) { h.fillStyle = C.dim; h.font = '10px -apple-system, system-ui, sans-serif'; h.fillText(laneOff ? '' : 'off', x0 + 6, top + 13); }
+        if (sel && sel.block === o.i && sel.stem === r) { h.strokeStyle = C.fg; h.lineWidth = 1.5; h.strokeRect(x0 + 1.5, top + 0.5, x1 - x0 - 3, ch); }
       });
     });
     // A block that fades out (the song's ending): a ramp over every lane.
@@ -922,18 +974,18 @@
       g.fillStyle = '#ffd23f'; g.font = '10px ui-monospace, Menlo, monospace'; g.fillText('fade', xa + 3, RULER_H - 6);
     });
     // block boundaries + playhead + queued jump
-    h.fillStyle = 'rgba(255,255,255,.06)'; L.forEach(o => { const x = X(o.start); if (x >= 0 && x <= w2) h.fillRect(Math.round(x), 0, 1, H); });
+    h.fillStyle = C.grid; L.forEach(o => { const x = X(o.start); if (x >= 0 && x <= w2) h.fillRect(Math.round(x), 0, 1, H); });
     if (snap && snap.pending != null && p) {
       const jx = X(now + snap.frames_to_jump / s.sample_rate);
       [g, h].forEach((c, k) => { c.strokeStyle = '#ffd23f'; c.setLineDash([4, 3]); c.lineWidth = 1.5; c.beginPath(); c.moveTo(jx, k ? 0 : RULER_H); c.lineTo(jx, k ? H : 50); c.stroke(); c.setLineDash([]); });
     }
     if (scrub != null) {
       const sx = X(scrub);
-      g.fillStyle = h.fillStyle = 'rgba(255,255,255,.55)';
+      g.fillStyle = h.fillStyle = C.scrub;
       g.fillRect(sx - 1, 0, 2, 50); h.fillRect(sx - 1, 0, 2, H);
     }
     const px = X(now);
-    g.fillStyle = h.fillStyle = p ? '#ff6a1a' : '#ececec';
+    g.fillStyle = h.fillStyle = p ? C.go : C.fg;
     g.fillRect(px - 1, 0, 2, 50); h.fillRect(px - 1, 0, 2, H);
     g.beginPath(); g.moveTo(px - 6, 0); g.lineTo(px + 6, 0); g.lineTo(px, 8); g.fill();
   }
@@ -1469,6 +1521,22 @@
   setTimeout(() => checkUpdate(false), 4000);
   setInterval(() => { if (!update) checkUpdate(false); }, 6 * 3600 * 1000);
 
+  // Level meters: each shows the loudest of its tracks, in dB (-60..+6), falling back smoothly.
+  const meterShown = new Map();
+  function showMeters(levels) {
+    document.querySelectorAll('[data-meter]').forEach(m => {
+      const [kind, id] = m.dataset.meter.split(':');
+      let pk = 0;
+      if (kind === 'stem') pk = levels[+id] || 0;
+      else { const b = (V.buses || []).find(x => x.id === id); if (b) b.stems.forEach(i => { pk = Math.max(pk, levels[i] || 0); }); }
+      const db = pk > 0 ? 20 * Math.log10(pk) : -90;
+      const target = Math.max(0, Math.min(1, (db + 60) / 66));
+      const prev = meterShown.get(m.dataset.meter) || 0;
+      const shown = target >= prev ? target : Math.max(target, prev - 0.035);
+      meterShown.set(m.dataset.meter, shown);
+      const bar = m.firstChild; if (bar) { bar.style.setProperty('--lv', shown); bar.classList.toggle('clip', db > 0); }
+    });
+  }
   let readyPoll = 0;
   setInterval(async () => {
     try {
@@ -1476,6 +1544,7 @@
       if (s.song_changed) { toast('Next song: ' + ((V.setlist[(V.current || 0) + 1] || {}).name || '')); await refresh(); return; }
       if (s.pad_changed) { await refresh(); return; }
       renderConn(s);
+      if (s.levels) showMeters(s.levels);
       if (V && V.free_click && s.free_click !== V.free_click.on) { V.free_click.on = s.free_click; if (page === 'live') renderLiveTab(); }
       // The next song loads in the background: show when it's ready.
       if (V && V.song && !V.next_ready && V.current != null && V.setlist[V.current + 1] && ++readyPoll % 50 === 0) await refresh();
@@ -1485,6 +1554,7 @@
   }, 40);
 
   (async () => {
+    setTheme(theme);
     setPage(page);
     await refresh();
     if (V.current != null && !V.song && V.setlist[V.current] && V.setlist[V.current].found) selectSong(V.current);

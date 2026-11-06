@@ -22,13 +22,19 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
 
 **Live / Edit** in the top bar (or L, or a learned MIDI button) switches pages; the app remembers the last one. The top bar (transport, display, Song, Setup) is the same on both.
 
-- **Live page** (Playback-style, readable from the keys): Now and Next side by side (kept compact so the controls fit): the current section, bars left, beat lights, a progress bar, and what's next ("Next", "In 2 bars → Chorus 2" when a jump is queued, "Vamping"). Below, the arrangement on one line that scrolls along with the song (tap a block to go there), and under it the **fades**: the song's ending, the way into the next song, pad under the ending and **Fade out now**. On the right, the set; the next song is highlighted, with → for a segue and ⤳ for a crossfade.
+- **Live page** (Playback-style, readable from the keys): Now and Next side by side (kept compact so the controls fit): the current section, bars left, beat lights, a progress bar, and what's next ("Next", "In 2 bars → Chorus 2" when a jump is queued, "Vamping"). Below, the arrangement on one line that scrolls along with the song (tap a block to go there), and under it the **fades**: the song's ending, the way into the next song, pad under the ending and **Fade out now**. On the left, the set; the next song is highlighted, with → for a segue and ⤳ for a crossfade.
   Below that, three tabs, so nobody has to dig into Setup mid-service (and someone else can run it from here):
-  - **Mixer:** a fader and mute per bus, plus the built-in click and pad levels. Track-by-track mixing stays on the Edit page.
+  - **Mixer:** vertical faders (drag the cap, scroll, or arrow keys; double-click = 100%) with level meters and a mute per bus, plus the built-in click and pad levels. With more buses than fit, swipe sideways. Track-by-track mixing stays on the Edit page.
   - **Pads:** on/off, level, and any of the 12 keys (the song's key is marked). Picking a key overrides the song's key until the song changes.
   - **Click (free click):** a click with no song, for announcements, between songs or a rehearsal with no tracks. Start/stop, BPM −/+, tap tempo, meter, "song tempo". It goes to the click output at the click level and stops by itself when a song starts. Also a learnable MIDI button.
   - **Key −/+** sits on the tab bar (stopped only, since the stems are re-rendered).
 - **Edit page:** the section rail and the arrangement view below.
+
+## Look
+
+- **Five looks** (Setup → Look), like Ableton's themes: Graphite (default), Midnight, Studio (Ableton-style grey), Sanctuary (warm) and Daylight (light, for bright rooms). Every colour comes from the theme, the arrangement view's included. Both pages share the same top bar, type and colours, so Live and Edit read as one program.
+- **Play is green, stop is red.**
+- **Level meters** on the Live mixer's faders (each bus shows its loudest track) and under every track on the Edit page, so you can see what's playing (or muted) at a glance.
 
 ## The main screen
 

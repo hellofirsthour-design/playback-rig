@@ -167,7 +167,7 @@ pub fn list_outputs() -> Vec<OutputInfo> {
 }
 
 /// Opens an output (by name, or the system default) using all of its channels.
-pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, on_error: impl Fn(String, bool) + Send + 'static) -> Result<Output, String> {
+pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, levels: Arc<Mutex<[f32; 64]>>, on_error: impl Fn(String, bool) + Send + 'static) -> Result<Output, String> {
     let (tx, mut rx) = rtrb::RingBuffer::<ToAudio>::new(1024);
     let (mut gtx, garbage) = rtrb::RingBuffer::<Garbage>::new(32);
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -272,6 +272,14 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                     if let Some(e) = decks.engine.as_ref() {
                         if let Ok(mut st) = status.try_lock() {
                             *st = Some(e.snapshot());
+                        }
+                        // meters: the loudest each stem got since the screen last looked
+                        if let Ok(mut lv) = levels.try_lock() {
+                            for (l, p) in lv.iter_mut().zip(e.peaks()) {
+                                if *p > *l {
+                                    *l = *p;
+                                }
+                            }
                         }
                     }
                     // The free click stops when a song starts.

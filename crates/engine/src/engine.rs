@@ -99,6 +99,8 @@ pub struct Engine {
     fade: u64,
     smooth_k: f32,
     gains: Vec<f32>,
+    /// Loudest sample each stem sent out during the last `process` call (for meters).
+    peaks: Vec<f32>,
     quant: Quantize,
     click_on: bool,
     click_gain: f32,
@@ -142,6 +144,7 @@ impl Engine {
             fade: (song.sample_rate as u64 / 200).max(1),
             smooth_k: 1.0 - (-1.0 / (0.005 * sr)).exp(),
             gains: vec![0.0; mix.len()],
+            peaks: vec![0.0; mix.len()],
             song,
             arr,
             stems,
@@ -183,6 +186,11 @@ impl Engine {
     }
     pub fn is_playing(&self) -> bool {
         self.playing
+    }
+    /// Each stem's loudest output sample during the last `process` call, after its level,
+    /// mutes and fades (0 when silent). For level meters; doesn't allocate.
+    pub fn peaks(&self) -> &[f32] {
+        &self.peaks
     }
 
     /// Replaces the arrangement. Only allowed while stopped; returns false otherwise.
@@ -550,6 +558,7 @@ impl Engine {
     /// Fills `out` (interleaved, `channels` wide) with the next block of audio.
     pub fn process(&mut self, out: &mut [f32]) {
         out.fill(0.0);
+        self.peaks.iter_mut().for_each(|p| *p = 0.0);
         let ch = self.channels;
         let frames = out.len() / ch;
         let fade = self.fade as f32;
@@ -658,7 +667,12 @@ impl Engine {
                 } else {
                     self.stems[i].frame(src)
                 };
-                Self::write(out, base, ch, self.mix[i].route, l * gg, r * gg);
+                let (ol, or) = (l * gg, r * gg);
+                let pk = ol.abs().max(or.abs());
+                if pk > self.peaks[i] {
+                    self.peaks[i] = pk;
+                }
+                Self::write(out, base, ch, self.mix[i].route, ol, or);
             }
 
             // Click, locked to the song's own bar grid.
@@ -1096,6 +1110,20 @@ mod tests {
         assert_eq!(e.snapshot().frames_to_jump, Some(14000 - 12300));
         // B starts at 8000 and ends at 16000: (16000 - 12300) / 2000 frames a bar.
         assert!((e.snapshot().bars_left - 1.85).abs() < 1e-9, "{}", e.snapshot().bars_left);
+    }
+
+    #[test]
+    fn peaks_follow_what_each_stem_sends_out() {
+        let mut e = rig(None);
+        e.handle(Command::Play);
+        run(&mut e, 1000);
+        assert!((e.peaks()[0] - 999.0).abs() < 1.0, "the ramp's loudest sample this block: {}", e.peaks()[0]);
+        e.handle(Command::SetStemGain(0, 0.5));
+        run(&mut e, 1000);
+        assert!((e.peaks()[0] - 999.5).abs() < 1.0, "half level: {}", e.peaks()[0]);
+        e.handle(Command::SetStemMute(0, true));
+        run(&mut e, 2000);
+        assert_eq!(e.peaks()[0], 0.0, "muted: nothing out");
     }
 
     #[test]
