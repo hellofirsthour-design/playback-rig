@@ -353,6 +353,8 @@ struct AppState {
     pad_auto: AtomicBool,
     /// The song's pad start (see PadStart): 0 waiting, 1 brought in by the start, 2 done.
     pad_start: std::sync::atomic::AtomicU8,
+    /// The master level at the last status (to save a controller move once it settles).
+    master_seen: std::sync::atomic::AtomicU32,
     /// A pad key picked on the Live page (None = the song's key). Back to the song's key
     /// when the song changes.
     pad_choice: Mutex<Option<u8>>,
@@ -887,8 +889,11 @@ fn intro_last(names: &[&str]) -> usize {
 /// out, None leave it. `stage` is AppState::pad_start and is updated here.
 fn pad_start_step(mode: PadStart, playing: bool, item: usize, intro_last: usize, stage: &mut u8) -> Option<bool> {
     if !playing {
+        // Stopped while the intro's pad was up (a false start, or stopped to jump ahead):
+        // take it out, so starting again from the verse doesn't keep it under the song.
+        let out = mode == PadStart::Intro && *stage == 1;
         *stage = 0;
-        return None;
+        return out.then_some(false);
     }
     match (mode, *stage) {
         (PadStart::Off, _) => None,
@@ -1292,7 +1297,7 @@ fn view(state: &AppState) -> AppView {
         count_in: s.count_in,
         click_gain: s.click_gain,
         click_route: s.click_route.unwrap_or(songfile::default_route("click", ch)),
-        master_gain: s.master_gain,
+        master_gain: f32::from_bits(state.core.master.load(Ordering::Relaxed)),
         bindings,
         learning,
         buses,
@@ -1347,7 +1352,18 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
     }
     let song_changed = take_segue(&state);
     let snapshot = state.core.snapshot();
-    let pad_changed = auto_pad(&state, &snapshot);
+    // On the tick the next song takes over, the snapshot can still be the old song's:
+    // the pad logic waits for the next tick.
+    let pad_changed = !song_changed && auto_pad(&state, &snapshot);
+    // A master level moved from a controller: keep the saved setting in step (saved once
+    // the fader has stopped moving).
+    let mg = f32::from_bits(state.core.master.load(Ordering::Relaxed));
+    let prev = f32::from_bits(state.master_seen.swap(mg.to_bits(), Ordering::Relaxed));
+    let saved = state.settings.lock().unwrap().master_gain;
+    if mg != saved && mg == prev {
+        state.settings.lock().unwrap().master_gain = mg;
+        state.save_settings();
+    }
     sync_next(&app, &state);
     let learning = state.core.map.lock().unwrap().is_learning();
     let n = state.song.lock().unwrap().as_ref().map_or(0, |l| l.file.stems.len()).min(audio::MASTER_SLOT);
@@ -2084,6 +2100,7 @@ async fn choose_pads_folder(app: AppHandle, state: State<'_, AppState>) -> Resul
 /// Switches to another pad sound (Pads tab). A playing pad crossfades to the new sound.
 #[tauri::command]
 fn pad_sound(state: State<'_, AppState>, index: usize, remove: Option<bool>) -> Result<AppView, String> {
+    let before = state.settings.lock().unwrap().pads_folder.clone();
     {
         let mut s = state.settings.lock().unwrap();
         let snd = s.pad_sounds.get(index).cloned().ok_or("That pad sound isn't there any more.")?;
@@ -2100,8 +2117,14 @@ fn pad_sound(state: State<'_, AppState>, index: usize, remove: Option<bool>) -> 
         }
     }
     state.save_settings();
-    *state.pad_key.lock().unwrap() = None; // reload in the new sound
-    let _ = pad_update(&state);
+    if state.settings.lock().unwrap().pads_folder != before {
+        *state.pad_key.lock().unwrap() = None; // reload in the new sound
+        if pad_update(&state).is_err() {
+            // no sound left (or its files moved): the pad fades out rather than carry on
+            *state.pad_on.lock().unwrap() = false;
+            let _ = pad_update(&state);
+        }
+    }
     Ok(view(&state))
 }
 
@@ -2495,6 +2518,7 @@ fn main() {
                 seen_segues: AtomicU64::new(0),
                 pad_auto: AtomicBool::new(false),
             pad_start: std::sync::atomic::AtomicU8::new(0),
+            master_seen: std::sync::atomic::AtomicU32::new(0),
                 pad_choice: Mutex::new(None),
                 resume: Mutex::new(None),
             });
@@ -2573,6 +2597,7 @@ mod tests {
             seen_segues: AtomicU64::new(0),
             pad_auto: AtomicBool::new(false),
             pad_start: std::sync::atomic::AtomicU8::new(0),
+            master_seen: std::sync::atomic::AtomicU32::new(0),
             pad_choice: Mutex::new(None),
             resume: Mutex::new(None),
         }
@@ -3075,6 +3100,16 @@ mod tests {
         // Stopping resets it for the next play.
         assert_eq!(pad_start_step(PadStart::Intro, false, 0, 1, &mut st), None);
         assert_eq!(st, 0);
+        // Stopped during the intro (pad still up): it goes out, so a restart from the verse is clean.
+        let mut st = 0;
+        assert_eq!(pad_start_step(PadStart::Intro, true, 0, 1, &mut st), Some(true));
+        assert_eq!(pad_start_step(PadStart::Intro, false, 0, 1, &mut st), Some(false));
+        assert_eq!(pad_start_step(PadStart::Intro, true, 2, 1, &mut st), None);
+        // Whole-song pad: stopping leaves it (it carries the ending).
+        let mut st = 0;
+        assert_eq!(pad_start_step(PadStart::Song, true, 0, 1, &mut st), Some(true));
+        assert_eq!(pad_start_step(PadStart::Song, false, 3, 1, &mut st), None);
+        let mut st = 0;
         // Starting from the bridge: the intro pad isn't wanted.
         assert_eq!(pad_start_step(PadStart::Intro, true, 4, 1, &mut st), None);
         assert_eq!(pad_start_step(PadStart::Intro, true, 5, 1, &mut st), None);

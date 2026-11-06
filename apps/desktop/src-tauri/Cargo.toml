@@ -1,6 +1,6 @@
 [package]
 name = "playback-rig"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2021"
 license = "UNLICENSED"
 description = "Playback Rig desktop app"

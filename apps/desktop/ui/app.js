@@ -301,7 +301,7 @@
     });
     renderFades($('#lvFades'));
     renderLiveTab();
-    if (keyFor !== (V.song && V.song.name)) { keyFor = V.song && V.song.name; keyTarget = null; }
+    { const k = V.song ? `${V.current}:${V.song.name}` : null; if (keyFor !== k) { keyFor = k; keyTarget = null; } }
     showKey();
     liveFollowed = -1;
     const set = $('#lvSet'); set.innerHTML = '';
@@ -358,8 +358,7 @@
     if (i != null && V.song && V.song.stems[i]) { strip.style.setProperty('--c', stemColor(V.song.stems[i].name, i)); strip.classList.add('tinted'); }
     return strip;
   }
-  function renderLiveTab() {
-    document.querySelectorAll('.vtabs [role=tab]').forEach(b => { const on = b.dataset.tab === liveTab; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+  function renderMaster() {
     // Master: everything the app sends out (songs, click, pad), on screen whatever the tab.
     // No mute button here, on purpose: one mis-tap would silence the band.
     const mb = $('#lvMaster');
@@ -368,7 +367,18 @@
       ms.classList.add('master'); ms.title = 'Master: everything the app sends out. Double-click for 100%.';
       mb.replaceChildren(ms);
     }
-    const box = $('#lvTab'); if (!box || box.querySelector('.vfader[data-drag]') || (box.contains(document.activeElement) && document.activeElement.type === 'range')) return;
+  }
+  // A level slider being dragged (pointer down on it): the tab isn't rebuilt under the finger.
+  let rangeDrag = false;
+  document.addEventListener('pointerdown', e => { if (e.target && e.target.type === 'range') rangeDrag = true; }, true);
+  document.addEventListener('pointerup', e => { rangeDrag = false; if (e.target && e.target.type === 'range') e.target.blur(); }, true);
+  document.addEventListener('pointercancel', () => { rangeDrag = false; }, true);
+  // A slider let go keeps no keyboard focus, so Space / N / R / V keep working.
+  document.addEventListener('change', e => { if (e.target && e.target.type === 'range') e.target.blur(); }, true);
+  function renderLiveTab() {
+    document.querySelectorAll('.vtabs [role=tab]').forEach(b => { const on = b.dataset.tab === liveTab; b.classList.toggle('on', on); b.setAttribute('aria-selected', on); });
+    renderMaster();
+    const box = $('#lvTab'); if (!box || box.querySelector('.vfader[data-drag]') || rangeDrag) return;
     box.innerHTML = '';
     if (liveTab === 'mix') {
       if (V.song) {
@@ -1600,7 +1610,7 @@
   /* ---------- events from Rust ---------- */
   T.event.listen('stem-level', e => { const [i, g] = e.payload; if (!V || !V.song || !V.song.stems[i]) return; V.song.stems[i].gain = g; const f = $('#fader-' + i); if (f) f.value = g; });
   T.event.listen('click-level', e => { if (V) V.click_gain = e.payload; });
-  T.event.listen('master-level', e => { if (V) { V.master_gain = e.payload; if (page === 'live') renderLiveTab(); } });
+  T.event.listen('master-level', e => { if (V) { V.master_gain = e.payload; if (page === 'live') renderMaster(); } });
   T.event.listen('midi-learned', () => { learnWait = null; refresh().then(() => toast('Control assigned.')); });
   T.event.listen('audio-error', e => toast('Audio problem: ' + e.payload));
   // Unplugged and plugged back in: the app reconnects by itself.
