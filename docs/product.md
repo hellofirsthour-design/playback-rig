@@ -28,12 +28,14 @@ The music director, **while playing an instrument**. On Sunday it's hands-free: 
   - **Pads:** on/off, level, and any of the 12 keys (the song's key is marked). Picking a key overrides the song's key until the song changes.
   - **Click (free click):** a click with no song, for announcements, between songs or a rehearsal with no tracks. Start/stop, BPM −/+, tap tempo, meter, "song tempo". It goes to the click output at the click level and stops by itself when a song starts. Also a learnable MIDI button.
   - **Key −/+** sits on the tab bar (stopped only, since the stems are re-rendered).
+- **Live page layout (0.9.4):** Now and Next are one compact row (about half their old height) so the mixer gets the room. Now shows the section, bar/tempo/key, bars left, beat lights and a clock (time in the song / length). The ending and transition controls (Ending, Into the next song, Pad under ending, Fade out now) sit in the mixer panel's header under the Mixer / Pads / Click tabs.
 - **Edit page:** the section rail and the arrangement view below. Grid lines run down every lane like Ableton: a line on each bar (every few bars when zoomed far out), fainter beat lines when zoomed in, and a stronger line where each section starts. They sit on the song's real downbeats, so they follow tempo changes.
 
 ## Look
 
 - **Five looks** (Setup → Look), like Ableton's themes: Graphite (default), Midnight, Studio (Ableton-style grey), Sanctuary (warm) and Daylight (light, for bright rooms). Every colour comes from the theme, the arrangement view's included. Both pages share the same top bar, type and colours, so Live and Edit read as one program.
 - **Play is green, stop is red.**
+- **Screens:** the song box in the top bar, the time display (Edit page) and the Live page clock look like hardware displays: dark glass, a bezel, faint scanlines and glowing text. They stay dark screens in every look, Daylight included.
 - **Finish details** (the small things that make it feel like an instrument, not a web page): buttons have a soft top light and sink when pressed; Next / Repeat / Vamp carry small icons; Vamp glows while it's looping; Click, Count-in and Pad have an indicator light; the top display has a beat light per beat (the one is orange); meters are LED segments with a peak-hold line; faders sit in a groove with dB marks (+6, 0, -6, -12, off) and a ridged cap; clips and section blocks have soft corners. Track names on the Edit page sit on their track's colour, every other four-bar phrase is shaded so phrases can be counted at a glance, and each Live mixer bus wears the colour of its first track (name cap and fader line), so the two pages match. Nothing moved.
 - **Level meters** on the Live mixer's faders (each bus shows its loudest track) and under every track on the Edit page, so you can see what's playing (or muted) at a glance.
 

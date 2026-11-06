@@ -504,3 +504,56 @@ body.live-mode .bar .lcd { display: none }
 .vstrip.master { position: sticky; right: 0; margin-left: auto; z-index: 3; flex-basis: 96px; background: var(--raised-2); border-color: var(--line-2); box-shadow: -10px 0 14px -6px var(--sh), inset 0 1px 0 var(--hi) }
 .vstrip.master .vname { background: var(--fg); color: var(--bg); letter-spacing: .06em; text-transform: uppercase; font-size: 10px }
 .vstrip.master .vcap::after { background: var(--go); box-shadow: 0 0 4px var(--go) }
+
+/* ---------- Screens: the song box, the time display and the Live clock read like hardware displays ---------- */
+:root { --scr-bg: #07080a; --scr-fg: #eef3f8; --scr-dim: #8a949f }
+:root[data-theme="midnight"] { --scr-bg: #040810; --scr-fg: #e6f0ff; --scr-dim: #7f93b0 }
+:root[data-theme="studio"] { --scr-bg: #121212; --scr-fg: #f2f2f2; --scr-dim: #959595 }
+:root[data-theme="sanctuary"] { --scr-bg: #0b0806; --scr-fg: #fbefe2; --scr-dim: #a8968a }
+:root[data-theme="daylight"] { --scr-bg: #17191c; --scr-fg: #f4f6f8; --scr-dim: #9aa2ab }
+.screen {
+  /* inside a screen the text uses the screen's own colours (a dark display even in Daylight) */
+  --fg: var(--scr-fg); --muted: var(--scr-dim); --dim: #5c646d; --led-off: #262a2f;
+  position: relative; overflow: hidden; color: var(--fg); background-color: var(--scr-bg);
+  border: 1px solid rgba(0,0,0,.85); border-radius: 8px;
+  box-shadow: inset 0 2px 10px rgba(0,0,0,.7), inset 0 0 0 1px rgba(255,255,255,.035), 0 1px 0 var(--hi), 0 0 0 3px color-mix(in srgb, var(--raised) 70%, transparent);
+}
+.screen::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  background: linear-gradient(170deg, rgba(255,255,255,.075) 0, rgba(255,255,255,.02) 38%, transparent 40%),
+              repeating-linear-gradient(to bottom, rgba(255,255,255,.028) 0 1px, transparent 1px 3px);
+}
+.screen b, .screen .bb, .screen .lcd-sec { text-shadow: 0 0 9px color-mix(in srgb, var(--scr-fg) 30%, transparent) }
+.title.screen { padding: 5px 12px 6px; min-width: 150px }
+.title.screen b { letter-spacing: .01em }
+.lcd.screen { background-image: none }
+/* ---------- Live page: compact Now / Next, a clock, the fades up in the tab bar ---------- */
+.lhead { grid-template-columns: minmax(0, 3fr) minmax(0, 1.4fr); gap: 10px }
+.lnow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; column-gap: 18px; padding: 8px 12px 8px 14px; border-radius: 10px }
+.lnmain { min-width: 0 }
+.lnow .lsec { font-size: clamp(22px, 2.3vw, 32px); margin: 1px 0 0 }
+.lnow .lrow2 { gap: 14px; flex-wrap: nowrap }
+.lnow .lbars b { font-size: clamp(20px, 2vw, 28px) }
+.lnow .lbars span { font-size: 13px }
+.lnow .lbeats { gap: 6px }
+.lnow .lbeats i { width: 12px; height: 12px }
+.lnow .lprog { grid-column: 1 / -1; height: 4px; margin-top: 7px }
+.lnow .lnote { grid-column: 1 / -1 }
+.lpos { font-size: 12px }
+.lclock { padding: 6px 12px; display: flex; flex-direction: column; align-items: flex-end; font-variant-numeric: tabular-nums; min-width: 92px }
+.lclock b { font: 600 24px/1 var(--f-mono) }
+.lclock span { font: 11px var(--f-mono); color: var(--muted); margin-top: 3px }
+.lnext { padding: 8px 14px; border-radius: 10px; gap: 2px }
+.lnext .lbl { font-size: 10px }
+.lnsec { font-size: clamp(18px, 1.9vw, 26px) }
+.lnext .lnote { font-size: 13px }
+.tabbar { flex-wrap: wrap; row-gap: 6px }
+.tabbar .fades { background: none; border: 0; border-radius: 0; padding: 0 0 0 12px; margin-left: 6px; border-left: 1px solid var(--line); flex: 1 1 auto; gap: 6px 12px; min-width: 0 }
+.tabbar .fades .seg button { padding: 5px 9px; font-size: 12px }
+.tabbar .fades .tog, .tabbar .fades .btn { padding: 5px 9px; font-size: 12px }
+.tabbar .fades .fadenow { margin-left: auto }
+.tabbar .lkey { margin-left: 8px }
+@media (max-width: 1100px) { .lnow { grid-template-columns: minmax(0, 1fr) auto } .lnow .lrow2 { display: none } }
+/* two tidy lines: tabs + key, then the ending / transition controls across the full width */
+.tabbar .lkey { margin-left: auto; order: 2 }
+.tabbar .fades { order: 3; flex: 1 1 100%; margin: 0; padding: 6px 4px 0; border-left: 0; border-top: 1px solid var(--line) }

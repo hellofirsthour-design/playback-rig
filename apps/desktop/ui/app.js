@@ -458,6 +458,11 @@
     const bpb = s ? s.beats_per_bar : 4, beats = $('#lvBeats');
     if (beats.children.length !== bpb) { beats.innerHTML = ''; for (let i = 0; i < bpb; i++) beats.append(el('i')); }
     [...beats.children].forEach((d, i) => { d.className = (p && snap && snap.beat === i + 1 ? 'on' : '') + (i === 0 ? ' one' : ''); });
+    // The Live page clock: time in the song as it plays, and the song's length.
+    const lt = $('#lvTime'), ltot = $('#lvTotal'), tEnd = L.length ? L[L.length - 1].start + L[L.length - 1].secs : 0;
+    const tNow = s ? fmt(playTime(L)) : '0:00', tTot = '/ ' + fmt(tEnd);
+    if (lt.textContent !== tNow) lt.textContent = tNow;
+    if (ltot.textContent !== tTot) ltot.textContent = tTot;
     $('#lvPos').textContent = s ? `${p && snap && !counting ? snap.bar + '.' + snap.beat + ' · ' : ''}${+felt(s, (p && snap && snap.bpm) || (s.tempo_changes && s.tempo_changes.length ? s.tempo_changes[0][1] : playBpm())).toFixed(1)} BPM${s.key ? ' · ' + keyName(s.key, s.transpose) : ''}` : '';
     const nx = $('#lvNext'); let lbl = 'Next', name = '—'; nx.className = 'lnext';
     if (s && o) {

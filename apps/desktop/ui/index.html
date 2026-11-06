@@ -9,7 +9,7 @@
   <button class="ib" id="setBtn" title="Set list">Set</button>
   <div class="songsel">
     <button class="ib arrow" id="prevSong" aria-label="Previous song" title="Previous song">‹</button>
-    <div class="title"><b id="songTitle">No song</b><span id="songMeta"></span></div>
+    <div class="title screen"><b id="songTitle">No song</b><span id="songMeta"></span></div>
     <button class="ib arrow" id="nextSong" aria-label="Next song" title="Next song">›</button>
   </div>
 
@@ -23,7 +23,7 @@
     <button class="tp" id="vampBtn" data-cmd="Vamp" title="Loop this block until pressed again (V)"><svg class="ti" viewBox="0 0 16 16"><path d="M4.5 4.5C2.6 4.5 1 6.1 1 8s1.6 3.5 3.5 3.5c1.6 0 2.6-1.2 3.5-2.4.9 1.2 1.9 2.4 3.5 2.4C13.4 11.5 15 9.9 15 8s-1.6-3.5-3.5-3.5c-1.6 0-2.6 1.2-3.5 2.4-.9-1.2-1.9-2.4-3.5-2.4zm0 1.7c.9 0 1.6.8 2.4 1.8-.8 1-1.5 1.8-2.4 1.8a1.8 1.8 0 0 1 0-3.6zm7 0a1.8 1.8 0 0 1 0 3.6c-.9 0-1.6-.8-2.4-1.8.8-1 1.5-1.8 2.4-1.8z"/></svg>Vamp</button>
   </div>
 
-  <div class="lcd" aria-live="polite">
+  <div class="lcd screen" aria-live="polite">
     <div class="lcd-sec" id="lcdSec">—</div>
     <div class="lcd-row"><span class="beats" id="lcdBeats" aria-hidden="true"></span><span class="bb" id="lcdBB">–</span><span id="lcdTime">0:00</span><span id="lcdLeft"></span></div>
     <div class="lcd-call" id="lcdCall"></div>
@@ -65,24 +65,27 @@
   <div class="lmain">
     <div class="lhead">
       <div class="lnow">
-        <div class="lnrow"><span class="lbl">Now</span><span class="lpos" id="lvPos"></span></div>
-        <div class="lsec" id="lvSec">—</div>
-        <div class="lnote" id="lvNote" hidden></div>
+        <div class="lnmain">
+          <div class="lnrow"><span class="lbl">Now</span><span class="lpos" id="lvPos"></span></div>
+          <div class="lsec" id="lvSec">—</div>
+          <div class="lnote" id="lvNote" hidden></div>
+        </div>
         <div class="lrow2">
           <div class="lbars"><b id="lvBars">–</b><span id="lvBarsLbl">bars left</span></div>
           <div class="lbeats" id="lvBeats"></div>
         </div>
+        <div class="screen lclock" aria-label="Time in the song"><b id="lvTime">0:00</b><span id="lvTotal">/ 0:00</span></div>
         <div class="lprog"><i id="lvProg"></i></div>
       </div>
       <div class="lnext" id="lvNext"><div class="lbl" id="lvNextLbl">Next</div><div class="lnsec" id="lvNextSec">—</div><div class="lnote" id="lvNextNote" hidden></div></div>
     </div>
     <div class="lstrip">
       <div class="lblocks" id="lvBlocks" aria-label="Arrangement: tap a section to go there"></div>
-      <div class="fades" id="lvFades" aria-label="Fades and transition"></div>
     </div>
     <div class="ltabs">
       <div class="tabbar" role="tablist" aria-label="Live controls">
         <button role="tab" data-tab="mix">Mixer</button><button role="tab" data-tab="pads">Pads</button><button role="tab" data-tab="click">Click</button>
+        <div class="fades" id="lvFades" aria-label="Fades and transition"></div>
         <span class="lkey"><span class="lbl">Key</span><button class="ib" id="lvKeyDown" aria-label="Key down a semitone">−</button><b id="lvKey">—</b><button class="ib" id="lvKeyUp" aria-label="Key up a semitone">+</button></span>
       </div>
       <div class="tabbody" id="lvTab"></div>
