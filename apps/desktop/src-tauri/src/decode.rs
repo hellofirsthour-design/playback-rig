@@ -23,6 +23,24 @@ pub fn is_audio(path: &Path) -> bool {
 }
 
 pub fn decode(path: &Path, target_sr: u32) -> Result<StemAudio, String> {
+    decode_native(path, target_sr).map(|(a, _)| a)
+}
+
+/// A file's own sample rate, from its header only.
+pub fn native_rate(path: &Path) -> Option<u32> {
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe().format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default()).ok()?;
+    let sr = probed.format.default_track()?.codec_params.sample_rate;
+    sr
+}
+
+/// Like `decode`, also giving the file's own sample rate.
+pub fn decode_native(path: &Path, target_sr: u32) -> Result<(StemAudio, u32), String> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
     let file = File::open(path).map_err(|e| format!("{name}: can't open ({e})"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -92,14 +110,14 @@ pub fn decode(path: &Path, target_sr: u32) -> Result<StemAudio, String> {
     }
     let n = planar[0].len();
     if out_ch == 1 {
-        Ok(StemAudio::mono(planar.pop().unwrap()))
+        Ok((StemAudio::mono(planar.pop().unwrap()), sr))
     } else {
         let mut inter = Vec::with_capacity(n * 2);
         for i in 0..n {
             inter.push(planar[0][i]);
             inter.push(planar[1][i]);
         }
-        Ok(StemAudio::stereo_interleaved(inter))
+        Ok((StemAudio::stereo_interleaved(inter), sr))
     }
 }
 

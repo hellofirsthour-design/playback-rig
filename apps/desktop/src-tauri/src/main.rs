@@ -10,6 +10,7 @@ mod guide;
 mod metronome;
 mod midi_io;
 mod recover;
+mod render_cache;
 mod model;
 mod pads;
 mod preflight;
@@ -377,17 +378,10 @@ const PEAKS_PER_SEC: u32 = 100;
 
 fn peaks(a: &StemAudio, sr: u32) -> String {
     use base64::Engine as _;
-    let hop = (sr / PEAKS_PER_SEC).max(1) as u64;
-    let n = a.frames().div_ceil(hop);
-    let mut out = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let mut m = 0.0f32;
-        for f in i * hop..((i + 1) * hop).min(a.frames()) {
-            let (l, r) = a.frame(f);
-            m = m.max(l.abs()).max(r.abs());
-        }
-        out.push((m.min(1.0) * 255.0).round() as u8);
-    }
+    let hop = (sr / PEAKS_PER_SEC).max(1) as usize;
+    let ch = a.channels.max(1);
+    let n = (a.frames() as usize) * ch;
+    let out: Vec<u8> = a.data[..n].chunks(hop * ch).map(|c| (c.iter().fold(0f32, |m, x| m.max(x.abs())).min(1.0) * 255.0).round() as u8).collect();
     base64::engine::general_purpose::STANDARD.encode(out)
 }
 
@@ -987,6 +981,64 @@ fn even_peak(a: &StemAudio, peak: f32) -> StemAudio {
     StemAudio { channels: a.channels, data: a.data.iter().map(|v| v * k).collect::<Vec<_>>().into() }
 }
 
+/// Where rendered stems are kept (see render_cache); set when the app starts.
+static RENDERS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// One stem at the interface's rate with the song's key and tempo change: read back from
+/// the render cache if it was rendered before, else decoded and rendered (and saved when
+/// that took real work: resampling, a key or tempo change).
+fn render_stem(path: &Path, sample_rate: u32, length: f64, semitones: f32) -> Result<StemAudio, String> {
+    let cached = RENDERS.get().and_then(|d| render_cache::key(path, sample_rate, length, semitones).map(|k| (d, k)));
+    if let Some((d, k)) = &cached {
+        if let Some(a) = render_cache::get(d, k) {
+            return Ok(a);
+        }
+    }
+    let (a, native) = decode::decode_native(path, sample_rate)?;
+    let a = stretch::apply(&a, sample_rate, length, semitones);
+    let worked = native != sample_rate || (length - 1.0).abs() > 1e-6 || semitones != 0.0;
+    if let (Some((d, k)), true) = (&cached, worked) {
+        render_cache::put(d, k, &a);
+    }
+    Ok(a)
+}
+
+/// Renders every song in the set ahead of time (resampling, key and tempo changes), one
+/// stem at a time on one thread and only while nothing plays, so the first time a song
+/// is picked it loads as fast as one played before.
+fn warm_renders(app: AppHandle) {
+    let mut done: std::collections::HashSet<String> = Default::default();
+    loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let Some(st) = app.try_state::<AppState>() else { continue };
+        let Some(dir) = RENDERS.get() else { return };
+        let sr = match st.core.output.lock().unwrap().as_ref() {
+            Some(o) => o.info.sample_rate,
+            None => continue,
+        };
+        let setlist = st.settings.lock().unwrap().setlist.clone();
+        'songs: for folder in setlist {
+            let Ok(file) = SongFile::scan(&folder, 2) else { continue };
+            for s in &file.stems {
+                let p = folder.join(&s.file);
+                let semis = if file.keeps_pitch(&s.name) { 0.0 } else { file.transpose as f32 };
+                let Some(k) = render_cache::key(&p, sr, file.stretch(), semis) else { continue };
+                if done.contains(&k) {
+                    continue;
+                }
+                let needed = (file.stretch() - 1.0).abs() > 1e-6 || semis != 0.0 || decode::native_rate(&p).is_some_and(|r| r != sr);
+                if needed && !dir.join(&k).exists() {
+                    if st.core.playing() {
+                        break 'songs; // never while a song plays; next pass
+                    }
+                    let _ = render_stem(&p, sr, file.stretch(), semis);
+                }
+                done.insert(k);
+            }
+        }
+    }
+}
+
 fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, String> {
     let file = SongFile::scan(folder, channels)?;
     // Key and tempo changes are rendered here, one thread per stem. Click and guide
@@ -999,7 +1051,7 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
             .map(|st| {
                 let p = folder.join(&st.file);
                 let semis = if file.keeps_pitch(&st.name) { 0.0 } else { file.transpose as f32 };
-                s.spawn(move || decode::decode(&p, sample_rate).map(|a| stretch::apply(&a, sample_rate, length_factor, semis)))
+                s.spawn(move || render_stem(&p, sample_rate, length_factor, semis))
             })
             .collect();
         hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("A stem failed to load.".into()))).collect()
@@ -1077,7 +1129,14 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
     }
     let (mut song, arr) = file.build(sample_rate, length)?;
     cut_guide(&mut song, &file, &stems, sample_rate);
-    let peaks = stems.iter().map(|s| peaks(s, sample_rate)).collect();
+    let peaks = std::thread::scope(|s| {
+        let hs: Vec<_> = stems.iter().map(|a| s.spawn(move || peaks(a, sample_rate))).collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+    });
+    if let Some(dir) = RENDERS.get() {
+        let keep: Vec<String> = file.stems.iter().filter_map(|st| render_cache::key(&folder.join(&st.file), sample_rate, file.stretch(), if file.keeps_pitch(&st.name) { 0.0 } else { file.transpose as f32 })).collect();
+        render_cache::trim(dir, render_cache::CAP, &keep);
+    }
     Ok(Loaded { folder: folder.to_path_buf(), file, song, arr, stems, sample_rate, length, peaks })
 }
 
@@ -2022,6 +2081,12 @@ async fn select_song(state: State<'_, AppState>, index: usize) -> Result<AppView
         return Err("Stop playback to change songs.".into());
     }
     let folder = state.settings.lock().unwrap().setlist.get(index).cloned().ok_or("That song isn't in the set.")?;
+    // The song that's loaded: back to its top, nothing to load.
+    let here = state.song.lock().unwrap().as_ref().is_some_and(|l| l.folder == folder) && state.settings.lock().unwrap().current == Some(index);
+    if here {
+        state.core.send(Command::Locate(0));
+        return Ok(view(&state));
+    }
     let (sr, ch) = {
         let out = state.core.output.lock().unwrap();
         let o = out.as_ref().ok_or("No audio output is open. Pick one at the top of the window.")?;
@@ -3176,6 +3241,7 @@ fn main() {
                 settings.version = 1;
                 write_json(&dir.join("settings.json"), &settings);
             }
+            let _ = RENDERS.set(data_dir.join("renders"));
             let map: MidiMap = read_json(&dir.join("midi.json"));
             let recovered = read_json::<Session>(&dir.join("session.json")).recovered();
             let core = Arc::new(Core {
@@ -3241,6 +3307,8 @@ fn main() {
             {
                 let h = app.handle().clone();
                 std::thread::Builder::new().name("reconnect".into()).spawn(move || watch(h))?;
+                let h = app.handle().clone();
+                std::thread::Builder::new().name("renders".into()).spawn(move || warm_renders(h))?;
             }
             Ok(())
         })
@@ -3305,6 +3373,18 @@ fn mark_clean(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn time_load() {
+        let f = std::env::var("RIG_SONG").unwrap();
+        let _ = RENDERS.set(std::env::temp_dir().join("rig-renders-timing"));
+        for sr in [48000, 48000] {
+            let t = std::time::Instant::now();
+            let l = load(std::path::Path::new(&f), sr, 10).unwrap();
+            eprintln!("TOTAL sr {sr}: {:?} ({} stems)", t.elapsed(), l.stems.len());
+        }
+    }
 
     #[test]
     fn a_crash_mid_song_comes_back_but_a_normal_quit_does_not() {
