@@ -67,6 +67,10 @@ pub enum TransitionMode {
     Segue,
     /// The next song starts `bars` before the end while this one fades out.
     Crossfade,
+    /// The next song lands on the downbeat as this one ends: it holds this song's tempo
+    /// for two bars and eases into its own, vocals and rhythm switch cleanly, sustained
+    /// parts ring on into a reverb wash, and this song settles in level first.
+    Smooth,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]

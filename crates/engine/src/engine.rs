@@ -62,6 +62,27 @@ pub enum Command {
     /// Like FadeOut, but the fade starts this many frames from now (a cut to another
     /// song lands on a bar line partway through an audio buffer).
     FadeOutAt(u64, u64),
+    /// When the song ends (its end or a medley's exit), its sustained parts (keys, pads,
+    /// guitars, strings) ring on for this many frames, fading, while the next song starts;
+    /// vocals, rhythm, click and guide stop cleanly on the beat. 0 = everything stops.
+    SetExitRing(u64),
+    /// Over the last this-many frames before the song ends, the music (not click or guide)
+    /// eases down to this gain, like the band bringing it down before a transition.
+    /// (0, _) = off.
+    SetSettle(u64, f32),
+    /// A cut to another song: this many frames from now the song stops on the line, its
+    /// sustained parts ringing on for the second number of frames (like a song's end with
+    /// SetExitRing).
+    RingOutAt(u64, u64),
+}
+
+/// Second-order high-pass (RBJ, Q 0.707): [b0, b1, b2, a1, a2], normalized.
+fn highpass(hz: f32, sr: f32) -> [f32; 5] {
+    let w = std::f32::consts::TAU * hz / sr;
+    let (sn, cs) = w.sin_cos();
+    let a = sn / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+    let a0 = 1.0 + a;
+    [(1.0 + cs) / 2.0 / a0, -(1.0 + cs) / a0, (1.0 + cs) / 2.0 / a0, -2.0 * cs / a0, (1.0 - a) / a0]
 }
 
 /// What the screen needs to draw, read after each `process` call.
@@ -153,6 +174,23 @@ pub struct Engine {
     end_after: Option<usize>,
     /// Frames before a scheduled stop fade begins (FadeOutAt).
     stop_delay: u64,
+    /// Stems that ring on at a jump or exit (sustained parts; see `Role`).
+    ring_ok: Vec<bool>,
+    /// High-pass (about 180 Hz) for the ring-out, so it never muddies the low end:
+    /// biquad coefficients and each stem's filter state (x1 x2 y1 y2, left and right).
+    hp_k: [f32; 5],
+    hp: Vec<[f32; 8]>,
+    exit_ring: u64,
+    /// Finished, but the exit ring is still sounding.
+    draining: bool,
+    /// The tempo-glide entry (see `Prelude`), whether it's playing, and where.
+    prelude: Option<Box<crate::model::Prelude>>,
+    pre_on: bool,
+    pre_pos: u64,
+    pre_seg: usize,
+    settle_len: u64,
+    settle_gain: f32,
+    ring_at: Option<(u64, u64)>,
 }
 
 impl Engine {
@@ -185,6 +223,18 @@ impl Engine {
             tail_gains: vec![0.0; mix.len()],
             end_after: None,
             stop_delay: 0,
+            ring_ok: mix.iter().map(|m| crate::model::stem_role(&m.name) == crate::model::Role::Sustain).collect(),
+            hp_k: highpass(180.0, sr),
+            hp: vec![[0.0; 8]; mix.len()],
+            exit_ring: 0,
+            draining: false,
+            prelude: None,
+            pre_on: false,
+            pre_pos: 0,
+            pre_seg: 0,
+            settle_len: 0,
+            settle_gain: 1.0,
+            ring_at: None,
             song,
             arr,
             stems,
@@ -338,6 +388,17 @@ impl Engine {
                 }
             }
             Command::SetJoinTail(n) => self.tail_frames = n,
+            Command::SetExitRing(n) => self.exit_ring = n,
+            Command::SetSettle(n, g) => {
+                self.settle_len = n;
+                self.settle_gain = if g.is_finite() { g.clamp(0.0, 1.0) } else { 1.0 };
+            }
+            Command::RingOutAt(delay, len) => {
+                if self.playing && self.count_left == 0 {
+                    self.pending = None;
+                    self.ring_at = Some((delay, len.max(1)));
+                }
+            }
             Command::FadeOutAt(delay, n) => {
                 if self.playing && self.count_left == 0 {
                     self.pending = None;
@@ -378,6 +439,11 @@ impl Engine {
         self.pending = None;
         self.track_fade = None;
         self.tail_left = 0;
+        self.draining = false;
+        self.ring_at = None;
+        self.pre_on = self.prelude.as_ref().is_some_and(|p| p.item == self.item && self.fpos == 0 && p.map.len() > 1);
+        self.pre_pos = 0;
+        self.pre_seg = 0;
         self.last_beat = None;
         self.snap_gains();
         if self.count_in {
@@ -506,8 +572,67 @@ impl Engine {
         self.block_len(a) == self.section(a).len() && self.section(a).end == self.section(b).start
     }
 
+    fn start_tail(&mut self, len: u64) {
+        self.tail_src = self.section(self.item).start + self.fpos;
+        self.tail_len = len;
+        self.tail_left = len;
+        self.tail_gains.copy_from_slice(&self.gains);
+        self.hp.iter_mut().for_each(|s| *s = [0.0; 8]);
+    }
+
+    /// One frame of ring-out: the sustained parts carry on from where the music left,
+    /// high-passed, fading away along a smoothstep.
+    fn tail_frame(&mut self, out: &mut [f32], base: usize, gain: f32) {
+        if self.tail_left == 0 {
+            return;
+        }
+        let k = self.tail_left as f32 / self.tail_len.max(1) as f32;
+        let w = k * k * (3.0 - 2.0 * k) * gain;
+        let [b0, b1, b2, a1, a2] = self.hp_k;
+        for i in 0..self.stems.len() {
+            if !self.ring_ok[i] {
+                continue;
+            }
+            let g = self.tail_gains[i] * w;
+            if g == 0.0 {
+                continue;
+            }
+            let (l, r) = self.stems[i].frame(self.tail_src);
+            let s = &mut self.hp[i];
+            let yl = b0 * l + b1 * s[0] + b2 * s[1] - a1 * s[2] - a2 * s[3];
+            let yr = b0 * r + b1 * s[4] + b2 * s[5] - a1 * s[6] - a2 * s[7];
+            *s = [l, s[0], yl, s[2], r, s[4], yr, s[6]];
+            Self::write(out, base, self.channels, self.mix[i].route, yl * g, yr * g);
+        }
+        self.tail_src += 1;
+        self.tail_left -= 1;
+        if self.tail_left == 0 {
+            self.draining = false;
+        }
+    }
+
+    /// Still making sound: playing, or a song that ended with its parts ringing on.
+    pub fn is_sounding(&self) -> bool {
+        self.playing || (self.draining && self.tail_left > 0)
+    }
+
+    /// The tempo-glide entry for when this song starts (set before it's handed to the
+    /// audio thread). Ignored unless it has a stem for every stem and stays in its block.
+    pub fn set_prelude(&mut self, p: crate::model::Prelude) {
+        let ok = p.stems.len() == self.stems.len()
+            && p.item < self.arr.items.len()
+            && p.map.len() > 1
+            && p.map.windows(2).all(|w| w[1].0 > w[0].0 && w[1].1 >= w[0].1)
+            && p.map.last().is_some_and(|l| l.1 < self.block_len(p.item))
+            && p.stems.iter().all(|s| s.frames() >= p.map.last().unwrap().0);
+        self.prelude = ok.then(|| Box::new(p));
+    }
+
     /// Frames until the next point where the audio cuts to somewhere else.
     fn frames_to_cut(&self) -> Option<u64> {
+        if let Some((d, _)) = self.ring_at {
+            return Some(d);
+        }
         let rem = self.block_len(self.item).saturating_sub(self.fpos);
         if let Some(p) = &self.pending {
             let d = p.at.saturating_sub(self.abs);
@@ -518,6 +643,7 @@ impl Engine {
         }
         match self.natural_next() {
             Some(n) if !self.contiguous(self.item, n) => Some(rem),
+            None if self.exit_ring > 0 => Some(rem), // the song stops mid-music (a medley's exit)
             _ => None,
         }
     }
@@ -525,11 +651,9 @@ impl Engine {
     fn enter(&mut self, item: usize, cut: bool) {
         if cut && self.tail_frames > 0 && self.count_left == 0 {
             // Ring-out: carry on from where the old block left, fading, under the new one.
-            self.tail_src = self.section(self.item).start + self.fpos;
-            self.tail_len = self.tail_frames;
-            self.tail_left = self.tail_frames;
-            self.tail_gains.copy_from_slice(&self.gains);
+            self.start_tail(self.tail_frames);
         }
+        self.pre_on = false;
         self.item = item;
         self.fpos = 0;
         if cut {
@@ -620,7 +744,13 @@ impl Engine {
     }
 
     #[inline]
-    fn write(out: &mut [f32], base: usize, ch: usize, route: Route, l: f32, r: f32) {
+    /// Output channels this engine renders.
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Adds a stereo frame to the outputs a route names (shared with the audio thread's extras).
+    pub fn write(out: &mut [f32], base: usize, ch: usize, route: Route, l: f32, r: f32) {
         match route {
             Route::Pair(c) => {
                 let c = c as usize;
@@ -648,8 +778,12 @@ impl Engine {
         let frames = out.len() / ch;
         let fade = self.fade as f32;
         let bpb = self.song.beats_per_bar as i64;
+        // Where a finished song's ring-out takes over in this buffer (see `draining`).
+        let mut drained_from = frames;
+        let mut settle_rem = if self.settle_len > 0 && self.playing && self.count_left == 0 { self.frames_left().unwrap_or(u64::MAX) } else { u64::MAX };
         for f in 0..frames {
             if !self.playing {
+                drained_from = f;
                 break;
             }
             let base = f * ch;
@@ -681,6 +815,29 @@ impl Engine {
                 continue;
             }
 
+            // A cut to another song, on its frame: stop here, sustained parts ringing on.
+            if let Some((d, len)) = self.ring_at {
+                if d == 0 {
+                    self.ring_at = None;
+                    self.start_tail(len);
+                    self.draining = true;
+                    self.playing = false;
+                    self.finished = true;
+                    self.pre_on = false;
+                    drained_from = f;
+                    break;
+                }
+                self.ring_at = Some((d - 1, len));
+            }
+            // Settle: the music eases down over the song's last stretch (see SetSettle).
+            let settle = if settle_rem <= self.settle_len {
+                let k = 1.0 - settle_rem as f32 / self.settle_len.max(1) as f32;
+                1.0 + (self.settle_gain - 1.0) * k * k * (3.0 - 2.0 * k)
+            } else {
+                1.0
+            };
+            settle_rem = settle_rem.saturating_sub(1);
+
             // Jumps and block changes.
             let due = self.pending.as_ref().filter(|p| self.abs >= p.at).map(|p| (p.target, p.from));
             if let Some((t, from)) = due {
@@ -696,8 +853,14 @@ impl Engine {
                         self.enter(n, cut);
                     }
                     None => {
+                        if self.exit_ring > 0 {
+                            self.start_tail(self.exit_ring);
+                            self.draining = true;
+                        }
                         self.playing = false;
                         self.finished = true;
+                        self.pre_on = false;
+                        drained_from = f;
                         break;
                     }
                 }
@@ -724,12 +887,15 @@ impl Engine {
                 }
             }
             let mut env = master;
-            // (With a ring-out the old audio carries on through the cut, so no fade before it.)
-            if let Some(d) = self.frames_to_cut().filter(|_| self.tail_frames == 0) {
+            // Fade before a cut. Parts that ring on through it (a ring-out) carry straight
+            // on instead, so they skip this fade.
+            let mut cut_env = 1.0f32;
+            if let Some(d) = self.frames_to_cut() {
                 if (d as f32) < fade {
-                    env *= d as f32 / fade;
+                    cut_env = d as f32 / fade;
                 }
             }
+            let rings = self.tail_frames > 0 || self.ring_at.is_some() || (self.exit_ring > 0 && self.natural_next().is_none());
             if let Some(lj) = self.last_jump {
                 let since = (self.abs - lj) as f32;
                 if since < fade {
@@ -746,6 +912,22 @@ impl Engine {
                 }
             }
 
+            // The tempo-glide entry: the block position follows its key frames.
+            if self.pre_on {
+                if let Some(p) = self.prelude.as_ref() {
+                    while self.pre_seg + 2 < p.map.len() && p.map[self.pre_seg + 1].0 <= self.pre_pos {
+                        self.pre_seg += 1;
+                    }
+                    let (o0, s0) = p.map[self.pre_seg];
+                    let (o1, s1) = p.map[self.pre_seg + 1];
+                    let t = (self.pre_pos.saturating_sub(o0)) as f64 / (o1 - o0).max(1) as f64;
+                    self.fpos = s0 + ((s1 - s0) as f64 * t.min(1.0)).round() as u64;
+                }
+            }
+            let pre_len = self.prelude.as_ref().map_or(0, |p| p.map.last().unwrap().0);
+            // Last 1024 frames of the entry: crossfade into the song's own audio.
+            let pre_x = if self.pre_on { ((self.pre_pos + 1024).saturating_sub(pre_len)) as f32 / 1024.0 } else { 1.0 };
+
             // Stems.
             let src = self.section(self.item).start + self.fpos;
             for i in 0..self.stems.len() {
@@ -756,11 +938,13 @@ impl Engine {
                     *g = 0.0;
                     continue;
                 }
-                let gg = *g * env * if self.is_click[i] { 1.0 } else { tracks };
+                let ce = if self.ring_ok[i] && rings { 1.0 } else { cut_env };
+                let cue = self.is_click[i] || Some(i) == self.song.guide_stem;
+                let gg = *g * env * ce * if self.is_click[i] { 1.0 } else { tracks } * if cue { 1.0 } else { settle };
                 if gg == 0.0 {
                     continue;
                 }
-                let (l, r) = if Some(i) == self.song.guide_stem && !self.song.calls.is_empty() {
+                let (mut l, mut r) = if Some(i) == self.song.guide_stem && !self.song.calls.is_empty() && !self.pre_on {
                     match self.guide_src(src) {
                         Some(gs) => self.stems[i].frame(gs),
                         None => (0.0, 0.0),
@@ -768,6 +952,13 @@ impl Engine {
                 } else {
                     self.stems[i].frame(src)
                 };
+                if self.pre_on {
+                    if let Some(p) = self.prelude.as_ref() {
+                        let (pl, pr) = p.stems[i].frame(self.pre_pos);
+                        l = pl * (1.0 - pre_x) + l * pre_x;
+                        r = pr * (1.0 - pre_x) + r * pre_x;
+                    }
+                }
                 let (ol, or) = (l * gg, r * gg);
                 let pk = ol.abs().max(or.abs());
                 if pk > self.peaks[i] {
@@ -776,25 +967,8 @@ impl Engine {
                 Self::write(out, base, ch, self.mix[i].route, ol, or);
             }
 
-            // Ring-out from a jump: the music (not the click or guide) carries on from where
-            // it left, fading away under the new block.
-            if self.tail_left > 0 {
-                let k = self.tail_left as f32 / self.tail_len.max(1) as f32;
-                let w = k * k * (3.0 - 2.0 * k) * master * tracks;
-                for i in 0..self.stems.len() {
-                    if self.is_click[i] || Some(i) == self.song.guide_stem {
-                        continue;
-                    }
-                    let g = self.tail_gains[i] * w;
-                    if g == 0.0 {
-                        continue;
-                    }
-                    let (l, r) = self.stems[i].frame(self.tail_src);
-                    Self::write(out, base, ch, self.mix[i].route, l * g, r * g);
-                }
-                self.tail_src += 1;
-                self.tail_left -= 1;
-            }
+            // Ring-out from a jump: the sustained parts carry on from where they left.
+            self.tail_frame(out, base, master * tracks * settle);
 
             // Click, locked to the song's own bar grid.
             let pos = self.song.beat_pos(src as f64);
@@ -810,6 +984,23 @@ impl Engine {
 
             self.fpos += 1;
             self.abs += 1;
+            if self.pre_on {
+                self.pre_pos += 1;
+                if self.pre_pos >= pre_len {
+                    // The entry hands back: the song carries on from exactly where it got to.
+                    self.pre_on = false;
+                    self.fpos = self.prelude.as_ref().map_or(self.fpos, |p| p.map.last().unwrap().1);
+                }
+            }
+        }
+        if self.draining {
+            let g = if self.settle_len > 0 { self.settle_gain } else { 1.0 };
+            for f in drained_from..frames {
+                self.tail_frame(out, f * ch, g);
+                if !self.draining {
+                    break;
+                }
+            }
         }
     }
 
@@ -1347,38 +1538,130 @@ mod tests {
         assert!(buf[400 * CH] > 0.0, "tracks back after play");
     }
 
+    /// Two stems: "Keys" (a 250 Hz tone at SR 1000, period 4 frames: 0, 1, 0, -1) on
+    /// output 0, and "Drums" (value = frame index) on output 1. Sections A, B, C of 8000.
+    fn rig_roles(arr: &[&str]) -> Engine {
+        let song = Song {
+            name: "Roles".into(),
+            sample_rate: SR,
+            bpm: 60.0,
+            beats_per_bar: 4,
+            offset: 0,
+            length: 24000,
+            sections: vec![
+                Section { name: "A".into(), start: 0, end: 8000 },
+                Section { name: "B".into(), start: 8000, end: 16000 },
+                Section { name: "C".into(), start: 16000, end: 24000 },
+            ],
+            stems: vec![
+                StemInfo { name: "Keys".into(), route: Route::Mono(0), gain: 1.0, muted: false },
+                StemInfo { name: "Drums".into(), route: Route::Mono(1), gain: 1.0, muted: false },
+            ],
+            guide_stem: None,
+            calls: vec![],
+            beat_frames: vec![],
+        };
+        let a = Arrangement::from_names(&song, arr).unwrap();
+        let tone = StemAudio::mono((0..24000).map(|i| [0.0, 1.0, 0.0, -1.0][i % 4]).collect());
+        let ramp = StemAudio::mono((0..24000).map(|i| i as f32).collect());
+        let mut e = Engine::new(song, a, vec![tone, ramp], CH).unwrap();
+        e.handle(Command::SetCountIn(false));
+        e.handle(Command::SetClick(false));
+        e
+    }
+
+    fn tone(i: u64) -> f32 {
+        [0.0, 1.0, 0.0, -1.0][(i % 4) as usize]
+    }
+
     #[test]
-    fn a_jump_rings_out_instead_of_chopping() {
-        // A then C: B is skipped, so A's end jumps to C's start.
+    fn at_a_jump_sustained_parts_ring_out_and_rhythm_cuts_clean() {
+        // A then C: B is skipped.
         let tail = 300u64;
-        let mut e = rig(Some(&["A", "C"]));
+        let mut e = rig_roles(&["A", "C"]);
         e.handle(Command::SetJoinTail(tail));
         e.handle(Command::Play);
         let mut buf = vec![0.0f32; 8000 * CH];
-        e.process(&mut buf); // all of A
-        // A plays to its very last frame at full level (no fade before the jump).
-        assert_eq!(buf[7999 * CH], 7999.0);
+        e.process(&mut buf);
+        // Before the jump: the keys play on at full level (they ring through it), the drums
+        // fade over the last 5 frames so the cut doesn't click.
+        assert_eq!(buf[7997 * CH], tone(7997));
+        assert!((buf[7999 * CH + 1] - 7999.0 / 5.0).abs() < 1.0, "drums fading: {}", buf[7999 * CH + 1]);
         let mut buf = vec![0.0f32; 1000 * CH];
         e.process(&mut buf);
-        // After the 5-frame fade-in, the output is C's audio plus B's opening (where A
-        // would have gone on to) fading away along a smoothstep.
-        for k in [10u64, 100, 150, 250] {
-            let kk = (tail - k) as f32 / tail as f32;
-            let w = kk * kk * (3.0 - 2.0 * kk);
-            let want = (16000 + k) as f32 + (8000 + k) as f32 * w;
-            let got = buf[k as usize * CH];
-            assert!((got - want).abs() < 1.0, "frame {k}: want {want}, got {got}");
+        // After the jump (past the 5-frame fade-in): drums are exactly C, no ring-out.
+        for k in [10u64, 100, 250, 600] {
+            assert_eq!(buf[k as usize * CH + 1], (16000 + k) as f32, "drums at {k}");
         }
-        // Once the ring-out is over, only C.
-        for k in [tail, tail + 1, 900] {
-            assert_eq!(buf[k as usize * CH], (16000 + k) as f32);
+        // Keys are C's tone plus B's opening ringing on (high-passed), then just C.
+        let extra: f32 = (10..250).map(|k| (buf[k * CH] - tone(16000 + k as u64)).abs()).sum();
+        assert!(extra > 20.0, "the keys ring on: {extra}");
+        for k in [tail + 1, 600] {
+            assert!((buf[k as usize * CH] - tone(16000 + k)).abs() < 1e-6, "only C after the ring-out ({k})");
         }
-        // With no ring-out it's the old straight cut.
-        let mut e = rig(Some(&["A", "C"]));
+        // No ring-out set: the old straight cut for everything.
+        let mut e = rig_roles(&["A", "C"]);
         e.handle(Command::Play);
         let mut buf = vec![0.0f32; 8100 * CH];
         e.process(&mut buf);
-        assert_eq!(buf[8050 * CH], 16050.0);
+        assert_eq!(buf[8050 * CH + 1], 16050.0);
+        assert_eq!(buf[8050 * CH], tone(16050));
+    }
+
+    #[test]
+    fn a_medley_exit_rings_the_sustained_parts_after_the_song_ends() {
+        let mut e = rig_roles(&["A", "B", "C"]);
+        e.handle(Command::SetEndAfter(Some(0)));
+        e.handle(Command::SetExitRing(400));
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 8200 * CH];
+        e.process(&mut buf);
+        assert!(!e.snapshot().playing, "the song itself has ended");
+        // The drums stop on the line (5-frame fade before it), nothing after.
+        assert!((buf[7999 * CH + 1] - 7999.0 / 5.0).abs() < 1.0);
+        assert!(buf[8000 * CH + 1..].iter().step_by(CH).all(|v| *v == 0.0), "drums silent after the end");
+        // The keys carry on into what came next (B's tone), fading.
+        let ring: f32 = (8010..8200).map(|k| buf[k * CH].abs()).sum();
+        assert!(ring > 20.0, "keys ring on: {ring}");
+        assert!(e.is_sounding());
+        let mut buf = vec![0.0f32; 400 * CH];
+        e.process(&mut buf);
+        assert!(!e.is_sounding(), "quiet once the ring-out is done");
+        assert!(buf[300 * CH..].iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn a_tempo_glide_entry_plays_then_hands_back_on_the_exact_frame() {
+        // Entry for block 1 (B): 2000 output frames covering 1500 frames of B (faster at
+        // first), as pre-rendered audio of value -5; then B carries on from frame 1500.
+        let mut e = rig(None);
+        e.set_prelude(crate::model::Prelude {
+            item: 1,
+            stems: vec![StemAudio::mono(vec![-5.0; 3000])],
+            map: vec![(0, 0), (1000, 900), (2000, 1500)],
+        });
+        e.handle(Command::Locate(1));
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 500 * CH];
+        e.process(&mut buf);
+        assert_eq!(buf[100 * CH], -5.0, "the entry's own audio");
+        // Halfway through the first key frame span: 0.9 source frames per output frame.
+        assert_eq!(e.snapshot().frame_in_section, 450);
+        let mut buf = vec![0.0f32; 1500 * CH];
+        e.process(&mut buf); // output frames 500..1999: ends with a 1024-frame crossfade
+        assert!(buf[1499 * CH] > 8000.0 + 1400.0 && buf[1499 * CH] < 8000.0 + 1500.0, "nearly all B by the end: {}", buf[1499 * CH]);
+        assert_eq!(e.snapshot().frame_in_section, 1500, "hands back on the exact frame");
+        let mut buf = vec![0.0f32; 100 * CH];
+        e.process(&mut buf);
+        assert_eq!(buf[10 * CH], 8000.0 + 1510.0, "then B itself");
+        // An entry that doesn't fit the song is ignored.
+        let mut e = rig(None);
+        e.set_prelude(crate::model::Prelude { item: 1, stems: vec![], map: vec![(0, 0), (10, 10)] });
+        e.handle(Command::Locate(1));
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 100 * CH];
+        e.process(&mut buf);
+        assert_eq!(buf[50 * CH], 8050.0);
     }
 
     #[test]
@@ -1424,5 +1707,46 @@ mod tests {
         assert_eq!(buf[299 * CH], 1299.0, "full level up to the start");
         assert!((buf[500 * CH] - 1500.0 * 0.5).abs() < 3.0, "halfway down: {}", buf[500 * CH]);
         assert!(!e.snapshot().playing, "stopped once faded");
+    }
+
+    #[test]
+    fn settle_eases_the_music_down_but_never_the_click() {
+        let mut e = rig_with_click(); // A B C, 24000 frames; ramp on 0, click stem (1.0) on 1
+        e.handle(Command::SetSettle(4000, 0.25));
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 24000 * CH];
+        e.process(&mut buf);
+        assert_eq!(buf[19000 * CH], 19000.0, "full level before the last 4000 frames");
+        let mid = buf[22000 * CH] / 22000.0;
+        assert!((mid - 0.625).abs() < 0.01, "halfway down the smoothstep: {mid}");
+        assert!((buf[23990 * CH] / 23990.0 - 0.25).abs() < 0.01, "down to the settle level at the end");
+        assert!(buf.iter().skip(1).step_by(CH).take(24000).skip(10).all(|v| *v == 1.0), "the click never moves (after the 5-frame start)");
+    }
+
+    #[test]
+    fn a_ring_out_cut_stops_rhythm_on_the_frame_and_rings_the_keys() {
+        let mut e = rig_roles(&["A", "B", "C"]);
+        e.handle(Command::Play);
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf);
+        e.handle(Command::RingOutAt(500, 300)); // at frame 1500
+        let mut buf = vec![0.0f32; 1000 * CH];
+        e.process(&mut buf);
+        assert_eq!(buf[400 * CH + 1], 1400.0, "drums up to the line");
+        assert!(buf[500 * CH + 1..].iter().step_by(CH).all(|v| *v == 0.0), "drums stop on the line");
+        let ring: f32 = (510..700).map(|k| buf[k * CH].abs()).sum();
+        assert!(ring > 20.0, "keys ring on: {ring}");
+        assert!(!e.snapshot().playing, "the song has stopped");
+        assert!(!e.is_sounding(), "and the 300-frame ring-out is over by the end of this buffer");
+        assert!(buf[810 * CH..].iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn roles_come_from_track_names() {
+        use crate::model::{stem_role, Role::*};
+        for (n, r) in [("Click Track", Click), ("Guide", Guide), ("BGVS", Vocal), ("Lead Vox", Vocal), ("Drums (Live)", Rhythm), ("Perc (Live)", Rhythm),
+            ("Loop", Rhythm), ("Bass", Rhythm), ("Synth Bass", Rhythm), ("AG", Rhythm), ("Keys 1", Sustain), ("Pad", Sustain), ("EG 2", Sustain), ("Strings", Sustain), ("Organ", Sustain), ("FX", Sustain), ("Piano", Sustain)] {
+            assert_eq!(stem_role(n), r, "{n}");
+        }
     }
 }

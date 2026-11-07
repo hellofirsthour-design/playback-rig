@@ -14,10 +14,11 @@ mod model;
 mod pads;
 mod songfile;
 mod stretch;
+mod transition;
 
 use audio::{OpenOutput, Output, OutputInfo, ToAudio};
 use rig_engine::midi::{Action, Binding, Event, MidiMap};
-use rig_engine::{Arrangement, Command, Engine, Quantize, Route, Snapshot, Song, StemAudio};
+use rig_engine::{stem_role, Arrangement, Command, Engine, Quantize, Role, Route, Snapshot, Song, StemAudio};
 use serde::{Deserialize, Serialize};
 use songfile::{Block, Ending, Marker, PadStart, SongFile, TrimSpec, Transition};
 use std::path::{Path, PathBuf};
@@ -46,6 +47,9 @@ struct Settings {
     /// How jumps blend: inside a song (the music you leave rings out, see SetJoinTail)
     /// and when you cut to another song mid-song (the old one fades under the new).
     blend: Blend,
+    /// Smooth transitions announce where they're going in the guide output.
+    #[serde(default = "default_true")]
+    announce: bool,
     /// Settings format; older settings are migrated on load.
     version: u32,
     /// Folder of pad files, one per key.
@@ -72,6 +76,10 @@ struct Settings {
     /// Tracks moved to a bus by hand, by track name (lowercase) -> bus id.
     /// Applies to that track name in every song.
     bus_of_track: std::collections::BTreeMap<String, String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// How jumps blend (Setup → Blend).
@@ -291,6 +299,7 @@ impl Default for Settings {
             click_route: None,
             master_gain: 1.0,
             blend: Blend::Short,
+            announce: true,
             version: 1,
             pads_folder: None,
             pad_sounds: vec![],
@@ -412,8 +421,129 @@ struct AppState {
     resume: Mutex<Option<usize>>,
 }
 
+/// Everything a smooth transition needs, prepared off the audio thread (see transition.rs).
+struct Prepared {
+    sig: String,
+    /// The block the next song comes in at.
+    entry: usize,
+    prelude: Option<rig_engine::Prelude>,
+    /// The reverb wash (audio, output, frames before the change it starts).
+    wash: Option<(StemAudio, Route, u64)>,
+    /// The spoken cue (audio, output, level, frames before the change it starts).
+    cue: Option<(StemAudio, Route, f32, u64)>,
+    /// The last song's settle: over how many frames, down to what gain.
+    settle: (u64, f32),
+    /// How long the last song's sustained parts ring on.
+    ring: u64,
+}
+
+/// One song's audio and mix, for preparing a transition.
+struct Side {
+    stems: Vec<StemAudio>,
+    names: Vec<String>,
+    gains: Vec<f32>,
+    routes: Vec<Route>,
+    song: Song,
+    arr: Arrangement,
+}
+
+fn side(settings: &Settings, l: &Loaded) -> Side {
+    let mix: Vec<_> = l.file.stems.iter().map(|st| effective(settings, &l.file, st)).collect();
+    Side {
+        stems: l.stems.clone(),
+        names: l.file.stems.iter().map(|s| s.name.clone()).collect(),
+        gains: mix.iter().map(|(g, m, _)| if *m { 0.0 } else { *g }).collect(),
+        routes: mix.iter().map(|(_, _, r)| *r).collect(),
+        song: l.song.clone(),
+        arr: l.arr.clone(),
+    }
+}
+
+/// Count-ins and pickups: a smooth transition comes in at the first block after them.
+fn lead_in(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("count") || n.contains("pickup") || n == "top"
+}
+
+/// Where the next song comes in: the medley's entry, else its first real block.
+fn entry_item(l: &Loaded, enter_at: Option<usize>) -> usize {
+    if let Some(k) = enter_at.and_then(|i| arr_index(l, i)) {
+        return k;
+    }
+    (0..l.arr.items.len()).find(|&k| !lead_in(&l.song.sections[l.arr.items[k].section].name)).unwrap_or(0)
+}
+
+/// Where the current song ends, as a source frame: its medley exit, else its last block.
+fn exit_src(l: &Loaded) -> Option<u64> {
+    let k = medley_exit(l).or_else(|| l.arr.items.len().checked_sub(1))?;
+    let it = &l.arr.items[k];
+    let sec = &l.song.sections[it.section];
+    let len = it.fade_out.map_or(sec.len(), |(s, f)| sec.len().min(s + f));
+    Some(sec.start + len)
+}
+
+/// Builds a smooth transition from `cur` (ending at `exit`, a source frame; None for a
+/// cut, where the moment isn't known yet) into `next` at block `entry`.
+#[allow(clippy::too_many_arguments)]
+fn prepare(sig: String, cur: Side, exit: Option<u64>, cur_bpm: f64, next: Side, entry: usize, title: String, announce: bool, fallback_cue: Route, sr: u32, cache: PathBuf) -> Prepared {
+    let cview: Vec<(&StemAudio, &str, f32)> = (0..cur.stems.len()).map(|i| (&cur.stems[i], cur.names[i].as_str(), cur.gains[i])).collect();
+    let nview: Vec<(&StemAudio, &str, f32)> = (0..next.stems.len()).map(|i| (&next.stems[i], next.names[i].as_str(), next.gains[i])).collect();
+    let beat_out = (sr as f64 * 60.0 / cur_bpm.max(20.0)).round() as u64;
+    let bar_out = beat_out * cur.song.beats_per_bar.max(1) as u64;
+    let sec = &next.song.sections[next.arr.items[entry].section];
+    let to_bpm = next.song.bpm_at(sec.start as f64);
+    let beat_src = sr as f64 * 60.0 / to_bpm.max(20.0);
+    // The tempo glide: hold the last song's tempo two bars, ease in by the first guide call.
+    let prelude = ((cur_bpm - to_bpm).abs() > 0.25).then(|| {
+        let first_call = next.song.calls.iter().flatten().map(|(s, _)| *s).filter(|s| *s as f64 > sec.start as f64 + beat_src / 2.0).min();
+        let to_call = first_call.map(|s| (s - sec.start) as f64 / beat_src);
+        let g = transition::plan_glide(beat_src, next.song.beats_per_bar, to_call, sec.len() as f64 / beat_src);
+        let mut p = transition::prelude(&next.stems, sr, entry, sec.start, beat_src, cur_bpm, to_bpm, g);
+        // Its pads and keys swell in over the first beat, under the wash (as in the B3 test).
+        let swell = beat_out as usize;
+        for (i, a) in p.stems.iter_mut().enumerate() {
+            if stem_role(&next.names[i]) == Role::Sustain {
+                let ch = a.channels.max(1);
+                let mut d = a.data.to_vec();
+                for f in 0..swell.min(d.len() / ch) {
+                    let w = (f as f32 / swell as f32 * std::f32::consts::FRAC_PI_2).sin();
+                    d[f * ch..(f + 1) * ch].iter_mut().for_each(|v| *v *= w);
+                }
+                *a = StemAudio { channels: ch, data: d.into() };
+            }
+        }
+        p
+    });
+    // Settle and wash: only where the last song's end is known (not a cut).
+    let (settle, wash) = match exit {
+        Some(x) => {
+            let out_db = transition::mix_db(&cview, x.saturating_sub(bar_out), bar_out);
+            let in_db = transition::mix_db(&nview, sec.start, (2.0 * beat_src * next.song.beats_per_bar as f64) as u64);
+            let g = transition::settle_gain(out_db, in_db);
+            let w = transition::wash(&cview, sr, x, beat_out, g);
+            let route = (0..cur.names.len()).find(|&i| cur.gains[i] > 0.0 && stem_role(&cur.names[i]) == Role::Sustain).map_or(Route::Pair(0), |i| cur.routes[i]);
+            ((2 * bar_out, g), Some((w, route, beat_out)))
+        }
+        None => ((0, 1.0), None),
+    };
+    // The spoken cue, in the guide's output, ending a beat before the change.
+    let cue = announce
+        .then(|| transition::speak(&transition::announcement(&title, &sec.name), sr, &cache))
+        .flatten()
+        .map(|a| {
+            let g = (0..next.names.len()).find(|&i| stem_role(&next.names[i]) == Role::Guide);
+            let (route, gain) = g.map_or((fallback_cue, 0.8), |i| (next.routes[i], next.gains[i].max(0.3)));
+            let lead = a.frames() + beat_out;
+            (a, route, gain, lead)
+        });
+    Prepared { sig, entry, prelude, wash, cue, settle, ring: 2 * beat_out }
+}
+
 #[derive(Default)]
 struct NextSong {
+    /// A smooth transition into it, and the one being prepared (by signature).
+    prepared: Option<Prepared>,
+    preparing: Option<String>,
     loaded: Option<Loaded>,
     /// Being loaded in the background.
     loading: Option<PathBuf>,
@@ -851,6 +981,8 @@ fn sync_next(app: &AppHandle, state: &AppState) {
         if have != want {
             n.loaded = None;
             n.queued = None; // forces an Unqueue below
+            n.prepared = None;
+            n.preparing = None;
         }
         if want.is_some() && n.loaded.is_none() && n.loading.is_none() && n.failed != want {
             n.loading = want.clone();
@@ -875,10 +1007,57 @@ fn sync_next(app: &AppHandle, state: &AppState) {
             }
         });
     }
-    // Queue it for the handoff, or take it off the queue.
     let settings = state.settings.lock().unwrap().clone();
+    let smooth = jump.is_some() || tr.mode == songfile::TransitionMode::Smooth;
+    // A smooth transition is prepared in the background (stretching, the wash, the voice);
+    // until it's ready a plain one is queued, so nothing is ever left without a next song.
+    if smooth {
+        let start = {
+            let n = state.next.lock().unwrap();
+            n.loaded.as_ref().map(|l| {
+                let entry = entry_item(l, if jump.is_some() { None } else { tr.enter_at });
+                let psig = format!("{}|{}|{:?}|{:?}|{entry}|{}|{:?}", cur_folder.display(), l.folder.display(), jump, tr.leave_after, settings.announce, settings.bus_list.iter().map(|b| b.muted).collect::<Vec<_>>());
+                let todo = n.prepared.as_ref().map(|p| &p.sig) != Some(&psig) && n.preparing.as_ref() != Some(&psig);
+                (psig, entry, todo)
+            })
+        };
+        if let Some((psig, entry, true)) = start {
+            let built = {
+                let g = state.song.lock().unwrap();
+                let n = state.next.lock().unwrap();
+                match (g.as_ref(), n.loaded.as_ref()) {
+                    (Some(c), Some(l)) => {
+                        let exit = if jump.is_some() { None } else { exit_src(c) };
+                        let bpm = match (jump, exit) {
+                            (None, Some(x)) => c.song.bpm_at(x.saturating_sub(1) as f64),
+                            _ => state.core.snapshot().map_or(c.song.bpm, |s| s.bpm),
+                        };
+                        Some((side(&settings, c), exit, bpm, side(&settings, l), l.file.name.clone()))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some((cs, exit, bpm, ns, title)) = built {
+                state.next.lock().unwrap().preparing = Some(psig.clone());
+                let (app2, announce, cache) = (app.clone(), settings.announce, state.core.data_dir.join("voice"));
+                let fallback = settings.click_route.unwrap_or(Route::Pair(0));
+                std::thread::spawn(move || {
+                    let p = prepare(psig.clone(), cs, exit, bpm, ns, entry, title, announce, fallback, sr, cache);
+                    let st = app2.state::<AppState>();
+                    let mut n = st.next.lock().unwrap();
+                    if n.preparing.as_ref() == Some(&psig) {
+                        n.preparing = None;
+                        n.prepared = Some(p);
+                    }
+                });
+            }
+        }
+    }
+    // Queue it for the handoff, or take it off the queue.
     let mut n = state.next.lock().unwrap();
+    let ready = smooth && n.prepared.is_some() && n.preparing.is_none();
     let sig = match (&n.loaded, tr.mode) {
+        (Some(l), _) if ready => format!("smooth|{}|{}", l.folder.display(), n.prepared.as_ref().unwrap().sig),
         (Some(l), _) if jump.is_some() => format!("cut|{}|{}|{}", cur_folder.display(), l.folder.display(), cut_fade),
         (Some(l), m) if m != songfile::TransitionMode::Stop => format!("{}|{}|{:?}|{}|{}|{:?}", cur_folder.display(), l.folder.display(), m, tr.bars, bar, tr.enter_at),
         _ => "none".to_string(),
@@ -888,12 +1067,32 @@ fn sync_next(app: &AppHandle, state: &AppState) {
     }
     let mut out = state.core.output.lock().unwrap();
     let Some(o) = out.as_mut() else { return };
+    let cues = [cues.first().copied(), cues.get(1).copied()];
+    // The current song's exit: ringing on and settling only for a smooth transition at its end.
+    let (exit_ring, settle) = match n.prepared.as_ref() {
+        Some(p) if ready && jump.is_none() => (p.ring, p.settle),
+        _ => (0, (0, 1.0)),
+    };
+    o.send(ToAudio::Cmd(Command::SetExitRing(exit_ring)));
+    o.send(ToAudio::Cmd(Command::SetSettle(settle.0, settle.1)));
     let sent = match (&n.loaded, sig != "none") {
         (Some(l), true) => match make_engine(&settings, l, o.info.channels) {
+            Ok(mut e) if ready => {
+                let p = n.prepared.as_ref().unwrap();
+                e.handle(Command::SetCountIn(false));
+                e.handle(Command::Locate(p.entry));
+                if let Some(pr) = p.prelude.clone() {
+                    e.set_prelude(pr);
+                }
+                let wash = p.wash.as_ref().map(|(a, r, lead)| Box::new(audio::Overlay { audio: a.clone(), route: *r, lead: *lead, gain: 1.0 }));
+                let cue = p.cue.as_ref().map(|(a, r, g, lead)| Box::new(audio::Overlay { audio: a.clone(), route: *r, lead: *lead, gain: *g }));
+                let h = audio::Handoff { overlap: 0, fade: cut_fade, cues, at_bar: jump.is_some(), ring: if jump.is_some() { p.ring } else { 0 }, overlays: [wash, cue] };
+                o.send(ToAudio::Queue(Box::new(e), h))
+            }
             Ok(mut e) if jump.is_some() => {
                 // Cut to another song: it takes over on the next bar, the old one fading under it.
                 e.handle(Command::SetCountIn(false));
-                let h = audio::Handoff { overlap: 0, fade: cut_fade, cues: [cues.first().copied(), cues.get(1).copied()], at_bar: true };
+                let h = audio::Handoff { overlap: 0, fade: cut_fade, cues, at_bar: true, ring: 0, overlays: [None, None] };
                 o.send(ToAudio::Queue(Box::new(e), h))
             }
             Ok(mut e) => {
@@ -909,7 +1108,7 @@ fn sync_next(app: &AppHandle, state: &AppState) {
                     }
                     _ => (0, 0),
                 };
-                let h = audio::Handoff { overlap, fade, cues: [cues.first().copied(), cues.get(1).copied()], at_bar: false };
+                let h = audio::Handoff { overlap, fade, cues, at_bar: false, ring: 0, overlays: [None, None] };
                 o.send(ToAudio::Queue(Box::new(e), h))
             }
             Err(_) => false,
@@ -1278,6 +1477,7 @@ struct AppView {
     click_route: Route,
     master_gain: f32,
     blend: Blend,
+    announce: bool,
     /// A song being cut to on the next bar (set list place), while one plays.
     jump_to: Option<usize>,
     bindings: Vec<Binding>,
@@ -1409,6 +1609,7 @@ fn view(state: &AppState) -> AppView {
         click_route: s.click_route.unwrap_or(songfile::default_route("click", ch)),
         master_gain: f32::from_bits(state.core.master.load(Ordering::Relaxed)),
         blend: s.blend,
+        announce: s.announce,
         jump_to: *state.jump_to.lock().unwrap(),
         bindings,
         learning,
@@ -1671,6 +1872,7 @@ enum UiCmd {
     ClickGain { gain: f32 },
     MasterGain { gain: f32 },
     Blend { blend: Blend },
+    Announce { on: bool },
     ClickRoute { route: Route },
     StemGain { stem: usize, gain: f32 },
     StemMute { stem: usize, muted: bool },
@@ -1801,6 +2003,10 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 s.count_in = on;
                 save_settings = true;
                 core.send(Command::SetCountIn(on));
+            }
+            UiCmd::Announce { on } => {
+                s.announce = on;
+                save_settings = true;
             }
             UiCmd::Blend { blend } => {
                 s.blend = blend;
@@ -3353,6 +3559,50 @@ mod tests {
         assert_eq!(blend_frames(Blend::Short, &l), 14_400);
         assert_eq!(blend_frames(Blend::Beat, &l), 48_000);
         assert_eq!(blend_frames(Blend::Bar, &l), 192_000);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_smooth_transition_is_prepared_from_both_songs() {
+        let root = std::env::temp_dir().join(format!("rig-smooth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |n: &str, bpm: f64| clicksong::Spec { name: n.into(), bpm, beats_per_bar: 4, key: "E".into(), sections: vec![("Verse".into(), 4), ("Chorus".into(), 4)], guide: false };
+        let voice = |_: &str| Some(vec![0.2f32; 4000]);
+        let (a, _) = clicksong::create(&root, &mk("We Want Revival", 75.0), &voice).unwrap();
+        let (b, _) = clicksong::create(&root, &mk("Worthy", 67.5), &voice).unwrap();
+        let sr = 48_000;
+        let la = load(&a, sr, 2).unwrap();
+        let lb = load(&b, sr, 2).unwrap();
+        let settings = Settings::default();
+        // A count-in or pickup block is skipped: it comes in at the first real block.
+        let entry = entry_item(&lb, None);
+        assert!(!lead_in(&lb.song.sections[lb.arr.items[entry].section].name));
+        let exit = exit_src(&la).unwrap();
+        let p = prepare("t".into(), side(&settings, &la), Some(exit), 75.0, side(&settings, &lb), entry, "Worthy".into(), false, Route::Pair(2), sr, root.join("voice"));
+        let pre = p.prelude.as_ref().expect("different tempos: a glide entry");
+        assert_eq!(pre.item, entry);
+        assert_eq!(pre.stems.len(), lb.stems.len());
+        // Held at 75 first: 8 beats of 67.5 BPM source in 8 beats at 75.
+        let beat_src = sr as f64 * 60.0 / 67.5;
+        assert!((pre.map[1].1 as f64 - 8.0 * beat_src).abs() < 2.0, "{:?}", &pre.map[..2]);
+        assert!((pre.map[1].0 as f64 - 8.0 * sr as f64 * 60.0 / 75.0).abs() < 2.0);
+        let sec = &lb.song.sections[lb.arr.items[entry].section];
+        assert!(pre.map.last().unwrap().1 < sec.len(), "stays inside the entry block");
+        assert!(p.wash.is_some(), "the wash over the seam");
+        assert_eq!(p.ring, (sr as f64 * 60.0 / 75.0).round() as u64 * 2, "two beats of ring-out");
+        assert!(p.cue.is_none(), "announcing was off");
+        // And the engine takes the entry.
+        let mut e = make_engine(&settings, &lb, 2).unwrap();
+        e.set_prelude(pre.clone());
+        e.handle(Command::Locate(entry));
+        e.handle(Command::SetCountIn(false));
+        e.handle(Command::Play);
+        let mut buf = vec![0f32; 4800 * 2];
+        e.process(&mut buf);
+        assert!(e.snapshot().frame_in_section > 0);
+        // A cut (no known exit) has no settle or wash, just the glide and the ring-out.
+        let p = prepare("c".into(), side(&settings, &la), None, 75.0, side(&settings, &lb), entry, "Worthy".into(), false, Route::Pair(2), sr, root.join("voice"));
+        assert!(p.wash.is_none() && p.settle == (0, 1.0) && p.prelude.is_some());
         std::fs::remove_dir_all(&root).ok();
     }
 }

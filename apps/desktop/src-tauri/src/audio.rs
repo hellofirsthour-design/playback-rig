@@ -27,8 +27,17 @@ pub enum ToAudio {
     Metro { on: bool, bpm: f64, beats_per_bar: u32, gain: f32, route: rig_engine::Route },
 }
 
+/// Audio played alongside a song change: the reverb wash over the seam, or the spoken
+/// cue for where it's going. It starts `lead` frames before the change.
+pub struct Overlay {
+    pub audio: rig_engine::StemAudio,
+    pub route: rig_engine::Route,
+    pub lead: u64,
+    pub gain: f32,
+}
+
 /// How the queued next song takes over.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Default)]
 pub struct Handoff {
     /// Start the next song this many frames before the current one ends (0 = right after).
     pub overlap: u64,
@@ -40,6 +49,11 @@ pub struct Handoff {
     /// Take over at the current song's next bar line instead of at its end (cutting to
     /// another song mid-song); `fade` is then the blend.
     pub at_bar: bool,
+    /// A smooth cut (with `at_bar`): the current song stops on the bar line and its
+    /// sustained parts ring on for this many frames, instead of a fade.
+    pub ring: u64,
+    /// Played around the change (see `Overlay`).
+    pub overlays: [Option<Box<Overlay>>; 2],
 }
 
 /// Things the audio thread hands back to be freed elsewhere. Only ever dropped.
@@ -50,18 +64,39 @@ pub struct Decks {
     pub queued: Option<(Box<Engine>, Handoff)>,
     pub outgoing: Option<Box<Engine>>,
     scratch: Vec<f32>,
+    /// Overlays playing now, and the frame each is at (negative = starts later in the buffer).
+    overlays: [Option<(Box<Overlay>, i64)>; 2],
 }
 
 impl Decks {
     pub fn new(channels: usize) -> Self {
-        Decks { engine: None, queued: None, outgoing: None, scratch: vec![0f32; 16384 * channels.max(1)] }
+        Decks { engine: None, queued: None, outgoing: None, scratch: vec![0f32; 16384 * channels.max(1)], overlays: [None, None] }
     }
 
     /// Starts the queued song if the current one ends within this buffer (or within
     /// the crossfade). Returns true on a handoff; replaced engines go to `free`.
-    pub fn handoff(&mut self, frames: u64, mut free: impl FnMut(Box<Engine>)) -> bool {
-        // The next song starts `overlap` frames before the current one ends: in this
-        // buffer, after `delay` frames, so the handoff lands on the exact frame.
+    pub fn handoff(&mut self, frames: u64, mut free: impl FnMut(Garbage)) -> bool {
+        // Frames until the change, for the overlays that lead in before it.
+        let to_change = match (self.engine.as_ref(), self.queued.as_ref()) {
+            (Some(e), Some((_, h))) if h.at_bar => e.frames_to_bar().map(|b| e.frames_left().map_or(b, |l| l.min(b))),
+            (Some(e), Some((_, h))) => e.frames_left().map(|l| l.saturating_sub(h.overlap)),
+            _ => None,
+        };
+        if let (Some(tc), Some((_, h))) = (to_change, self.queued.as_mut()) {
+            for slot in h.overlays.iter_mut() {
+                if slot.as_ref().is_some_and(|o| tc <= o.lead + frames) {
+                    let o = slot.take().unwrap();
+                    let at = o.lead as i64 - tc as i64;
+                    let free_slot = self.overlays.iter().position(|x| x.is_none()).unwrap_or(0);
+                    if let Some((old, _)) = self.overlays[free_slot].replace((o, at)) {
+                        free(Garbage::Overlay(old));
+                    }
+                }
+            }
+        }
+        // The next song starts `overlap` frames before the current one ends (or on the
+        // next bar line for a cut): in this buffer, after `delay` frames, so the handoff
+        // lands on the exact frame.
         let delay = match (self.engine.as_ref(), self.queued.as_ref()) {
             (Some(e), Some((_, h))) if h.at_bar => match (e.frames_to_bar(), e.frames_left()) {
                 // the next bar line, or the song's end if that comes first
@@ -77,14 +112,20 @@ impl Decks {
             },
             _ => return false,
         };
-        let Some((mut next, h)) = self.queued.take() else { return false };
+        let Some((mut next, mut h)) = self.queued.take() else { return false };
+        for o in h.overlays.iter_mut().filter_map(|o| o.take()) {
+            free(Garbage::Overlay(o)); // too late to start (it led in from before the change)
+        }
         next.handle(Command::PlayAfter(delay));
         if let Some(mut old) = self.engine.replace(next) {
             old.handle(Command::SetClick(false));
             for i in h.cues.into_iter().flatten() {
                 old.handle(Command::SetStemMute(i, true));
             }
-            if h.at_bar {
+            if h.at_bar && h.ring > 0 {
+                // A smooth cut: on the bar line, rhythm and vocals stop, the rest rings on.
+                old.handle(Command::RingOutAt(delay, h.ring));
+            } else if h.at_bar {
                 // A cut: full to the bar line, then it fades under the new song.
                 old.handle(Command::FadeOutAt(delay, h.fade.max(1)));
             } else if h.fade > 0 {
@@ -92,27 +133,46 @@ impl Decks {
                 old.handle(Command::FadeOut(h.fade + delay));
             }
             if let Some(prev) = self.outgoing.replace(old) {
-                free(prev);
+                free(Garbage::Engine(prev));
             }
         }
         true
     }
 
-    /// Renders the current song, plus the outgoing one while it fades.
-    pub fn process(&mut self, data: &mut [f32], mut free: impl FnMut(Box<Engine>)) {
+    /// Renders the current song, plus the outgoing one while it rings out, plus overlays.
+    pub fn process(&mut self, data: &mut [f32], mut free: impl FnMut(Garbage)) {
         match self.engine.as_mut() {
             Some(e) => e.process(data),
             None => data.fill(0.0),
         }
         if let Some(o) = self.outgoing.as_mut() {
-            if o.is_playing() && data.len() <= self.scratch.len() {
+            if o.is_sounding() && data.len() <= self.scratch.len() {
                 let buf = &mut self.scratch[..data.len()];
                 o.process(buf);
                 for (d, v) in data.iter_mut().zip(buf.iter()) {
                     *d += *v;
                 }
             } else if let Some(done) = self.outgoing.take() {
-                free(done);
+                free(Garbage::Engine(done));
+            }
+        }
+        let ch = self.engine.as_ref().or(self.outgoing.as_ref()).map_or(2, |e| e.channels());
+        let frames = data.len() / ch.max(1);
+        for slot in self.overlays.iter_mut() {
+            let Some((o, at)) = slot.as_mut() else { continue };
+            let len = o.audio.frames() as i64;
+            for f in 0..frames {
+                let p = *at + f as i64;
+                if p >= 0 && p < len {
+                    let (l, r) = o.audio.frame(p as u64);
+                    Engine::write(data, f * ch, ch, o.route, l * o.gain, r * o.gain);
+                }
+            }
+            *at += frames as i64;
+            if *at >= len {
+                if let Some((done, _)) = slot.take() {
+                    free(Garbage::Overlay(done));
+                }
             }
         }
     }
@@ -123,6 +183,7 @@ pub enum Garbage {
     Engine(Box<Engine>),
     Arrangement(Box<Arrangement>),
     Pad(Box<crate::pads::PadVoice>),
+    Overlay(Box<Overlay>),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -257,8 +318,11 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                             ToAudio::PadLevel(l) => pads.level = l.clamp(0.0, 2.0),
                             ToAudio::PadRoute(r) => pads.route = r,
                             ToAudio::Queue(e, h) => {
-                                if let Some((old, _)) = decks.queued.replace((e, h)) {
+                                if let Some((old, mut oh)) = decks.queued.replace((e, h)) {
                                     let _ = gtx.push(Garbage::Engine(old));
+                                    for o in oh.overlays.iter_mut().filter_map(|o| o.take()) {
+                                        let _ = gtx.push(Garbage::Overlay(o));
+                                    }
                                 }
                             }
                             ToAudio::Metro { on, bpm, beats_per_bar, gain, route } => {
@@ -268,21 +332,24 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                                 metro_on.store(metro.on, Ordering::Release);
                             }
                             ToAudio::Unqueue => {
-                                if let Some((old, _)) = decks.queued.take() {
+                                if let Some((old, mut oh)) = decks.queued.take() {
                                     let _ = gtx.push(Garbage::Engine(old));
+                                    for o in oh.overlays.iter_mut().filter_map(|o| o.take()) {
+                                        let _ = gtx.push(Garbage::Overlay(o));
+                                    }
                                 }
                             }
                         }
                     }
                     // Hand over to the next song when the current one is about to end.
                     let frames = (data.len() / channels.max(1)) as u64;
-                    if decks.handoff(frames, |e| {
-                        let _ = gtx.push(Garbage::Engine(e));
+                    if decks.handoff(frames, |g| {
+                        let _ = gtx.push(g);
                     }) {
                         segues.fetch_add(1, Ordering::Release);
                     }
-                    decks.process(data, |e| {
-                        let _ = gtx.push(Garbage::Engine(e));
+                    decks.process(data, |g| {
+                        let _ = gtx.push(g);
                     });
                     if let Some(e) = decks.engine.as_ref() {
                         if let Ok(mut st) = status.try_lock() {
@@ -435,7 +502,7 @@ mod tests {
     fn a_segue_starts_the_next_song_on_the_exact_frame_after_the_last() {
         let mut d = Decks::new(CH);
         d.engine = Some(Box::new(song(1.0, 4)));
-        d.queued = Some((Box::new(song(2.0, 4)), Handoff { overlap: 0, fade: 0, cues: [Some(1), None], at_bar: false }));
+        d.queued = Some((Box::new(song(2.0, 4)), Handoff { overlap: 0, fade: 0, cues: [Some(1), None], at_bar: false, ring: 0, overlays: [None, None] }));
         d.engine.as_mut().unwrap().handle(Command::Play);
         let (a, _, n) = run(&mut d, 6000);
         assert_eq!(n, 1);
@@ -447,6 +514,38 @@ mod tests {
     }
 
     #[test]
+    fn an_overlay_starts_its_lead_before_the_change_and_plays_through_it() {
+        let mut d = Decks::new(CH);
+        d.engine = Some(Box::new(song(1.0, 4)));
+        // The wash: 1000 frames of 100.0, starting 500 frames before the segue at 4000.
+        let wash = Overlay { audio: StemAudio::mono(vec![100.0; 1000]), route: Route::Mono(0), lead: 500, gain: 1.0 };
+        d.queued = Some((Box::new(song(2.0, 4)), Handoff { cues: [Some(1), None], overlays: [Some(Box::new(wash)), None], ..Default::default() }));
+        d.engine.as_mut().unwrap().handle(Command::Play);
+        let (a, _, n) = run(&mut d, 6000);
+        assert_eq!(n, 1);
+        assert_eq!(a[3499], 1.0, "not yet");
+        assert_eq!(a[3500], 101.0, "starts exactly 500 frames before the change");
+        assert_eq!(a[4400], 102.0, "plays on under the new song");
+        assert_eq!(a[4600], 2.0, "and ends");
+        assert!(d.overlays.iter().all(|o| o.is_none()), "handed back once done");
+    }
+
+    #[test]
+    fn a_smooth_cut_rings_out_the_last_song_on_the_bar() {
+        let mut d = Decks::new(CH);
+        d.engine = Some(Box::new(song(1.0, 8)));
+        d.engine.as_mut().unwrap().handle(Command::Play);
+        let _ = run(&mut d, 1500);
+        d.queued = Some((Box::new(song(2.0, 8)), Handoff { cues: [Some(1), None], at_bar: true, ring: 400, ..Default::default() }));
+        let (a, b, n) = run(&mut d, 1500); // frames 1500..2999; the bar line is at 2000
+        assert_eq!(n, 1);
+        assert_eq!(a[400], 1.0, "the first song up to the bar line");
+        assert!((b[600] - 2000.0).abs() < 1.0, "only the new song's click: {}", b[600]);
+        assert!(d.outgoing.is_none() || d.outgoing.as_ref().is_some_and(|o| !o.snapshot().playing), "the last song has stopped (ringing at most)");
+        assert!((a[1200] - 2.0).abs() < 0.05, "then just the new song: {}", a[1200]);
+    }
+
+    #[test]
     fn a_cut_to_another_song_takes_over_on_the_next_bar_and_blends() {
         let mut d = Decks::new(CH);
         d.engine = Some(Box::new(song(1.0, 8)));
@@ -454,7 +553,7 @@ mod tests {
         let _ = run(&mut d, 1500); // halfway through bar 2
         // Cut to song 2: it takes over at the next bar line (frame 2000) and the first
         // song fades out under it over half a bar.
-        d.queued = Some((Box::new(song(2.0, 8)), Handoff { overlap: 0, fade: 500, cues: [Some(1), None], at_bar: true }));
+        d.queued = Some((Box::new(song(2.0, 8)), Handoff { overlap: 0, fade: 500, cues: [Some(1), None], at_bar: true, ring: 0, overlays: [None, None] }));
         let (a, b, n) = run(&mut d, 1500); // frames 1500..2999
         assert_eq!(n, 1);
         assert_eq!(a[400], 1.0, "the first song up to the bar line");
@@ -468,7 +567,7 @@ mod tests {
         let mut d = Decks::new(CH);
         d.engine = Some(Box::new(song(1.0, 8)));
         // Two-bar crossfade: the next song starts 2000 frames before the end.
-        d.queued = Some((Box::new(song(2.0, 8)), Handoff { overlap: 2000, fade: 2000, cues: [Some(1), None], at_bar: false }));
+        d.queued = Some((Box::new(song(2.0, 8)), Handoff { overlap: 2000, fade: 2000, cues: [Some(1), None], at_bar: false, ring: 0, overlays: [None, None] }));
         d.engine.as_mut().unwrap().handle(Command::Play);
         let (a, b, n) = run(&mut d, 9000);
         assert_eq!(n, 1);

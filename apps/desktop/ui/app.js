@@ -743,7 +743,8 @@
     const g2 = el('div', 'fgrp');
     g2.append(el('span', 'flbl', nx ? 'Into ' + nx.name : 'Last song'));
     if (nx) {
-      g2.append(seg([['Stop', 'Stop'], ['Segue', 'Segue'], ['Crossfade', 'Crossfade']], tr.mode, v => setTransition({ ...tr, mode: v }), 'Into the next song'));
+      g2.append(seg([['Stop', 'Stop'], ['Segue', 'Segue'], ['Crossfade', 'Crossfade'], ['Smooth', 'Smooth']], tr.mode, v => setTransition({ ...tr, mode: v }), 'Into the next song'));
+      if (tr.mode === 'Smooth') g2.append(el('span', 'fst', 'downbeat · tempo glide · wash'));
       if (tr.mode === 'Crossfade') {
         g2.append(stepper(tr.bars, v => String(v), d => setTransition({ ...tr, bars: Math.max(1, Math.min(16, tr.bars + d)) }), 'Crossfade length'));
         g2.append(el('span', 'fst', 'bars'));
@@ -1551,6 +1552,7 @@
       r.append(el('span', null, b.name), sel); br.append(r);
     });
     if (document.activeElement !== $('#clickGain')) $('#clickGain').value = V.click_gain;
+    $('#announceChk').checked = V.announce !== false;
     const bs = $('#blendSeg'); bs.innerHTML = '';
     bs.append(seg([['Cut', 'Cut'], ['Short', 'Short'], ['Beat', '1 beat'], ['Bar', '1 bar']], V.blend || 'Short', v => { V.blend = v; send({ type: 'Blend', blend: v }).then(() => renderSetup()); }, 'Blend'));
     $('#outHint').textContent = ((V.output && V.output.channels >= 4) ? 'By default Click & guide go to Out 3-4 (in-ears) and every other bus to Out 1-2 (front of house).' : 'Only 2 outputs, so everything plays on 1-2. Pick your audio interface to send click and guide to the in-ears.')
@@ -1591,6 +1593,7 @@
   $('#padRoute').onchange = e => { V.pads.route = keyRoute(e.target.value); invoke('pad_mix', { level: null, route: V.pads.route }).catch(err); };
 
   $('#outSel').onchange = e => { if (playing()) { toast('Stop playback before changing the audio output.'); renderSetup(); return; } invoke('choose_output', { name: e.target.value }).then(v => { refresh(v); toast('Audio output changed.'); }).catch(err); };
+  $('#announceChk').onchange = e => { V.announce = e.target.checked; send({ type: 'Announce', on: V.announce }); };
   $('#clickRoute').onchange = e => { V.click_route = keyRoute(e.target.value); send({ type: 'ClickRoute', route: V.click_route }); };
   $('#clickGain').oninput = e => { V.click_gain = +e.target.value; send({ type: 'ClickGain', gain: V.click_gain }); };
   $('#midiSel').onchange = e => invoke('choose_midi', { name: e.target.value || null }).then(refresh).catch(err);
@@ -1658,7 +1661,13 @@
     } catch (e2) { err(e2); } finally { $('#c-go').disabled = false; $('#c-go').textContent = 'Create song'; }
   };
   document.addEventListener('keydown', e => {
-    if (e.target.closest('input,select,textarea')) return;
+    // In a form control the keys are its own, except Escape on a switch, picker or slider:
+    // that still closes the open panel.
+    if (e.target.closest('input,select,textarea')) {
+      const t = e.target, text = t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && !['checkbox', 'radio', 'range', 'button'].includes(t.type));
+      if (e.key !== 'Escape' || text) return;
+      t.blur();
+    }
     const k = e.key;
     if ((e.metaKey || e.ctrlKey) && (k === 'z' || k === 'Z')) { e.preventDefault(); doUndo(); return; }
     if (e.metaKey || e.ctrlKey || e.altKey) return;

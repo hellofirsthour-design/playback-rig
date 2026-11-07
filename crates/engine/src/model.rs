@@ -314,3 +314,45 @@ impl StemAudio {
         }
     }
 }
+
+/// What a track does musically, from its name: decides how it behaves at a jump or a
+/// song transition (vocals and rhythm switch cleanly on the beat; sustained parts ring on).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Click,
+    Guide,
+    Vocal,
+    Rhythm,
+    Sustain,
+}
+
+pub fn stem_role(name: &str) -> Role {
+    let n = name.to_lowercase();
+    let words: Vec<&str> = n.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let has = |w: &str| words.iter().any(|x| x.starts_with(w));
+    if n.contains("click") {
+        Role::Click
+    } else if n.contains("guide") || has("cue") {
+        Role::Guide
+    } else if has("bgv") || has("vox") || has("vocal") || has("choir") || has("voice") || has("harmon") {
+        Role::Vocal
+    } else if has("drum") || has("perc") || has("loop") || has("bass") || has("kick") || has("snare") || has("tamb") || has("shaker") || words.contains(&"ag") || has("acoustic") {
+        Role::Rhythm
+    } else {
+        Role::Sustain
+    }
+}
+
+/// The first bars of a song as it comes in from another one: pre-rendered audio for every
+/// stem (e.g. holding the last song's tempo, then easing into this one's), and where each
+/// output frame is in the song. When it ends, the song carries on from the matching frame.
+#[derive(Clone)]
+pub struct Prelude {
+    /// The arrangement block it starts at (playback starts at its first frame).
+    pub item: usize,
+    /// One per stem, same order as the song's stems.
+    pub stems: Vec<StemAudio>,
+    /// (output frame, source frame inside the block) key frames, from (0, 0); the song's own
+    /// tempo between them is linear. The last one is where the prelude hands back.
+    pub map: Vec<(u64, u64)>,
+}

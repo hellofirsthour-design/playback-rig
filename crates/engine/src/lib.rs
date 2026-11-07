@@ -10,4 +10,4 @@ pub mod midi;
 pub mod model;
 
 pub use engine::{Command, Engine, Quantize, Snapshot};
-pub use model::{beat_pos, beat_time, ArrItem, Arrangement, Route, Section, Song, StemAudio, StemInfo, Trim};
+pub use model::{beat_pos, beat_time, stem_role, ArrItem, Arrangement, Prelude, Role, Route, Section, Song, StemAudio, StemInfo, Trim};
