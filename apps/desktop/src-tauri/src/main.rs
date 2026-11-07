@@ -12,12 +12,13 @@ mod midi_io;
 mod recover;
 mod model;
 mod pads;
+mod preflight;
 mod songfile;
 mod stretch;
 mod transition;
 
 use audio::{OpenOutput, Output, OutputInfo, ToAudio};
-use rig_engine::midi::{Action, Binding, Event, MidiMap};
+use rig_engine::midi::{self, Action, Binding, Event, MidiMap};
 use rig_engine::{stem_role, Arrangement, Command, Engine, Quantize, Role, Route, Snapshot, Song, StemAudio};
 use serde::{Deserialize, Serialize};
 use songfile::{Block, Ending, Marker, PadStart, SongFile, TrimSpec, Transition};
@@ -76,6 +77,9 @@ struct Settings {
     buses: Vec<Bus>,
     /// The buses, in track-list order. Shared by every song.
     bus_list: Vec<Bus>,
+    /// Band tonight: the parts played live (songfile::BAND_PARTS). Their tracks are muted
+    /// in every song, without touching each song's own mix.
+    band: Vec<String>,
     /// Tracks moved to a bus by hand, by track name (lowercase) -> bus id.
     /// Applies to that track name in every song.
     bus_of_track: std::collections::BTreeMap<String, String>,
@@ -302,7 +306,14 @@ fn effective(settings: &Settings, file: &SongFile, st: &songfile::StemFile) -> (
     let id = settings.bus_id_for(&st.name);
     let b = settings.bus_for(&st.name);
     let (g, m) = file.bus_mix.get(&id).map_or((b.gain, b.muted), |l| (l.gain, l.muted));
-    (st.gain * g, st.muted || m, settings.bus_route(&id))
+    (st.gain * g, st.muted || m || settings.plays_live(&st.name), settings.bus_route(&id))
+}
+
+impl Settings {
+    /// The band plays this track's part live tonight.
+    fn plays_live(&self, track: &str) -> bool {
+        songfile::band_part(track).map_or(false, |p| self.band.iter().any(|b| b == p))
+    }
 }
 
 /// Sends every stem's bus-applied level, mute and output to the engine.
@@ -342,6 +353,7 @@ impl Default for Settings {
             out_channels: 2,
             buses: vec![],
             bus_list: vec![],
+            band: vec![],
             bus_of_track: Default::default(),
         };
         s.ensure_buses();
@@ -397,6 +409,8 @@ struct Core {
     audio_lost: AtomicBool,
     midi_lost: AtomicBool,
     map: Mutex<MidiMap>,
+    /// Controller faders' soft takeover: (last position, level they set).
+    pickup: Mutex<std::collections::HashMap<String, (Option<f32>, Option<f32>)>>,
     config_dir: PathBuf,
     data_dir: PathBuf,
     start: Instant,
@@ -451,6 +465,41 @@ struct AppState {
     pad_choice: Mutex<Option<u8>>,
     /// The block that was playing when the audio interface dropped out.
     resume: Mutex<Option<usize>>,
+    /// The last session written (see Session).
+    session: Mutex<Session>,
+    /// After a crash: the song and block it was playing, picked up when that song loads.
+    recovered: Mutex<Option<(PathBuf, usize)>>,
+    /// Said once on screen when the set was picked back up.
+    resumed: Mutex<Option<String>>,
+}
+
+impl AppState {
+    fn write_session(&self, next: Session) {
+        let mut cur = self.session.lock().unwrap();
+        if *cur != next {
+            write_json(&self.core.config_dir.join("session.json"), &next);
+            *cur = next;
+        }
+    }
+}
+
+/// Where the set was, written while it plays, so a crash mid-song comes back to the same
+/// song and block. `clean` is set when the app quits normally.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct Session {
+    song: Option<PathBuf>,
+    item: usize,
+    playing: bool,
+    clean: bool,
+}
+
+impl Session {
+    /// What to pick back up after the last run: the song and block it was playing, if
+    /// the app didn't quit normally.
+    fn recovered(&self) -> Option<(PathBuf, usize)> {
+        (!self.clean && self.playing).then(|| self.song.clone()).flatten().map(|p| (p, self.item))
+    }
 }
 
 /// Everything a smooth transition needs, prepared off the audio thread (see transition.rs).
@@ -648,6 +697,24 @@ fn fader(v: f32) -> f32 {
     (v * v * 1.25).min(2.0)
 }
 
+/// A bus's level and mute as heard now: the song's own mix, else the default mix.
+fn bus_level(s: &Settings, song: Option<&Loaded>, id: &str) -> (f32, bool) {
+    let def = s.bus_list.iter().find(|b| b.id == id).map_or((1.0, false), |b| (b.gain, b.muted));
+    song.and_then(|l| l.file.bus_mix.get(id)).map_or(def, |l| (l.gain, l.muted))
+}
+
+/// Soft takeover for a controller fader (see midi::picks_up). Once it has taken over it
+/// stays in control until the level is changed some other way (the screen, a new song).
+fn take_over(core: &Core, key: &str, cur_gain: f32, cur_pos: f32, pos: f32, new_gain: f32) -> bool {
+    let mut m = core.pickup.lock().unwrap();
+    let e = m.entry(key.to_string()).or_insert((None, None));
+    let engaged = e.1.map_or(false, |g: f32| (g - cur_gain).abs() < 1e-4);
+    let ok = engaged || midi::picks_up(cur_pos, e.0, pos);
+    e.0 = Some(pos);
+    e.1 = if ok { Some(new_gain) } else { None };
+    ok
+}
+
 fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
     match ev {
         Event::Learned(_) => {
@@ -660,25 +727,46 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
             let _ = app.emit("stem-level", (i, g));
         }
         Event::Level(Action::ClickLevel, v) => {
-            let g = fader(v);
-            core.send(Command::SetClickGain(g));
-            let _ = app.emit("click-level", g);
+            let Some(st) = app.try_state::<AppState>() else { return };
+            let cur = st.settings.lock().unwrap().click_gain;
+            let g = v * 1.5;
+            if take_over(core, "click", cur, cur / 1.5, v, g) {
+                let _ = cmd(st, UiCmd::ClickGain { gain: g });
+                let _ = app.emit("click-level", g);
+            }
+        }
+        Event::Level(Action::PadLevel, v) => {
+            let Some(st) = app.try_state::<AppState>() else { return };
+            let cur = st.settings.lock().unwrap().pad_level;
+            let g = v * 1.5;
+            if take_over(core, "pad", cur, cur / 1.5, v, g) {
+                let _ = pad_mix(st, Some(g), None);
+                let _ = app.emit("pad-level", g);
+            }
         }
         Event::Level(Action::BusLevel(i), v) => {
-            // A controller fader on a bus: the same as moving that bus's fader on screen.
-            let g = fader(v).min(1.5);
-            if let Some(st) = app.try_state::<AppState>() {
-                let id = st.settings.lock().unwrap().bus_list.get(i).map(|b| b.id.clone());
-                if let Some(id) = id {
-                    let _ = cmd(st, UiCmd::BusGain { bus: id.clone(), gain: g });
-                    let _ = app.emit("bus-level", (id, g));
-                }
+            // A controller fader on a bus: the same as moving that bus's fader on screen,
+            // on the same dB law, taking over only once it reaches the on-screen level.
+            let Some(st) = app.try_state::<AppState>() else { return };
+            let cur = {
+                let s = st.settings.lock().unwrap();
+                let song = st.song.lock().unwrap();
+                s.bus_list.get(i).map(|b| (b.id.clone(), bus_level(&s, song.as_ref(), &b.id).0))
+            };
+            let Some((id, cur)) = cur else { return };
+            let g = midi::db_gain(v);
+            if take_over(core, &format!("bus:{id}"), cur, midi::db_pos(cur), v, g) {
+                let _ = cmd(st, UiCmd::BusGain { bus: id.clone(), gain: g });
+                let _ = app.emit("bus-level", (id, g));
             }
         }
         Event::Level(Action::MasterLevel, v) => {
-            let g = fader(v).min(1.5);
-            core.master.store(g.to_bits(), Ordering::Relaxed);
-            let _ = app.emit("master-level", g);
+            let cur = f32::from_bits(core.master.load(Ordering::Relaxed));
+            let g = midi::db_gain(v);
+            if take_over(core, "master", cur, midi::db_pos(cur), v, g) {
+                core.master.store(g.to_bits(), Ordering::Relaxed);
+                let _ = app.emit("master-level", g);
+            }
         }
         Event::Level(..) => {}
         Event::Fire(a) => match a {
@@ -727,7 +815,31 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
                     let _ = app.emit("pedal", "refresh");
                 }
             }
-            Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_) => {}
+            Action::BusMute(i) => {
+                let Some(st) = app.try_state::<AppState>() else { return };
+                let cur = {
+                    let s = st.settings.lock().unwrap();
+                    let song = st.song.lock().unwrap();
+                    s.bus_list.get(i).map(|b| (b.id.clone(), bus_level(&s, song.as_ref(), &b.id).1))
+                };
+                if let Some((id, muted)) = cur {
+                    let _ = cmd(st, UiCmd::BusMute { bus: id, muted: !muted });
+                    let _ = app.emit("pedal", "refresh");
+                }
+            }
+            Action::PrevSong => {
+                let _ = app.emit("pedal", "prev-song");
+            }
+            Action::CancelJump => {
+                core.send(Command::CancelJump);
+                if let Some(st) = app.try_state::<AppState>() {
+                    if st.jump_to.lock().unwrap().take().is_some() {
+                        sync_next(app, &st);
+                    }
+                }
+                let _ = app.emit("pedal", "refresh");
+            }
+            Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_) | Action::PadLevel => {}
         },
     }
 }
@@ -1070,7 +1182,7 @@ fn sync_next(app: &AppHandle, state: &AppState) {
             let n = state.next.lock().unwrap();
             n.loaded.as_ref().map(|l| {
                 let entry = entry_item(l, if jump.is_some() { None } else { tr.enter_at });
-                let psig = format!("{}|{}|{:?}|{:?}|{entry}|{}|{:?}", cur_folder.display(), l.folder.display(), jump, tr.leave_after, settings.announce, settings.bus_list.iter().map(|b| b.muted).collect::<Vec<_>>());
+                let psig = format!("{}|{}|{:?}|{:?}|{entry}|{}|{:?}", cur_folder.display(), l.folder.display(), jump, tr.leave_after, settings.announce, (settings.bus_list.iter().map(|b| b.muted).collect::<Vec<_>>(), &settings.band));
                 let todo = n.prepared.as_ref().map(|p| &p.sig) != Some(&psig) && n.preparing.as_ref() != Some(&psig);
                 (psig, entry, todo)
             })
@@ -1116,6 +1228,8 @@ fn sync_next(app: &AppHandle, state: &AppState) {
         (Some(l), m) if m != songfile::TransitionMode::Stop => format!("{}|{}|{:?}|{}|{}|{:?}", cur_folder.display(), l.folder.display(), m, tr.bars, bar, tr.enter_at),
         _ => "none".to_string(),
     };
+    // Band tonight changes every song's mix, the queued one too.
+    let sig = if sig == "none" { sig } else { format!("{sig}|{:?}", settings.band) };
     if n.queued.as_deref() == Some(sig.as_str()) {
         return;
     }
@@ -1370,6 +1484,8 @@ struct StemView {
     muted: bool,
     /// Keeps its pitch on a key change (click, guide, effects, or set by hand).
     keeps_pitch: bool,
+    /// The live part it is (Band tonight), if any.
+    part: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -1466,7 +1582,7 @@ impl SongView {
                     secs: s.len() as f64 / l.sample_rate as f64,
                 })
                 .collect(),
-            stems: l.file.stems.iter().map(|s| StemView { name: s.name.clone(), route: s.route, gain: s.gain, muted: s.muted, keeps_pitch: l.file.keeps_pitch(&s.name) }).collect(),
+            stems: l.file.stems.iter().map(|s| StemView { name: s.name.clone(), route: s.route, gain: s.gain, muted: s.muted, keeps_pitch: l.file.keeps_pitch(&s.name), part: songfile::band_part(&s.name) }).collect(),
             blocks: l
                 .arr
                 .items
@@ -1534,6 +1650,10 @@ struct AppView {
     master_gain: f32,
     blend: Blend,
     announce: bool,
+    /// Band tonight: the parts played live.
+    band: Vec<String>,
+    /// Said once: the set was picked back up after a crash.
+    resumed: Option<String>,
     /// A song being cut to on the next bar (set list place), while one plays.
     jump_to: Option<usize>,
     bindings: Vec<Binding>,
@@ -1667,6 +1787,8 @@ fn view(state: &AppState) -> AppView {
         master_gain: f32::from_bits(state.core.master.load(Ordering::Relaxed)),
         blend: s.blend,
         announce: s.announce,
+        band: s.band.clone(),
+        resumed: state.resumed.lock().unwrap().take(),
         jump_to: *state.jump_to.lock().unwrap(),
         bindings,
         learning,
@@ -1722,6 +1844,11 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
     }
     let song_changed = take_segue(&state);
     let snapshot = state.core.snapshot();
+    {
+        let song = state.song.lock().unwrap().as_ref().map(|l| l.folder.clone());
+        let (item, playing) = snapshot.map_or((0, false), |s| (s.item, s.playing));
+        state.write_session(Session { song, item, playing, clean: false });
+    }
     // On the tick the next song takes over, the snapshot can still be the old song's:
     // the pad logic waits for the next tick.
     let pad_changed = !song_changed && auto_pad(&state, &snapshot);
@@ -1821,6 +1948,12 @@ fn choose_midi(app: AppHandle, state: State<'_, AppState>, name: Option<String>)
     if let Some(n) = &name {
         let port = start_midi(&state.core, &app, n)?;
         *state.midi.lock().unwrap() = Some(port);
+        // A MIDImix with nothing assigned yet gets its ready-made layout.
+        let fresh = is_midimix(n) && state.core.map.lock().unwrap().bindings.is_empty();
+        if fresh {
+            state.core.map.lock().unwrap().bindings = midi::midimix();
+            state.core.save_map();
+        }
     }
     state.settings.lock().unwrap().midi = name;
     state.save_settings();
@@ -1913,6 +2046,16 @@ async fn select_song(state: State<'_, AppState>, index: usize) -> Result<AppView
     install(&state.core, &settings, &loaded)?;
     if !SongFile::path(&loaded.folder).exists() {
         let _ = loaded.file.save(&loaded.folder);
+    }
+    // Back after a crash: the song comes back at the block it was playing (stopped).
+    let back = state.recovered.lock().unwrap().take();
+    match back {
+        Some((f, item)) if f == loaded.folder && item < loaded.arr.items.len() => {
+            state.core.send(Command::Locate(item));
+            let section = loaded.arr.items.get(item).and_then(|it| loaded.song.sections.get(it.section)).map(|s| s.name.clone()).unwrap_or_default();
+            *state.resumed.lock().unwrap() = Some(format!("The app closed while {} was playing. It's back at {section}: press play to carry on.", loaded.file.name));
+        }
+        _ => {}
     }
     *state.song.lock().unwrap() = Some(loaded);
     state.settings.lock().unwrap().current = Some(index);
@@ -2855,6 +2998,77 @@ async fn analyze_song(app: AppHandle, state: State<'_, AppState>) -> Result<Anal
     Ok(AnalysisResult { view, heard: analysis.heard, found_tempo, sections })
 }
 
+/// Check the set: the rig, the routing and every song, before the service.
+#[tauri::command]
+async fn check_set(state: State<'_, AppState>) -> Result<Vec<preflight::Check>, String> {
+    let s = state.settings.lock().unwrap().clone();
+    let open = state.core.output.lock().unwrap().as_ref().map(|o| (o.info.name.clone(), o.info.channels));
+    let midi_connected = state.midi.lock().unwrap().is_some() && !state.core.midi_lost.load(Ordering::Relaxed);
+    let master = f32::from_bits(state.core.master.load(Ordering::Relaxed));
+    let setlist = s.setlist.clone();
+    let checks = tauri::async_runtime::spawn_blocking(move || {
+        let ch = open.as_ref().map_or(2, |o| o.1);
+        let songs: Vec<_> = setlist
+            .iter()
+            .map(|p| {
+                let f = if p.is_dir() { SongFile::scan(p, ch) } else { Err("the song's folder is missing (moved or renamed?).".to_string()) };
+                (p.clone(), f)
+            })
+            .collect();
+        let found = s.pads_folder.as_deref().map(pads::scan).unwrap_or_default();
+        let rig = preflight::Rig {
+            want_output: s.output.as_deref(),
+            open_output: open.as_ref().map(|(n, c)| (n.as_str(), *c)),
+            click: s.bus_route("cues"),
+            guide: s.bus_route("guide"),
+            foh: s.bus_route("drums"),
+            builtin_click: s.click_route.unwrap_or_else(|| songfile::default_route("click", ch)),
+            want_midi: s.midi.as_deref(),
+            midi_connected,
+            on_battery: preflight::on_battery(),
+            master_gain: master,
+            pads_folder: s.pads_folder.as_deref(),
+            pad_keys: std::array::from_fn(|i| found[i].is_some()),
+            band: &s.band,
+        };
+        preflight::run(&rig, &songs)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(checks)
+}
+
+/// Band tonight: which parts the band plays live (their tracks go quiet in every song).
+#[tauri::command]
+fn set_band(app: AppHandle, state: State<'_, AppState>, parts: Vec<String>) -> Result<AppView, String> {
+    {
+        let mut s = state.settings.lock().unwrap();
+        s.band = songfile::BAND_PARTS.iter().filter(|p| parts.iter().any(|x| x == *p)).map(|p| p.to_string()).collect();
+        let g = state.song.lock().unwrap();
+        if let Some(l) = g.as_ref() {
+            push_mix(&state.core, &s, &l.file);
+        }
+    }
+    state.save_settings();
+    sync_next(&app, &state);
+    Ok(view(&state))
+}
+
+/// The controller is an Akai MIDImix (by its port name).
+fn is_midimix(name: &str) -> bool {
+    let n: String = name.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    n.contains("midimix")
+}
+
+/// Replaces every assignment with the MIDImix's ready-made layout.
+#[tauri::command]
+fn midi_preset(state: State<'_, AppState>) -> AppView {
+    state.core.map.lock().unwrap().bindings = midi::midimix();
+    state.core.pickup.lock().unwrap().clear();
+    state.core.save_map();
+    view(&state)
+}
+
 #[tauri::command]
 fn midi_learn(state: State<'_, AppState>, tap: Action, hold: Option<Action>) {
     state.core.map.lock().unwrap().learn(tap, hold);
@@ -2926,6 +3140,7 @@ async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<()
     .await
     .map_err(|e| format!("The update didn't install: {e}"))?;
     *state.core.output.lock().unwrap() = None; // close the audio device cleanly
+    mark_clean(&app);
     app.restart();
 }
 
@@ -2962,6 +3177,7 @@ fn main() {
                 write_json(&dir.join("settings.json"), &settings);
             }
             let map: MidiMap = read_json(&dir.join("midi.json"));
+            let recovered = read_json::<Session>(&dir.join("session.json")).recovered();
             let core = Arc::new(Core {
                 output: Mutex::new(None),
                 status: Arc::new(Mutex::new(None)),
@@ -2973,6 +3189,7 @@ fn main() {
                 audio_lost: AtomicBool::new(false),
                 midi_lost: AtomicBool::new(false),
                 map: Mutex::new(map),
+                pickup: Default::default(),
                 config_dir: dir,
                 data_dir,
                 start: Instant::now(),
@@ -3017,6 +3234,9 @@ fn main() {
             master_seen: std::sync::atomic::AtomicU32::new(0),
                 pad_choice: Mutex::new(None),
                 resume: Mutex::new(None),
+                session: Mutex::new(Session::default()),
+                recovered: Mutex::new(recovered),
+                resumed: Mutex::new(None),
             });
             {
                 let h = app.handle().clone();
@@ -3056,17 +3276,51 @@ fn main() {
             create_click_song,
             install_update,
             app_version,
+            midi_preset,
+            set_band,
+            check_set,
             midi_learn,
             midi_cancel,
             midi_unbind
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Playback Rig");
+        .build(tauri::generate_context!())
+        .expect("error while running Playback Rig")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                mark_clean(app);
+            }
+        });
+}
+
+/// The app is quitting normally: nothing to pick back up next time.
+fn mark_clean(app: &AppHandle) {
+    if let Some(st) = app.try_state::<AppState>() {
+        let mut s = st.session.lock().unwrap().clone();
+        s.clean = true;
+        s.playing = false;
+        write_json(&st.core.config_dir.join("session.json"), &s);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_crash_mid_song_comes_back_but_a_normal_quit_does_not() {
+        let mid = Session { song: Some("/set/Worthy".into()), item: 4, playing: true, clean: false };
+        assert_eq!(mid.recovered(), Some(("/set/Worthy".into(), 4)));
+        assert_eq!(Session { clean: true, ..mid.clone() }.recovered(), None, "quit normally");
+        assert_eq!(Session { playing: false, ..mid.clone() }.recovered(), None, "was stopped: the song comes back on its own");
+        assert_eq!(Session::default().recovered(), None);
+    }
+
+    #[test]
+    fn the_midimix_is_recognised_by_its_port_name() {
+        assert!(is_midimix("MIDI Mix"));
+        assert!(is_midimix("Akai MIDImix"));
+        assert!(!is_midimix("APC mini"));
+    }
 
     fn state() -> AppState {
         let dir = std::env::temp_dir().join(format!("rig-state-{}", std::process::id()));
@@ -3082,6 +3336,7 @@ mod tests {
                 audio_lost: AtomicBool::new(false),
                 midi_lost: AtomicBool::new(false),
                 map: Mutex::new(MidiMap::default()),
+                pickup: Default::default(),
                 config_dir: dir.clone(),
                 data_dir: dir,
                 start: Instant::now(),
@@ -3101,6 +3356,9 @@ mod tests {
             master_seen: std::sync::atomic::AtomicU32::new(0),
             pad_choice: Mutex::new(None),
             resume: Mutex::new(None),
+            session: Mutex::new(Session::default()),
+            recovered: Mutex::new(None),
+            resumed: Mutex::new(None),
         }
     }
 
@@ -3253,6 +3511,14 @@ mod tests {
         own.bus_mix.insert("guitars".into(), songfile::BusLevel { gain: 0.8, muted: false });
         assert_eq!(effective(&st, &own, eg), (0.8, false, Route::Pair(4)), "the song's mix wins, the output stays the bus's");
         assert_eq!(effective(&st, f, eg).0, 0.5, "other songs keep the default mix");
+        // Band tonight: drums and bass played live go quiet in every song, own mix or not
+        st.band = vec!["drums".into(), "bass".into()];
+        assert!(effective(&st, f, &f.stems[2]).1, "drums quiet");
+        assert!(effective(&st, &own, &f.stems[3]).1, "bass quiet");
+        assert!(!effective(&st, f, &f.stems[0]).1, "click untouched");
+        assert_eq!(effective(&st, f, &f.stems[3]).0, 1.0, "the level is kept for when the part comes back");
+        st.band.clear();
+        assert!(!effective(&st, f, &f.stems[2]).1);
 
         // Routing is by bus only, one master setting for every song, remembered per interface.
         let mut st = Settings::default();

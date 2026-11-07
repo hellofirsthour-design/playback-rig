@@ -99,6 +99,8 @@
     <div class="lbl">Set</div>
     <ol id="lvSet"></ol>
     <div class="nextsong screen" id="lvNextSong" hidden></div>
+    <div class="band" id="lvBand"></div>
+    <button class="btn checkset" id="checkSetBtn" title="Checks the set, outputs and controller before the service">Check the set</button>
   </aside>
 </section>
 
@@ -120,6 +122,12 @@
 </aside>
 
 <!-- Song -->
+<aside class="drawer right" id="checkDrawer" hidden>
+  <div class="dhead"><h2>Check the set</h2><button class="ib" data-close>Close</button></div>
+  <p class="hint">Before the service: the interface, where the click goes, the controller and every song. It changes nothing.</p>
+  <div class="checks" id="checkList"></div>
+  <button class="btn" id="checkAgain">Check again</button>
+</aside>
 <aside class="drawer right" id="songDrawer" hidden>
   <div class="dhead"><h2>Song</h2><button class="ib" data-close>Close</button></div>
   <div id="songEmpty" class="hint">Load a song first.</div>
@@ -233,6 +241,10 @@
     <h3>MIDI controller</h3>
     <div class="form one"><label>MIDI input<select id="midiSel"></select></label></div>
     <p class="hint">Press <b>Learn</b>, then press the button (or move the fader) on your controller. Faders are the master and the buses, the way you would map them in Ableton; tracks follow their bus.</p>
+    <div class="mixmap" id="midimixBtn" hidden>
+      <button class="btn" id="midimixUse">Use the MIDImix layout</button>
+      <p class="hint"><b>Faders 1-8:</b> Click, Guide, Drums, Bass, Guitars, Keys, Other, Vocals · <b>Master fader:</b> master · <b>Mute 1-8:</b> mute that bus · <b>Hold SOLO + Mute 1-8:</b> Song 1-8 · <b>Rec arm 1-8:</b> Play/stop, Next block, Repeat, Vamp, Cancel jump, Fade out now, Pad on/off, Free click · <b>Bank ◀ ▶:</b> previous / next song · <b>Bottom knobs 1-2:</b> built-in click level, pad level. A fader only takes over once you move it to where the screen's fader is, so nothing jumps.</p>
+    </div>
     <div class="learn" id="learn"></div>
     <h3>Assigned</h3>
     <div class="bindings" id="bindings"></div>

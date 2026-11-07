@@ -688,3 +688,26 @@ body.live-mode .bar .lcd { display: none }
 .nextsong.cutting { box-shadow: inset 0 0 0 1px var(--cue), inset 0 2px 14px rgba(0,0,0,.7) }
 .nextsong.cutting .lbl { color: var(--cue) }
 .blendrow { display: flex; align-items: center; gap: 10px; margin-top: 12px }
+
+/* Band tonight + Check the set, under the set list */
+.band { margin-top: 16px; display: grid; gap: 7px }
+.bchips { display: flex; flex-wrap: wrap; gap: 5px }
+.bchip { font: 600 12px var(--f-body); padding: 5px 9px; border-radius: 14px; border: 1px solid var(--line-2); background: var(--bg); color: var(--muted); cursor: pointer }
+.bchip.on { background: color-mix(in srgb, var(--go) 18%, var(--bg)); border-color: var(--go); color: var(--fg) }
+.bnote { font-size: 11px; color: var(--muted); line-height: 1.35 }
+.checkset { margin-top: 12px; width: 100% }
+.mixmap { display: grid; gap: 6px; margin-bottom: 10px }
+.mixmap .hint b { color: var(--fg) }
+.lane.live .ln b { color: var(--dim) }
+.livetag { font: 700 9px var(--f-mono); letter-spacing: .08em; color: var(--go); border: 1px solid var(--go); border-radius: 4px; padding: 1px 4px; margin-left: 6px }
+
+/* Check the set */
+.checks { display: grid; gap: 5px }
+.csum { font: 700 15px var(--f-body); padding: 10px 12px; border-radius: 8px; margin-bottom: 4px }
+.csum.ok { background: color-mix(in srgb, var(--play) 16%, var(--bg)); color: var(--play) }
+.csum.warn { background: color-mix(in srgb, var(--cue) 14%, var(--bg)); color: var(--cue) }
+.csum.bad { background: color-mix(in srgb, var(--danger) 16%, var(--bg)); color: var(--danger) }
+.chk { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: start; font-size: 12.5px; line-height: 1.4; padding: 7px 9px; background: var(--bg); border-radius: 7px }
+.chk i { font-style: normal; font-weight: 800; text-align: center }
+.chk.ok i { color: var(--play) } .chk.warn i { color: var(--cue) } .chk.bad i { color: var(--danger) }
+.chk.ok span { color: var(--muted) }

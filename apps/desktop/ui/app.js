@@ -148,6 +148,7 @@
   /* ---------- state sync ---------- */
   async function refresh(v) {
     V = v || await invoke('app_state');
+    if (V.resumed) toast(V.resumed, 12000);
     const s = V.song;
     const key = s ? s.folder : null;
     if (key !== songKey) {
@@ -314,6 +315,7 @@
       li.onclick = () => { if (playing()) { cutTo(i); return; } selectSong(i); };
       set.append(li);
     });
+    renderBand();
     // Next song: what's coming, before you get there.
     const cutting = V && V.jump_to != null ? V.setlist[V.jump_to] : null;
     const nc = $('#lvNextSong'), nx = cutting || (V && V.current != null ? V.setlist[V.current + 1] : null);
@@ -729,6 +731,25 @@
     opts.forEach(([v, t]) => { const b = el('button', v === cur ? 'on' : null, t); b.onclick = () => { if (v !== cur) onPick(v); }; g.append(b); });
     return g;
   }
+  // Band tonight: the parts played live. Their tracks go quiet in every song (each song's
+  // own mix is left alone), so the band and the tracks never double up.
+  const PARTS = [['drums', 'Drums'], ['bass', 'Bass'], ['piano', 'Piano'], ['organ', 'Organ'], ['electric', 'Electric'], ['acoustic', 'Acoustic']];
+  function renderBand() {
+    const box = $('#lvBand'); if (!box || !V) return; box.innerHTML = '';
+    const band = V.band || [];
+    box.append(el('div', 'lbl', 'Live tonight'));
+    const chips = el('div', 'bchips'); chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', 'Parts played live tonight');
+    PARTS.forEach(([id, name]) => {
+      const on = band.includes(id);
+      const b = el('button', 'bchip' + (on ? ' on' : ''), name); b.setAttribute('aria-pressed', on);
+      b.title = on ? `${name} is played live: those tracks are quiet in every song` : `Tap if ${name.toLowerCase()} is played live tonight`;
+      b.onclick = () => invoke('set_band', { parts: on ? band.filter(x => x !== id) : [...band, id] }).then(refresh).catch(err);
+      chips.append(b);
+    });
+    box.append(chips);
+    const quiet = V.song ? V.song.stems.filter(t => t.part && band.includes(t.part)).map(t => t.name) : [];
+    if (band.length) box.append(el('div', 'bnote', quiet.length ? `Quiet in this song: ${quiet.join(', ')}` : 'Nothing to quiet in this song'));
+  }
   // Cut to another song while one plays: it comes in on the next bar, blended (Setup → Blend).
   function cutTo(i) {
     if (!V || !V.setlist[i] || i === V.current && V.jump_to == null) return;
@@ -992,6 +1013,7 @@
       const r = el('div', 'lane'); r.style.setProperty('--c', stemColor(st.name, i));
       const ln = el('div', 'ln'); const tn = el('b', 'grab', st.name); tn.title = 'Drag onto a bus header to move this track to that bus'; ln.append(tn);
       tn.onpointerdown = e => startTrackDrag(e, st.name, r);
+      if (st.part && (V.band || []).includes(st.part)) { r.classList.add('live'); const lt = el('span', 'livetag', 'LIVE'); lt.title = 'Played live tonight (Live page → Live tonight): this track is quiet'; ln.append(lt); }
       const f = el('input'); f.type = 'range'; f.min = 0; f.max = 1.5; f.step = 0.01; f.value = st.gain; f.id = 'fader-' + i; f.setAttribute('aria-label', `${st.name} level`);
       f.oninput = () => { st.gain = +f.value; send({ type: 'StemGain', stem: i, gain: st.gain }); };
       ln.append(f);
@@ -1550,19 +1572,35 @@
     { label: 'Play / stop', tap: 'PlayStop' }, { label: 'Next block', tap: 'Next' }, { label: 'Repeat block', tap: 'Repeat' },
     { label: 'Vamp', tap: 'ToggleVamp' }, { label: 'Skip ahead', tap: 'SkipAhead', desc: 'Skips the next block too' }, { label: 'Next song', tap: 'NextSong' },
     { label: 'Fade out', tap: 'FadeOut', desc: 'Fades the song out over 2 bars and stops' }, { label: 'Panic stop', tap: 'Panic', desc: 'Stops everything at once' },
-    { label: 'Pad only', tap: 'PadOnly', desc: 'Stops the song, keeps the pad' }, { label: 'Free click', tap: 'FreeClick', desc: 'Starts or stops the click with no song' },
+    { label: 'Cancel jump', tap: 'CancelJump', desc: 'Takes back a queued jump or song cut' }, { label: 'Previous song', tap: 'PrevSong' },
+    { label: 'Pad on / off', tap: 'PadOnly', desc: "In this song's key" }, { label: 'Free click', tap: 'FreeClick', desc: 'Starts or stops the click with no song' },
     { label: 'Live / Edit page', tap: 'ToggleView' },
     { label: 'Master fader', tap: 'MasterLevel', desc: 'Everything the app sends out', fader: true },
+    { label: 'Built-in click level', tap: 'ClickLevel', fader: true }, { label: 'Pad level', tap: 'PadLevel', fader: true },
   ];
   // Song buttons: one per place in the set (Song 1 = the first song, whatever it is that day).
   const SONG_BUTTONS = 10;
   function actionLabel(a) {
     if (a && a.Song !== undefined) return `Song ${a.Song + 1}`;
     if (a && a.BusLevel !== undefined) { const b = (V.all_buses || [])[a.BusLevel]; return `${b ? b.name : 'Bus ' + (a.BusLevel + 1)} fader`; }
+    if (a && a.BusMute !== undefined) { const b = (V.all_buses || [])[a.BusMute]; return `${b ? b.name : 'Bus ' + (a.BusMute + 1)} mute`; }
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
-    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad only', ClickLevel: 'Click fader', MasterLevel: 'Master fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
+    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad on / off', ClickLevel: 'Built-in click level', PadLevel: 'Pad level', CancelJump: 'Cancel jump', PrevSong: 'Previous song', MasterLevel: 'Master fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
   }
-  const controlLabel = c => (c.Note ? `Note ${c.Note.key} · ch ${c.Note.ch + 1}` : c.Cc ? `CC ${c.Cc.num} · ch ${c.Cc.ch + 1}` : '?');
+  // On a MIDImix, controls are named as printed on it (factory settings, channel 1).
+  const MIX_FADERS = [19, 23, 27, 31, 49, 53, 57, 61], MIX_KNOBS = [16, 20, 24, 28, 46, 50, 54, 58];
+  function mixName(c) {
+    if (c.Note && c.Note.ch === 0) { const k = c.Note.key;
+      if (k >= 1 && k <= 24) return `${['Mute', 'Solo + mute', 'Rec arm'][(k - 1) % 3]} ${Math.floor((k - 1) / 3) + 1}`;
+      return { 25: 'Bank left', 26: 'Bank right', 27: 'Solo' }[k]; }
+    if (c.Cc && c.Cc.ch === 0) { const n = c.Cc.num;
+      if (n === 62) return 'Master fader';
+      const f = MIX_FADERS.indexOf(n); if (f >= 0) return `Fader ${f + 1}`;
+      const k = MIX_KNOBS.findIndex(x => n >= x && n <= x + 2); if (k >= 0) return `Knob ${k + 1}, row ${n - MIX_KNOBS[k] + 1}`; }
+    return null;
+  }
+  const isMidimix = () => !!V && !!V.midi && /midi ?mix/i.test(V.midi);
+  const controlLabel = c => (isMidimix() && mixName(c)) || (c.Note ? `Note ${c.Note.key} · ch ${c.Note.ch + 1}` : c.Cc ? `CC ${c.Cc.num} · ch ${c.Cc.ch + 1}` : '?');
   function renderSetup() {
     const os = $('#outSel'); os.innerHTML = '';
     V.outputs.forEach(o => os.append(new Option(`${o.name} (${o.channels} outputs)${o.is_default ? ' · default' : ''}`, o.name)));
@@ -1587,7 +1625,7 @@
     const ms = $('#midiSel'); ms.innerHTML = ''; ms.append(new Option('None', '')); V.midi_inputs.forEach(m => ms.append(new Option(m, m))); ms.value = V.midi || '';
     // Buttons, then the faders: master and each bus (tracks follow their bus).
     const songs = Array.from({ length: SONG_BUTTONS }, (_, i) => ({ label: `Song ${i + 1}`, tap: { Song: i }, desc: V.setlist[i] ? `Now: ${V.setlist[i].name}` : 'Goes to this place in the set', song: true }));
-    const rows = [...LEARN.filter(r => !r.fader), ...songs, ...LEARN.filter(r => r.fader), ...(V.all_buses || []).map((b, i) => ({ label: `${b.name} fader`, tap: { BusLevel: i }, fader: true }))];
+    const rows = [...LEARN.filter(r => !r.fader), ...songs, ...LEARN.filter(r => r.fader), ...(V.all_buses || []).map((b, i) => ({ label: `${b.name} fader`, tap: { BusLevel: i }, fader: true })), ...(V.all_buses || []).map((b, i) => ({ label: `${b.name} mute`, tap: { BusMute: i }, song: true }))];
     const box = $('#learn'); box.innerHTML = '';
     rows.forEach((r, i) => {
       const d = el('div', 'lrow' + ((r.fader && !(rows[i - 1] || {}).fader) || (r.song && !(rows[i - 1] || {}).song) ? ' first-fader' : '')); const t = el('div'); t.append(el('b', null, r.label)); if (r.desc) t.append(el('small', null, r.desc));
@@ -1599,6 +1637,7 @@
       };
       d.append(t, b); box.append(d);
     });
+    $('#midimixBtn').hidden = !isMidimix();
     const bl = $('#bindings'); bl.innerHTML = '';
     if (!V.bindings.length) bl.append(el('p', 'hint', 'Nothing assigned yet.'));
     V.bindings.forEach((bd, i) => {
@@ -1622,14 +1661,18 @@
   $('#announceChk').onchange = e => { V.announce = e.target.checked; send({ type: 'Announce', on: V.announce }); };
   $('#clickRoute').onchange = e => { V.click_route = keyRoute(e.target.value); send({ type: 'ClickRoute', route: V.click_route }); };
   $('#clickGain').oninput = e => { V.click_gain = +e.target.value; send({ type: 'ClickGain', gain: V.click_gain }); };
-  $('#midiSel').onchange = e => invoke('choose_midi', { name: e.target.value || null }).then(refresh).catch(err);
+  $('#midiSel').onchange = e => invoke('choose_midi', { name: e.target.value || null }).then(v => { const was = V.bindings.length; refresh(v); if (!was && v.bindings.length && isMidimix()) toast('MIDImix ready: its layout is set up. See Setup → MIDI.'); }).catch(err);
+  $('#midimixUse').onclick = () => {
+    if (V.bindings.length && !confirm('Replace every assignment with the MIDImix layout?')) return;
+    invoke('midi_preset').then(v => { refresh(v); toast('MIDImix layout set.'); }).catch(err);
+  };
 
   /* ---------- drawers ---------- */
   // Side panels open below the top bar, so the transport and panel buttons stay usable.
   const placeDrawers = () => document.documentElement.style.setProperty('--bar-b', Math.round(document.querySelector('.bar').getBoundingClientRect().bottom) + 'px');
   window.addEventListener('resize', placeDrawers); placeDrawers();
-  const drawers = { setBtn: '#setDrawer', songBtn: '#songDrawer', setupBtn: '#setupDrawer' };
-  function openDrawer(id) { placeDrawers(); Object.values(drawers).forEach(d => { $(d).hidden = d !== id || !$(d).hidden; }); if (id === '#setupDrawer') invoke('app_state').then(refresh); }
+  const drawers = { setBtn: '#setDrawer', songBtn: '#songDrawer', setupBtn: '#setupDrawer', checkSetBtn: '#checkDrawer' };
+  function openDrawer(id) { placeDrawers(); Object.values(drawers).forEach(d => { $(d).hidden = d !== id || !$(d).hidden; }); if (id === '#setupDrawer') invoke('app_state').then(refresh); if (id === '#checkDrawer' && !$(id).hidden) runCheck(); }
   Object.entries(drawers).forEach(([b, d]) => { $('#' + b).onclick = () => openDrawer(d); });
   document.querySelectorAll('[data-close]').forEach(b => { b.onclick = () => { b.closest('.drawer').hidden = true; }; });
   const anyDrawer = () => Object.values(drawers).some(d => !$(d).hidden);
@@ -1712,10 +1755,11 @@
   });
 
   /* ---------- events from Rust ---------- */
-  T.event.listen('stem-level', e => { const [i, g] = e.payload; if (!V || !V.song || !V.song.stems[i]) return; V.song.stems[i].gain = g; const f = $('#fader-' + i); if (f) f.value = g; });
-  T.event.listen('click-level', e => { if (V) V.click_gain = e.payload; });
-  // A bus fader moved on the controller: the Live mixer follows (redrawn once per frame at most).
   let busRedraw = 0;
+  T.event.listen('stem-level', e => { const [i, g] = e.payload; if (!V || !V.song || !V.song.stems[i]) return; V.song.stems[i].gain = g; const f = $('#fader-' + i); if (f) f.value = g; });
+  T.event.listen('click-level', e => { if (V) { V.click_gain = e.payload; if (page === 'live' && (liveTab === 'mix' || liveTab === 'click') && !busRedraw) busRedraw = requestAnimationFrame(() => { busRedraw = 0; renderLiveTab(); }); } });
+  T.event.listen('pad-level', e => { if (V) { V.pads.level = e.payload; if (page === 'live' && (liveTab === 'mix' || liveTab === 'pads') && !busRedraw) busRedraw = requestAnimationFrame(() => { busRedraw = 0; renderLiveTab(); }); } });
+  // A bus fader moved on the controller: the Live mixer follows (redrawn once per frame at most).
   T.event.listen('bus-level', e => {
     const [id, g] = e.payload; if (!V) return;
     [V.buses || [], V.all_buses || []].forEach(l => l.forEach(b => { if (b.id === id) b.gain = g; }));
@@ -1759,10 +1803,26 @@
       if (playing()) { cutTo(i); return; }
       if (i !== V.current) selectSong(i);
     }
+    else if (e.payload === 'prev-song') { if (playing()) { toast('Stop the song to go back.'); return; } if (V && V.current > 0) selectSong(V.current - 1); }
     else if (e.payload === 'pad-only') togglePad();
     else if (e.payload === 'toggle-view') setPage(page === 'live' ? 'edit' : 'live');
     else if (e.payload === 'refresh') refresh();
   });
+
+  /* ---------- check the set ---------- */
+  async function runCheck() {
+    const box = $('#checkList'); box.innerHTML = ''; box.append(el('p', 'hint', 'Checking…'));
+    try {
+      const cs = await invoke('check_set');
+      box.innerHTML = '';
+      const bad = cs.filter(c => c.level === 'Bad').length, warn = cs.filter(c => c.level === 'Warn').length;
+      box.append(el('div', 'csum ' + (bad ? 'bad' : warn ? 'warn' : 'ok'), bad ? `${bad} to fix before the service` : warn ? `Ready, ${warn} to look at` : 'Ready for Sunday'));
+      ['Bad', 'Warn', 'Ok'].forEach(lv => cs.filter(c => c.level === lv).forEach(c => {
+        const r = el('div', 'chk ' + lv.toLowerCase()); r.append(el('i', null, { Bad: '✕', Warn: '!', Ok: '✓' }[lv]), el('span', null, c.text)); box.append(r);
+      }));
+    } catch (e) { box.innerHTML = ''; box.append(el('p', 'hint', String(e))); }
+  }
+  $('#checkAgain').onclick = runCheck;
 
   /* ---------- updates ---------- */
   let update = null, updating = false;

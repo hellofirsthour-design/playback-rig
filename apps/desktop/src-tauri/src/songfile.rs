@@ -242,6 +242,28 @@ pub fn stem_category(name: &str) -> u8 {
     }
 }
 
+/// Parts a band can play live ("Band tonight"): the tracks they replace go quiet.
+pub const BAND_PARTS: [&str; 6] = ["drums", "bass", "piano", "organ", "electric", "acoustic"];
+
+/// Which live part a track is, if any. Only the parts a player covers: the drum kit (not
+/// percussion or loops), bass guitar (not synth bass), piano (not synths or pads), organ,
+/// electric and acoustic guitar.
+pub fn band_part(name: &str) -> Option<&'static str> {
+    let n = name.to_ascii_lowercase();
+    let words: Vec<&str> = n.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let has = |keys: &[&str]| keys.iter().any(|k| n.contains(k));
+    let word = |keys: &[&str]| words.iter().any(|w| keys.contains(w));
+    match stem_category(name) {
+        1 => Some("drums"),
+        3 if !has(&["synth", "sub", "808"]) => Some("bass"),
+        4 if has(&["acoustic"]) || word(&["ag", "ag1", "ag2", "ag3"]) => Some("acoustic"),
+        4 => Some("electric"),
+        5 if has(&["piano", "rhodes", "wurli"]) || word(&["ep"]) => Some("piano"),
+        5 if has(&["organ"]) || word(&["b3", "hammond"]) => Some("organ"),
+        _ => None,
+    }
+}
+
 /// Track-list order: category, then name with numbers in number order (EG 2 before EG 10).
 pub fn stem_sort_key(name: &str) -> (u8, Vec<(String, u64)>) {
     let mut parts = vec![];
@@ -784,6 +806,23 @@ impl SongFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_parts_cover_only_what_a_player_plays() {
+        let part = |n| band_part(n);
+        assert_eq!(part("Drums (Live)"), Some("drums"));
+        assert_eq!(part("Perc (Live)"), None);
+        assert_eq!(part("Loop"), None);
+        assert_eq!(part("Bass"), Some("bass"));
+        assert_eq!(part("Synth Bass"), None);
+        assert_eq!(part("Piano"), Some("piano"));
+        assert_eq!(part("Keys 1"), None);
+        assert_eq!(part("Organ"), Some("organ"));
+        assert_eq!(part("EG 2"), Some("electric"));
+        assert_eq!(part("AG"), Some("acoustic"));
+        assert_eq!(part("Click Track"), None);
+        assert_eq!(part("BGVS"), None);
+    }
 
     #[test]
     fn a_six_eight_set_counts_eighths_and_shows_the_dotted_quarter() {

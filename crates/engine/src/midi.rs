@@ -58,11 +58,19 @@ pub enum Action {
     BusLevel(usize),
     /// Go to this song in the set (0 = the first).
     Song(usize),
+    /// Mute or unmute a bus (the bus's place in the bus list).
+    BusMute(usize),
+    /// The song before this one in the set (when stopped).
+    PrevSong,
+    /// Cancel a queued jump (or a cut to another song) before it happens.
+    CancelJump,
+    /// Continuous: a fader or knob sets the pad level.
+    PadLevel,
 }
 
 impl Action {
     pub fn is_level(&self) -> bool {
-        matches!(self, Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_))
+        matches!(self, Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_) | Action::PadLevel)
     }
 }
 
@@ -97,6 +105,62 @@ impl Default for MidiMap {
     fn default() -> Self {
         MidiMap { bindings: vec![], hold_ms: 450, learning: None, held: vec![] }
     }
+}
+
+/// The fader law shared with the screen (bus and master faders): unity at three-quarters
+/// of the travel, +10 dB at the top, -60 dB just above the bottom, silence at the bottom.
+pub fn db_gain(pos: f32) -> f32 {
+    let p = pos.clamp(0.0, 1.0);
+    if p <= 0.001 {
+        return 0.0;
+    }
+    let db = if p >= 0.75 { (p - 0.75) * 40.0 } else { -60.0 * (1.0 - p / 0.75).powi(2) };
+    10f32.powf(db / 20.0)
+}
+
+/// Where a gain sits on that fader (0..1).
+pub fn db_pos(gain: f32) -> f32 {
+    if gain <= 0.0 {
+        return 0.0;
+    }
+    let db = (20.0 * gain.log10()).clamp(-60.0, 10.0);
+    if db >= 0.0 { 0.75 + db / 40.0 } else { 0.75 * (1.0 - (-db / 60.0).sqrt()) }
+}
+
+/// Soft takeover: a controller fader only takes over once it reaches the level on
+/// screen (or passes it), so a fader left somewhere else never makes the level jump.
+/// `cur` is the on-screen position, `last` the controller's previous position.
+pub fn picks_up(cur: f32, last: Option<f32>, new: f32) -> bool {
+    if (new - cur).abs() <= 0.04 {
+        return true;
+    }
+    last.map_or(false, |l| (l - cur).signum() != (new - cur).signum())
+}
+
+/// The Akai MIDImix's factory layout, ready to play with no Learn:
+/// faders 1-8 = the first 8 buses, master fader = master, mute buttons = bus mutes,
+/// SOLO + mute button = Song 1-8, rec arm buttons = the transport row, bank left/right =
+/// previous/next song, the two lowest knobs on strips 1-2 = built-in click and pad level.
+pub fn midimix() -> Vec<Binding> {
+    const FADERS: [u8; 8] = [19, 23, 27, 31, 49, 53, 57, 61];
+    const LOW_KNOBS: [u8; 8] = [18, 22, 26, 30, 48, 52, 56, 60];
+    const ROW: [Action; 8] = [Action::PlayStop, Action::Next, Action::Repeat, Action::ToggleVamp, Action::CancelJump, Action::FadeOut, Action::PadOnly, Action::FreeClick];
+    let note = |key: u8| Control::Note { ch: 0, key };
+    let cc = |num: u8| Control::Cc { ch: 0, num };
+    let bind = |control, tap| Binding { control, tap, hold: None };
+    let mut v = vec![];
+    for i in 0..8u8 {
+        v.push(bind(cc(FADERS[i as usize]), Action::BusLevel(i as usize)));
+        v.push(bind(note(1 + 3 * i), Action::BusMute(i as usize)));
+        v.push(bind(note(2 + 3 * i), Action::Song(i as usize)));
+        v.push(bind(note(3 + 3 * i), ROW[i as usize]));
+    }
+    v.push(bind(cc(62), Action::MasterLevel));
+    v.push(bind(cc(LOW_KNOBS[0]), Action::ClickLevel));
+    v.push(bind(cc(LOW_KNOBS[1]), Action::PadLevel));
+    v.push(bind(note(25), Action::PrevSong));
+    v.push(bind(note(26), Action::NextSong));
+    v
 }
 
 impl MidiMap {
@@ -183,6 +247,40 @@ impl MidiMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_midimix_layout_plays_straight_away() {
+        let mut m = MidiMap { bindings: midimix(), ..Default::default() };
+        let mut seen = std::collections::HashSet::new();
+        assert!(m.bindings.iter().all(|b| seen.insert(b.control)), "one action per control");
+        // Rec arm 1 (note 3) is play/stop, rec arm 6 (note 18) is fade out now.
+        assert_eq!(m.handle(&[0x90, 3, 127], 0), Some(Event::Fire(Action::PlayStop)));
+        assert_eq!(m.handle(&[0x90, 18, 127], 10), Some(Event::Fire(Action::FadeOut)));
+        assert_eq!(m.handle(&[0x90, 1, 127], 20), Some(Event::Fire(Action::BusMute(0))));
+        assert_eq!(m.handle(&[0x90, 26, 127], 30), Some(Event::Fire(Action::NextSong)));
+        assert_eq!(m.handle(&[0xb0, 62, 127], 40), Some(Event::Level(Action::MasterLevel, 1.0)));
+        assert_eq!(m.handle(&[0xb0, 23, 0], 50), Some(Event::Level(Action::BusLevel(1), 0.0)));
+    }
+
+    #[test]
+    fn the_db_fader_matches_the_screen() {
+        assert!((db_gain(0.75) - 1.0).abs() < 1e-6);
+        assert!((db_gain(1.0) - 3.1623).abs() < 1e-3);
+        assert_eq!(db_gain(0.0), 0.0);
+        for g in [0.01f32, 0.1, 0.5, 1.0, 2.0, 3.0] {
+            assert!((db_gain(db_pos(g)) - g).abs() / g < 1e-3, "{g}");
+        }
+        // MIDI 95 of 127 is close to unity.
+        assert!((20.0 * db_gain(95.0 / 127.0).log10()).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_fader_left_elsewhere_takes_over_only_when_it_reaches_the_level() {
+        assert!(!picks_up(0.75, None, 0.2));
+        assert!(!picks_up(0.75, Some(0.2), 0.4), "still below");
+        assert!(picks_up(0.75, Some(0.7), 0.8), "passed it");
+        assert!(picks_up(0.75, None, 0.76), "close enough");
+    }
 
     const PEDAL: [u8; 3] = [0x90, 60, 100];
     const PEDAL_UP: [u8; 3] = [0x80, 60, 0];
