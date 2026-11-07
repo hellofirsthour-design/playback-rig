@@ -10,6 +10,8 @@ pub struct Metronome {
     pub beats_per_bar: u32,
     pub gain: f32,
     pub route: Route,
+    /// Clicks per beat (1 quarters, 2 eighths, 3 triplets, 4 sixteenths).
+    pub div: u32,
     sr: f64,
     /// Frames since the current beat started.
     pos: f64,
@@ -23,7 +25,7 @@ pub struct Metronome {
 
 impl Metronome {
     pub fn new(sample_rate: u32) -> Self {
-        Metronome { on: false, bpm: 120.0, beats_per_bar: 4, gain: 0.8, route: Route::Pair(2), sr: sample_rate as f64, pos: 0.0, beat: 0, phase: 0.0, step: 0.0, amp: 0.0, decay: 0.0, left: 0 }
+        Metronome { on: false, bpm: 120.0, beats_per_bar: 4, gain: 0.8, route: Route::Pair(2), div: 1, sr: sample_rate as f64, pos: 0.0, beat: 0, phase: 0.0, step: 0.0, amp: 0.0, decay: 0.0, left: 0 }
     }
 
     /// Starts (from beat 1) or stops.
@@ -36,15 +38,20 @@ impl Metronome {
             self.pos = 0.0;
             self.beat = 0;
             self.left = 0;
-            self.trigger(true);
+            self.trigger(2);
         }
     }
 
-    fn trigger(&mut self, accent: bool) {
-        let f = if accent { 1760.0 } else { 1175.0 };
+    /// 2 = downbeat, 1 = beat, 0 = a subdivision (softer, lower).
+    fn trigger(&mut self, level: u8) {
+        let (f, amp) = match level {
+            2 => (1760.0, 0.9),
+            1 => (1175.0, 0.9),
+            _ => (880.0, 0.45),
+        };
         self.phase = 0.0;
         self.step = std::f32::consts::TAU * f / self.sr as f32;
-        self.amp = 0.9;
+        self.amp = amp;
         self.decay = (-90.0 / self.sr as f32).exp();
         self.left = (0.05 * self.sr) as u32;
     }
@@ -54,13 +61,15 @@ impl Metronome {
         if !self.on && self.left == 0 {
             return;
         }
-        let per_beat = self.sr * 60.0 / self.bpm;
+        let div = self.div.clamp(1, 4);
+        let per_sub = self.sr * 60.0 / self.bpm / div as f64;
         let frames = out.len() / ch.max(1);
         for f in 0..frames {
-            if self.on && self.pos >= per_beat {
-                self.pos -= per_beat;
-                self.beat = (self.beat + 1) % self.beats_per_bar.max(1);
-                self.trigger(self.beat == 0);
+            if self.on && self.pos >= per_sub {
+                // `beat` counts subdivisions through the bar.
+                self.pos -= per_sub;
+                self.beat = (self.beat + 1) % (self.beats_per_bar.max(1) * div);
+                self.trigger(if self.beat == 0 { 2 } else if self.beat % div == 0 { 1 } else { 0 });
             }
             if self.left > 0 {
                 let v = self.phase.sin() * self.amp * self.gain;

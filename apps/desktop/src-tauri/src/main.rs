@@ -61,6 +61,9 @@ struct Settings {
     /// The free click's last tempo and meter.
     free_click_bpm: f64,
     free_click_bpb: u32,
+    /// The free click's subdivision (clicks per beat).
+    #[serde(default = "one_u32")]
+    free_click_div: u32,
     /// The audio interface whose routing is in use (click_route, pad_route, bus outputs).
     routing_device: Option<String>,
     /// Routing remembered for every other interface, by name.
@@ -76,6 +79,10 @@ struct Settings {
     /// Tracks moved to a bus by hand, by track name (lowercase) -> bus id.
     /// Applies to that track name in every song.
     bus_of_track: std::collections::BTreeMap<String, String>,
+}
+
+fn one_u32() -> u32 {
+    1
 }
 
 fn default_true() -> bool {
@@ -165,9 +172,13 @@ impl Default for Bus {
     }
 }
 
+/// Highest fader level: +10 dB (the output limiter keeps it from clipping).
+const MAX_GAIN: f32 = 3.1623;
+
 /// The built-in buses and the track groups (songfile::stem_category) that go to each.
-const DEFAULT_BUSES: [(&str, &str, &[u8]); 8] = [
-    ("cues", "Click & guide", &[0]),
+const DEFAULT_BUSES: [(&str, &str, &[u8]); 9] = [
+    ("cues", "Click", &[0]),
+    ("guide", "Guide", &[]),
     ("drums", "Drums & percussion", &[1, 2]),
     ("bass", "Bass", &[3]),
     ("guitars", "Guitars", &[4]),
@@ -180,15 +191,25 @@ const DEFAULT_BUSES: [(&str, &str, &[u8]); 8] = [
 impl Settings {
     /// Makes sure every built-in bus exists, carrying over 0.5.0's per-group settings.
     fn ensure_buses(&mut self) {
+        // 0.14: the click track gets its own fader. The old "Click & guide" bus becomes
+        // "Click", and a new "Guide" bus starts from its level, mute and output.
+        let cues = self.bus_list.iter().find(|b| b.id == "cues").cloned();
+        if let Some(c) = self.bus_list.iter_mut().find(|b| b.id == "cues" && b.name == "Click & guide") {
+            c.name = "Click".into();
+        }
+        if let (Some(c), false) = (cues, self.bus_list.iter().any(|b| b.id == "guide")) {
+            let at = self.bus_list.iter().position(|b| b.id == "cues").map_or(0, |p| p + 1);
+            self.bus_list.insert(at, Bus { id: "guide".into(), name: "Guide".into(), gain: c.gain, muted: c.muted, route: c.route, custom: false });
+        }
         for (i, (id, name, cats)) in DEFAULT_BUSES.iter().enumerate() {
             // Settings from 0.5.0 had one entry per group: copy them over.
-            if let (Some(old), Some(b)) = (self.buses.get(cats[0] as usize).cloned(), self.bus_list.iter_mut().find(|b| b.id == *id)) {
+            if let (Some(old), Some(b)) = (cats.first().and_then(|c| self.buses.get(*c as usize)).cloned(), self.bus_list.iter_mut().find(|b| b.id == *id)) {
                 b.gain = old.gain;
                 b.muted = old.muted;
                 b.route = old.route;
             }
             if !self.bus_list.iter().any(|b| b.id == *id) {
-                let old = self.buses.get(cats[0] as usize).cloned().unwrap_or_default();
+                let old = cats.first().and_then(|c| self.buses.get(*c as usize)).cloned().unwrap_or_default();
                 let b = Bus { id: id.to_string(), name: name.to_string(), gain: old.gain, muted: old.muted, route: old.route, custom: false };
                 let at = self.bus_list.iter().take_while(|x| !x.custom && DEFAULT_BUSES.iter().position(|d| d.0 == x.id).map_or(false, |p| p < i)).count();
                 self.bus_list.insert(at.min(self.bus_list.len()), b);
@@ -204,6 +225,9 @@ impl Settings {
             }
         }
         let c = songfile::stem_category(track);
+        if c == 0 && !track.to_ascii_lowercase().contains("click") {
+            return "guide".into(); // the guide has its own fader
+        }
         DEFAULT_BUSES.iter().find(|d| d.2.contains(&c)).map_or("other", |d| d.0).to_string()
     }
     fn bus_for(&self, track: &str) -> Bus {
@@ -263,7 +287,12 @@ impl Settings {
     /// Not set: Click & guide to the in-ears (3-4 on an interface with 4+ outputs), the
     /// rest to 1-2.
     fn bus_route(&self, id: &str) -> Route {
-        self.bus_list.iter().find(|b| b.id == id).and_then(|b| b.route).unwrap_or(if id == "cues" { songfile::default_route("click", self.out_channels) } else { Route::Pair(0) })
+        match self.bus_list.iter().find(|b| b.id == id).and_then(|b| b.route) {
+            Some(r) => r,
+            None if id == "guide" => self.bus_route("cues"), // with the click unless set apart
+            None if id == "cues" => songfile::default_route("click", self.out_channels),
+            None => Route::Pair(0),
+        }
     }
 }
 
@@ -307,6 +336,7 @@ impl Default for Settings {
             pad_route: None,
             free_click_bpm: 120.0,
             free_click_bpb: 4,
+            free_click_div: 1,
             routing_device: None,
             device_routing: Default::default(),
             out_channels: 2,
@@ -410,6 +440,8 @@ struct AppState {
     /// The pad carried over from the last song by a manual switch: it keeps its key
     /// until play, then follows the new song.
     pad_hold: AtomicBool,
+    /// The song's "after this song" action has been done for this stop.
+    after_done: AtomicBool,
     /// The song's pad start (see PadStart): 0 waiting, 1 brought in by the start, 2 done.
     pad_start: std::sync::atomic::AtomicU8,
     /// The master level at the last status (to save a controller move once it settles).
@@ -691,7 +723,7 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
                     (s.free_click_bpm, s.free_click_bpb)
                 };
                 let on = !st.core.metro_on.load(Ordering::Acquire);
-                if free_click(st.clone(), on, bpm, bpb).is_ok() {
+                if free_click(st.clone(), on, bpm, bpb, None).is_ok() {
                     let _ = app.emit("pedal", "refresh");
                 }
             }
@@ -829,6 +861,20 @@ fn watch_midi(app: &AppHandle, st: &AppState, w: &midi_io::Watcher) {
 
 /* ---------------- songs ---------------- */
 
+/// Where click and guide tracks peak after loading (-3 dBFS).
+const CUE_PEAK: f32 = 0.708;
+
+/// Scales a stem so its loudest sample is at `peak` (silent stems are left alone; very
+/// quiet ones are raised at most 20 dB so hiss isn't turned into a click).
+fn even_peak(a: &StemAudio, peak: f32) -> StemAudio {
+    let max = a.data.iter().fold(0f32, |m, v| m.max(v.abs()));
+    if max < 1e-4 {
+        return a.clone();
+    }
+    let k = (peak / max).min(10.0);
+    StemAudio { channels: a.channels, data: a.data.iter().map(|v| v * k).collect::<Vec<_>>().into() }
+}
+
 fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, String> {
     let file = SongFile::scan(folder, channels)?;
     // Key and tempo changes are rendered here, one thread per stem. Click and guide
@@ -846,7 +892,14 @@ fn load(folder: &Path, sample_rate: u32, channels: usize) -> Result<Loaded, Stri
             .collect();
         hs.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("A stem failed to load.".into()))).collect()
     });
-    let stems = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let mut stems = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+    // Click and guide tracks come at very different levels from song to song: bring each
+    // to the same peak (-3 dBFS) so the in-ear level is the same every song.
+    for (i, st) in file.stems.iter().enumerate() {
+        if songfile::is_click(&st.name) || songfile::is_guide(&st.name) {
+            stems[i] = even_peak(&stems[i], CUE_PEAK);
+        }
+    }
     let length = stems.iter().map(|s| s.frames()).max().unwrap_or(0);
     // Songs set up automatically get their grid lined up with the click you hear.
     let mut file = file;
@@ -935,6 +988,7 @@ fn mix_commands(settings: &Settings, l: &Loaded, ch: usize) -> Vec<Command> {
         // Ring-out at jumps (Setup → Smooth jumps): about a third of a second.
         Command::SetJoinTail(blend_frames(settings.blend, l)),
         Command::SetEndAfter(medley_exit(l)),
+        Command::SetClickDiv(l.file.click_div),
     ];
     for (i, st) in l.file.stems.iter().enumerate() {
         let (g, m, r) = effective(settings, &l.file, st);
@@ -1332,6 +1386,7 @@ struct SongView {
     offset_ms: f64,
     key: String,
     click: bool,
+    click_div: u8,
     seconds: f64,
     sample_rate: u32,
     markers: Vec<Marker>,
@@ -1395,6 +1450,7 @@ impl SongView {
             offset_ms: l.file.offset_ms,
             key: l.file.key.clone(),
             click: l.file.click,
+            click_div: l.file.click_div,
             seconds: l.length as f64 / l.sample_rate as f64,
             sample_rate: l.sample_rate,
             markers: l.file.markers.clone(),
@@ -1508,6 +1564,7 @@ struct FreeClickView {
     on: bool,
     bpm: f64,
     beats_per_bar: u32,
+    div: u32,
 }
 
 #[derive(Serialize)]
@@ -1578,7 +1635,7 @@ fn view(state: &AppState) -> AppView {
     let midi = state.midi.lock().unwrap().as_ref().map(|m| m.name.clone());
     let next_ready = state.next.lock().unwrap().loaded.is_some();
     let pad_choice = *state.pad_choice.lock().unwrap();
-    let free_click = FreeClickView { on: state.core.metro_on.load(Ordering::Acquire), bpm: s.free_click_bpm, beats_per_bar: s.free_click_bpb };
+    let free_click = FreeClickView { on: state.core.metro_on.load(Ordering::Acquire), bpm: s.free_click_bpm, beats_per_bar: s.free_click_bpb, div: s.free_click_div };
     let pad_on = *state.pad_on.lock().unwrap();
     AppView {
         outputs: audio::list_outputs(),
@@ -1668,6 +1725,26 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
     // On the tick the next song takes over, the snapshot can still be the old song's:
     // the pad logic waits for the next tick.
     let pad_changed = !song_changed && auto_pad(&state, &snapshot);
+    // After this song (Stay / Cue next / Top of set), once, when it ends by itself.
+    if let Some(sn) = snapshot.as_ref() {
+        if sn.playing {
+            state.after_done.store(false, Ordering::Relaxed);
+        } else if sn.finished && !song_changed && !state.after_done.swap(true, Ordering::Relaxed) {
+            let (after, mode) = state.song.lock().unwrap().as_ref().map_or((songfile::AfterSong::Stay, songfile::TransitionMode::Stop), |l| (l.file.transition.after, l.file.transition.mode));
+            let (cur, len) = {
+                let s = state.settings.lock().unwrap();
+                (s.current, s.setlist.len())
+            };
+            let target = match (after, mode) {
+                (songfile::AfterSong::CueNext, songfile::TransitionMode::Stop) => cur.map(|c| c + 1).filter(|n| *n < len),
+                (songfile::AfterSong::Top, songfile::TransitionMode::Stop) => (len > 0 && cur != Some(0)).then_some(0),
+                _ => None,
+            };
+            if let Some(t) = target {
+                let _ = app.emit("pedal", format!("song:{t}"));
+            }
+        }
+    }
     // A cut to another song that hadn't happened yet is dropped when you stop.
     if !snapshot.as_ref().is_some_and(|s| s.playing) && state.jump_to.lock().unwrap().take().is_some() {
         sync_next(&app, &state);
@@ -1873,6 +1950,7 @@ enum UiCmd {
     MasterGain { gain: f32 },
     Blend { blend: Blend },
     Announce { on: bool },
+    ClickDiv { div: u8 },
     ClickRoute { route: Route },
     StemGain { stem: usize, gain: f32 },
     StemMute { stem: usize, muted: bool },
@@ -2004,6 +2082,14 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 save_settings = true;
                 core.send(Command::SetCountIn(on));
             }
+            UiCmd::ClickDiv { div } => {
+                let div = div.clamp(1, 4);
+                if let Some(l) = song.as_mut() {
+                    l.file.click_div = div;
+                    save_song = true;
+                }
+                core.send(Command::SetClickDiv(div));
+            }
             UiCmd::Announce { on } => {
                 s.announce = on;
                 save_settings = true;
@@ -2016,7 +2102,7 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
                 }
             }
             UiCmd::MasterGain { gain } => {
-                s.master_gain = if gain.is_finite() { gain.clamp(0.0, 1.5) } else { 1.0 };
+                s.master_gain = if gain.is_finite() { gain.clamp(0.0, MAX_GAIN) } else { 1.0 };
                 save_settings = true;
                 core.master.store(s.master_gain.to_bits(), Ordering::Relaxed);
             }
@@ -2066,7 +2152,7 @@ fn cmd(state: State<'_, AppState>, c: UiCmd) -> Result<(), String> {
             // Bus levels are part of the song's own mix (the default mix is only for
             // songs you haven't mixed). With no song loaded they set the default.
             UiCmd::BusGain { bus, gain } => {
-                set_bus_level(&mut s, song.as_mut(), &bus, Some(gain.clamp(0.0, 2.0)), None, &mut save_song, &mut save_settings);
+                set_bus_level(&mut s, song.as_mut(), &bus, Some(gain.clamp(0.0, MAX_GAIN)), None, &mut save_song, &mut save_settings);
                 if let Some(l) = song.as_ref() {
                     push_mix(core, &s, &l.file);
                 }
@@ -2509,7 +2595,7 @@ fn pad_key(state: State<'_, AppState>, key: Option<String>) -> Result<AppView, S
 /// The free click: a click with no song (between songs, announcements, rehearsal).
 /// It goes to the click output at the click level, and stops when a song starts.
 #[tauri::command]
-fn free_click(state: State<'_, AppState>, on: bool, bpm: f64, beats_per_bar: u32) -> Result<AppView, String> {
+fn free_click(state: State<'_, AppState>, on: bool, bpm: f64, beats_per_bar: u32, div: Option<u32>) -> Result<AppView, String> {
     let bpm = bpm.clamp(30.0, 300.0);
     let bpb = beats_per_bar.clamp(1, 12);
     if on && state.core.playing() {
@@ -2519,14 +2605,18 @@ fn free_click(state: State<'_, AppState>, on: bool, bpm: f64, beats_per_bar: u32
         let mut s = state.settings.lock().unwrap();
         s.free_click_bpm = bpm;
         s.free_click_bpb = bpb;
+        if let Some(d) = div {
+            s.free_click_div = d.clamp(1, 4);
+        }
         (s.click_gain, s.click_route)
     };
+    let div = state.settings.lock().unwrap().free_click_div;
     state.save_settings();
     {
         let mut out = state.core.output.lock().unwrap();
         let o = out.as_mut().ok_or("No audio output is open.")?;
         let route = route.unwrap_or(songfile::default_route("click", o.info.channels));
-        if !o.send(ToAudio::Metro { on, bpm, beats_per_bar: bpb, gain, route }) {
+        if !o.send(ToAudio::Metro { on, bpm, beats_per_bar: bpb, gain, route, div }) {
             return Err("The audio thread is busy. Try again.".into());
         }
     }
@@ -2922,6 +3012,7 @@ fn main() {
                 pad_auto: AtomicBool::new(false),
             pad_hold: AtomicBool::new(false),
             jump_to: Mutex::new(None),
+            after_done: AtomicBool::new(true),
             pad_start: std::sync::atomic::AtomicU8::new(0),
             master_seen: std::sync::atomic::AtomicU32::new(0),
                 pad_choice: Mutex::new(None),
@@ -3005,6 +3096,7 @@ mod tests {
             pad_auto: AtomicBool::new(false),
             pad_hold: AtomicBool::new(false),
             jump_to: Mutex::new(None),
+            after_done: AtomicBool::new(true),
             pad_start: std::sync::atomic::AtomicU8::new(0),
             master_seen: std::sync::atomic::AtomicU32::new(0),
             pad_choice: Mutex::new(None),
@@ -3212,8 +3304,10 @@ mod tests {
         let v = finishes(move || view(&s2));
         assert_eq!(v.pads.song_key.as_deref(), Some("B"));
         let cats: Vec<&str> = v.buses.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(cats, ["Click & guide", "Drums & percussion", "Bass", "Guitars", "Vocals"]);
-        assert_eq!(v.buses[3].stems, vec![4, 5]);
+        assert_eq!(cats, ["Click", "Guide", "Drums & percussion", "Bass", "Guitars", "Vocals"], "the click track has its own fader");
+        assert_eq!(v.buses[4].stems, vec![4, 5]);
+        // The click and guide tracks come out at the same peak, whatever the files were.
+
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -3604,5 +3698,38 @@ mod tests {
         let p = prepare("c".into(), side(&settings, &la), None, 75.0, side(&settings, &lb), entry, "Worthy".into(), false, Route::Pair(2), sr, root.join("voice"));
         assert!(p.wash.is_none() && p.settle == (0, 1.0) && p.prelude.is_some());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_click_gets_its_own_fader_and_keeps_your_routing() {
+        let mut s = Settings::default();
+        // As saved by 0.13: one "Click & guide" bus, set to the in-ears at +1.6 dB.
+        s.bus_list.retain(|b| b.id != "guide");
+        let c = s.bus_list.iter_mut().find(|b| b.id == "cues").unwrap();
+        c.name = "Click & guide".into();
+        c.gain = 1.2;
+        c.route = Some(Route::Pair(2));
+        s.ensure_buses();
+        let click = s.bus_list.iter().find(|b| b.id == "cues").unwrap();
+        let guide = s.bus_list.iter().find(|b| b.id == "guide").unwrap();
+        assert_eq!(click.name, "Click");
+        assert_eq!((guide.name.as_str(), guide.gain, guide.route), ("Guide", 1.2, Some(Route::Pair(2))), "the guide starts where the shared bus was");
+        assert_eq!(s.bus_list.iter().position(|b| b.id == "guide"), s.bus_list.iter().position(|b| b.id == "cues").map(|p| p + 1));
+        assert_eq!(s.bus_id_for("Click Track"), "cues");
+        assert_eq!(s.bus_id_for("Guide"), "guide");
+        assert_eq!(s.bus_id_for("Cues"), "guide");
+        // A guide with no output of its own follows the click's.
+        s.bus_mut("guide").unwrap().route = None;
+        assert_eq!(s.bus_route("guide"), Route::Pair(2));
+        // Running it again changes nothing.
+        let before = s.bus_list.len();
+        s.ensure_buses();
+        assert_eq!(s.bus_list.len(), before);
+        // Quiet and loud click files come out at the same peak.
+        let quiet = StemAudio::mono(vec![0.1, -0.2, 0.05]);
+        let loud = StemAudio::mono(vec![0.9, -1.0, 0.3]);
+        assert!((even_peak(&quiet, CUE_PEAK).data[1] + CUE_PEAK).abs() < 1e-6);
+        assert!((even_peak(&loud, CUE_PEAK).data[1] + CUE_PEAK).abs() < 1e-6);
+        assert_eq!(even_peak(&StemAudio::mono(vec![0.0; 4]), CUE_PEAK).data[0], 0.0, "silence stays silence");
     }
 }

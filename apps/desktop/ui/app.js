@@ -338,31 +338,45 @@
   document.querySelectorAll('.vtabs [role=tab]').forEach(b => { b.onclick = () => { liveTab = b.dataset.tab; try { localStorage.setItem('rig.liveTab', liveTab); } catch (e) { /* storage off */ } renderLiveTab(); }; });
   // A vertical fader (Playback-style): drag the cap, scroll, arrow keys; double-click = 100%.
   // `meter` names what its level meter shows ("bus:drums", "stem:3"), or null.
+  // Fader laws. 'db' (buses, master): a desk-style taper, unity at three-quarters of the
+  // travel, up to +10 dB; shown in dB. A number: plain 0..max, shown in %.
+  const DB_MAX = 3.1623;
+  const dbLaw = {
+    max: DB_MAX,
+    toPos: g => { if (g <= 0) return 0; const d = Math.max(-60, Math.min(10, 20 * Math.log10(g))); return d >= 0 ? 0.75 + d / 40 : 0.75 * (1 - Math.sqrt(-d / 60)); },
+    fromPos: p => { p = Math.max(0, Math.min(1, p)); if (p <= 0.001) return 0; const d = p >= 0.75 ? (p - 0.75) * 40 : -60 * (1 - p / 0.75) ** 2; return 10 ** (d / 20); },
+    label: g => { if (g <= 0.001) return '−∞'; const d = 20 * Math.log10(g); return (Math.abs(d) < 0.05 ? '0.0' : (d > 0 ? '+' : '') + d.toFixed(1)) + ' dB'; },
+    marks: [[3.1623, '+10'], [1.7783, '+5'], [1, '0'], [0.5623, '-5'], [0.3162, '-10'], [0.1, '-20'], [0, '∞']],
+    step: 0.01,
+  };
+  const linLaw = max => ({ max, toPos: g => g / max, fromPos: p => Math.max(0, Math.min(1, p)) * max, label: g => Math.round(g * 100) + '%', marks: [[2, '+6'], [1, '0'], [0.5, '-6'], [0.25, '-12'], [0, '∞']].filter(([g]) => g <= max + 1e-6), step: 0.02 });
   function faderStrip(name, value, max, onInput, muted, onMute, label, meter) {
+    const law = max === 'db' ? dbLaw : linLaw(max);
     const r = el('div', 'vstrip' + (muted ? ' off' : ''));
-    const v = el('span', 'vval', Math.round(value * 100) + '%');
+    const v = el('span', 'vval', law.label(value));
     const body = el('div', 'vbody');
     const mt = el('div', 'vmeter'); mt.append(el('i'));
     if (meter) mt.dataset.meter = meter; else mt.classList.add('none');
     const fd = el('div', 'vfader'); fd.tabIndex = 0; fd.setAttribute('role', 'slider'); fd.setAttribute('aria-label', label || `${name} level`);
-    fd.setAttribute('aria-valuemin', 0); fd.setAttribute('aria-valuemax', Math.round(max * 100));
+    fd.setAttribute('aria-valuemin', 0); fd.setAttribute('aria-valuemax', 100);
     const track = el('div', 'vtrack'), fill = el('div', 'vfill'), unity = el('div', 'vunity'), cap = el('div', 'vcap');
     track.append(fill); fd.append(track, unity, cap);
-    unity.style.bottom = `calc(8px + ${1 / max} * (100% - 16px))`;
+    unity.style.bottom = `calc(8px + ${law.toPos(1)} * (100% - 16px))`;
     let val = value;
-    const show = () => { const f = Math.max(0, Math.min(1, val / max)); cap.style.bottom = `calc(8px + ${f} * (100% - 16px))`; fill.style.height = (f * 100) + '%'; v.textContent = Math.round(val * 100) + '%'; fd.setAttribute('aria-valuenow', Math.round(val * 100)); };
-    const set = x => { val = Math.max(0, Math.min(max, Math.round(x * 100) / 100)); show(); onInput(val); };
-    const fromY = e => { const rc = track.getBoundingClientRect(); return (1 - (e.clientY - rc.top) / rc.height) * max; };
-    fd.onpointerdown = e => { if (e.button !== 0) return; e.preventDefault(); fd.setPointerCapture(e.pointerId); fd.focus(); fd.dataset.drag = '1'; set(fromY(e)); };
-    fd.onpointermove = e => { if (fd.dataset.drag) set(fromY(e)); };
+    const show = () => { const f = Math.max(0, Math.min(1, law.toPos(val))); cap.style.bottom = `calc(8px + ${f} * (100% - 16px))`; fill.style.height = (f * 100) + '%'; v.textContent = law.label(val); fd.setAttribute('aria-valuenow', Math.round(f * 100)); fd.setAttribute('aria-valuetext', law.label(val)); };
+    const set = x => { val = Math.max(0, Math.min(law.max, Math.round(x * 1000) / 1000)); show(); onInput(val); };
+    const setPos = p => set(law.fromPos(p));
+    const fromY = e => { const rc = track.getBoundingClientRect(); return 1 - (e.clientY - rc.top) / rc.height; };
+    fd.onpointerdown = e => { if (e.button !== 0) return; e.preventDefault(); fd.setPointerCapture(e.pointerId); fd.focus(); fd.dataset.drag = '1'; setPos(fromY(e)); };
+    fd.onpointermove = e => { if (fd.dataset.drag) setPos(fromY(e)); };
     fd.onpointerup = fd.onpointercancel = () => { delete fd.dataset.drag; };
     fd.ondblclick = () => set(1);
-    fd.onwheel = e => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.preventDefault(); set(val - e.deltaY * 0.002); } };
-    fd.onkeydown = e => { const k = { ArrowUp: 0.02, ArrowDown: -0.02, PageUp: 0.1, PageDown: -0.1 }[e.key]; if (k) { e.preventDefault(); e.stopPropagation(); set(val + k); } };
-    // Scale marks beside the fader, in dB like a desk: +6, 0, -6, -12, off.
+    fd.onwheel = e => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.preventDefault(); setPos(law.toPos(val) - e.deltaY * 0.002); } };
+    fd.onkeydown = e => { const k = { ArrowUp: law.step, ArrowDown: -law.step, PageUp: 0.1, PageDown: -0.1 }[e.key]; if (k) { e.preventDefault(); e.stopPropagation(); setPos(law.toPos(val) + k); } };
+    // Scale marks beside the fader, in dB like a desk.
     const sc = el('div', 'vscale');
-    [[2, '+6'], [1, '0'], [0.5, '-6'], [0.25, '-12'], [0, '∞']].filter(([g]) => g <= max + 1e-6).forEach(([g, t]) => {
-      const k = el('span', g === 1 ? 'u' : null, t); k.style.bottom = `calc(8px + ${g / max} * (100% - 16px))`; sc.append(k);
+    law.marks.forEach(([g, t]) => {
+      const k = el('span', g === 1 ? 'u' : null, t); k.style.bottom = `calc(8px + ${law.toPos(g)} * (100% - 16px))`; sc.append(k);
     });
     body.append(mt, sc, fd);
     const m = el('button', 'm' + (muted ? ' on' : ''), 'M'); m.title = `Mute ${name}`; m.setAttribute('aria-pressed', !!muted);
@@ -383,7 +397,7 @@
     // No mute button here, on purpose: one mis-tap would silence the band.
     const mb = $('#lvMaster');
     if (mb && V && !mb.querySelector('.vfader[data-drag]')) {
-      const ms = faderStrip('Master', V.master_gain == null ? 1 : V.master_gain, 1.5, x => { V.master_gain = x; send({ type: 'MasterGain', gain: x }); }, false, null, 'Master level', 'master');
+      const ms = faderStrip('Master', V.master_gain == null ? 1 : V.master_gain, 'db', x => { V.master_gain = x; send({ type: 'MasterGain', gain: x }); }, false, null, 'Master level', 'master');
       ms.classList.add('master'); ms.title = 'Master: everything the app sends out. Double-click for 100%.';
       mb.replaceChildren(ms);
     }
@@ -412,7 +426,7 @@
         box.append(h);
       }
       const g = el('div', 'strips');
-      (V.buses || []).forEach(b => g.append(tint(b, faderStrip(b.name, b.gain, 1.5, x => { b.gain = x; send({ type: 'BusGain', bus: b.id, gain: x }); if (V.song && !V.song_mix) { V.song_mix = true; } }, b.muted,
+      (V.buses || []).forEach(b => g.append(tint(b, faderStrip(b.name, b.gain, 'db', x => { b.gain = x; send({ type: 'BusGain', bus: b.id, gain: x }); if (V.song && !V.song_mix) { V.song_mix = true; } }, b.muted,
         async () => { b.muted = !b.muted; await send({ type: 'BusMute', bus: b.id, muted: b.muted }); renderHeads(); renderLiveTab(); dirty = true; }, null, 'bus:' + b.id))));
       g.append(faderStrip('Click (built-in)', V.click_gain, 1.5, x => { V.click_gain = x; send({ type: 'ClickGain', gain: x }); }, null, null));
       g.append(faderStrip('Pad', V.pads.level, 1.5, x => { V.pads.level = x; invoke('pad_mix', { level: x, route: null }).catch(err); }, !V.pads.on, () => togglePad()));
@@ -475,7 +489,7 @@
         box.append(card);
       }
     } else {
-      const fc = V.free_click || { on: false, bpm: 120, beats_per_bar: 4 };
+      const fc = V.free_click || { on: false, bpm: 120, beats_per_bar: 4, div: 1 };
       const cards = el('div', 'ccards');
       // The song's click: the same switches as the top bar, plus level, output and big beat lights.
       const sc = el('div', 'ccard');
@@ -495,11 +509,16 @@
       const lvv = el('span', 'cval', Math.round(V.click_gain * 100) + '%');
       lv.oninput = () => { V.click_gain = +lv.value; lvv.textContent = Math.round(V.click_gain * 100) + '%'; send({ type: 'ClickGain', gain: V.click_gain }); };
       r2.append(el('span', 'plbl', 'Level'), lv, lvv);
-      sc.append(r1, r2, el('p', 'hint', 'Its output is set once for every song in Setup → Outputs.'));
+      const divs = [[1, '1/4'], [2, '1/8'], [3, 'Triplets'], [4, '1/16']];
+      const r3 = el('div', 'crow');
+      const sd = seg(divs, V.song ? (V.song.click_div || 1) : 1, v => { V.song.click_div = v; send({ type: 'ClickDiv', div: v }); renderLiveTab(); }, 'Song click subdivision');
+      if (!V.song) sd.querySelectorAll('button').forEach(x => { x.disabled = true; });
+      r3.append(el('span', 'plbl', 'Clicks'), sd);
+      sc.append(r1, r2, r3, el('p', 'hint', 'Clicks per beat, saved with the song: 1/8 for a slow song so you don\'t have to double the tempo. The in-between clicks are softer. Its output is set once for every song in Setup → Outputs.'));
       // The free click: a click with no song.
       const c = el('div', 'ccard');
       c.append(el('div', 'lbl', 'Click with no song'));
-      const set = (on, bpm, bpb) => invoke('free_click', { on, bpm, beatsPerBar: bpb }).then(refresh).catch(err);
+      const set = (on, bpm, bpb, div) => invoke('free_click', { on, bpm, beatsPerBar: bpb, div: div || fc.div || 1 }).then(refresh).catch(err);
       const dn = el('button', 'ib', '−'), up = el('button', 'ib', '+');
       dn.setAttribute('aria-label', 'Slower'); up.setAttribute('aria-label', 'Faster');
       dn.onclick = () => set(fc.on, Math.max(30, fc.bpm - 1), fc.beats_per_bar);
@@ -517,7 +536,8 @@
       tempo.append(dn, el('span', 'bpm screen', String(+fc.bpm.toFixed(2))), up, el('span', 'lbl', 'BPM'));
       const ctl = el('div', 'clk');
       ctl.append(go, tap, song);
-      c.append(tempo, el('div', 'crow', null), ctl, meter, el('p', 'hint', 'Between songs, during announcements, or for a song with no tracks. Plays on the click output at the click level and stops when a song starts. Also on a MIDI button (Setup → MIDI).'));
+      const fdiv = seg(divs, fc.div || 1, v => set(fc.on, fc.bpm, fc.beats_per_bar, v), 'Click subdivision');
+      c.append(tempo, el('div', 'crow', null), ctl, meter, fdiv, el('p', 'hint', 'Between songs, during announcements, or for a song with no tracks. Plays on the click output at the click level and stops when a song starts. Also on a MIDI button (Setup → MIDI).'));
       cards.append(sc, c);
       box.append(cards);
     }
@@ -750,6 +770,12 @@
         g2.append(el('span', 'fst', 'bars'));
       }
       if (tr.mode !== 'Stop') g2.append(el('span', 'fst' + (V.next_ready ? ' ok' : ''), V.next_ready ? '● ready' : 'loading…'));
+    }
+    // When it stops: stay here, cue the next song, or go back to the top of the set.
+    if (!nx || tr.mode === 'Stop') {
+      const opts = nx ? [['Stay', 'Stay'], ['CueNext', 'Cue next'], ['Top', 'Top of set']] : [['Stay', 'Stay'], ['Top', 'Top of set']];
+      let cur = tr.after || 'Stay'; if (!nx && cur === 'CueNext') cur = 'Stay';
+      g2.append(el('span', 'fst', 'then'), seg(opts, cur, v => setTransition({ ...tr, after: v }), 'After this song'));
     }
     box.append(g2);
     // Medley: leave this song partway and enter the next one partway (with a segue or crossfade).

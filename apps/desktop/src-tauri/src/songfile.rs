@@ -95,6 +95,22 @@ pub struct Transition {
     /// Medley: start the next song at this block of its arrangement instead of the top.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enter_at: Option<usize>,
+    /// When the song ends and stops (no segue): stay in it, load the next song ready to
+    /// play, or go back to the top of the set.
+    #[serde(default)]
+    pub after: AfterSong,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub enum AfterSong {
+    #[default]
+    Stay,
+    CueNext,
+    Top,
+}
+
+fn one_u8() -> u8 {
+    1
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -117,7 +133,7 @@ fn four() -> u32 {
 
 impl Default for Transition {
     fn default() -> Self {
-        Transition { mode: TransitionMode::Stop, bars: 2.0, pad: false, pad_start: PadStart::Off, leave_after: None, enter_at: None }
+        Transition { mode: TransitionMode::Stop, bars: 2.0, pad: false, pad_start: PadStart::Off, leave_after: None, enter_at: None, after: AfterSong::Stay }
     }
 }
 
@@ -143,6 +159,10 @@ pub struct SongFile {
     pub key: String,
     /// Built-in click. Off by default when the song has its own Click stem.
     pub click: bool,
+    /// The built-in click's subdivision: clicks per beat (1 quarters, 2 eighths, 3
+    /// triplets, 4 sixteenths). Slow songs can click eighths instead of doubling the tempo.
+    #[serde(default = "one_u8")]
+    pub click_div: u8,
     pub markers: Vec<Marker>,
     pub stems: Vec<StemFile>,
     /// Empty means "as recorded".
@@ -391,6 +411,7 @@ impl SongFile {
                 offset_ms: 0.0,
                 key: key.unwrap_or_default(),
                 click: !files.iter().any(|f| is_click(&stem_name(f))),
+                click_div: 1,
                 markers: vec![Marker { name: "Top".into(), bar: 1 }],
                 stems: vec![],
                 arrangement: vec![],
@@ -911,6 +932,7 @@ mod tests {
             offset_ms: 500.0,
             key: "D".into(),
             click: true,
+            click_div: 1,
             markers: vec![Marker { name: "Verse".into(), bar: 1 }, Marker { name: "Chorus".into(), bar: 3 }],
             stems: vec![StemFile { file: "Drums.wav".into(), name: "Drums".into(), route: Route::Pair(0), gain: 1.0, muted: false }],
             arrangement: vec![
@@ -987,6 +1009,7 @@ mod tests {
             offset_ms: 0.0,
             key: "E".into(),
             click: true,
+            click_div: 1,
             markers: vec![],
             stems: vec![],
             arrangement: vec![],

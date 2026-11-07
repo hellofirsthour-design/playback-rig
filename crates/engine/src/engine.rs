@@ -74,6 +74,9 @@ pub enum Command {
     /// sustained parts ringing on for the second number of frames (like a song's end with
     /// SetExitRing).
     RingOutAt(u64, u64),
+    /// The built-in click's subdivision: clicks per beat (1 = quarters, 2 = eighths,
+    /// 3 = triplets, 4 = sixteenths). The in-between clicks are softer and lower.
+    SetClickDiv(u8),
 }
 
 /// Second-order high-pass (RBJ, Q 0.707): [b0, b1, b2, a1, a2], normalized.
@@ -191,6 +194,7 @@ pub struct Engine {
     settle_len: u64,
     settle_gain: f32,
     ring_at: Option<(u64, u64)>,
+    click_div: u32,
 }
 
 impl Engine {
@@ -235,6 +239,7 @@ impl Engine {
             settle_len: 0,
             settle_gain: 1.0,
             ring_at: None,
+            click_div: 1,
             song,
             arr,
             stems,
@@ -355,7 +360,7 @@ impl Engine {
             Command::SetQuantize(q) => self.quant = q,
             Command::SetStemGain(i, g) => {
                 if let Some(m) = self.mix.get_mut(i) {
-                    m.gain = g.clamp(0.0, 2.0);
+                    m.gain = g.clamp(0.0, 4.0);
                 }
             }
             Command::SetStemMute(i, v) => {
@@ -389,6 +394,7 @@ impl Engine {
             }
             Command::SetJoinTail(n) => self.tail_frames = n,
             Command::SetExitRing(n) => self.exit_ring = n,
+            Command::SetClickDiv(d) => self.click_div = d.clamp(1, 4) as u32,
             Command::SetSettle(n, g) => {
                 self.settle_len = n;
                 self.settle_gain = if g.is_finite() { g.clamp(0.0, 1.0) } else { 1.0 };
@@ -721,12 +727,17 @@ impl Engine {
         }
     }
 
-    fn trigger_click(&mut self, accent: bool) {
-        let f = if accent { 1760.0 } else { 1175.0 };
+    /// 2 = the bar's downbeat, 1 = a beat, 0 = a subdivision between beats.
+    fn trigger_click(&mut self, level: u8) {
+        let (f, amp) = match level {
+            2 => (1760.0, 0.9),
+            1 => (1175.0, 0.9),
+            _ => (880.0, 0.45),
+        };
         self.click = ClickVoice {
             phase: 0.0,
             step: std::f32::consts::TAU * f / self.sr,
-            amp: 0.9,
+            amp,
             decay: (-90.0 / self.sr).exp(),
             left: (0.05 * self.sr) as u32,
         };
@@ -802,7 +813,7 @@ impl Engine {
                 let done = (self.count_total - self.count_left) as f64;
                 let beat = (done / fpb).floor() as i64;
                 if done - beat as f64 * fpb < 1.0 {
-                    self.trigger_click(beat % bpb == 0);
+                    self.trigger_click(if beat % bpb == 0 { 2 } else { 1 });
                 }
                 let c = self.click_sample() * self.click_gain;
                 Self::write(out, base, ch, self.click_route, c, c);
@@ -970,13 +981,15 @@ impl Engine {
             // Ring-out from a jump: the sustained parts carry on from where they left.
             self.tail_frame(out, base, master * tracks * settle);
 
-            // Click, locked to the song's own bar grid.
-            let pos = self.song.beat_pos(src as f64);
-            let beat = pos.floor() as i64;
-            if self.click_on && pos >= 0.0 && self.last_beat != Some(beat) && src as f64 - self.song.beat_frame(beat as f64) < 1.0 {
-                self.trigger_click(beat.rem_euclid(bpb) == 0);
+            // Click, locked to the song's own bar grid (and its subdivision).
+            let div = self.click_div.max(1) as i64;
+            let pos = self.song.beat_pos(src as f64) * div as f64;
+            let sub = pos.floor() as i64;
+            if self.click_on && pos >= 0.0 && self.last_beat != Some(sub) && src as f64 - self.song.beat_frame(sub as f64 / div as f64) < 1.0 {
+                let level = if sub.rem_euclid(bpb * div) == 0 { 2 } else if sub.rem_euclid(div) == 0 { 1 } else { 0 };
+                self.trigger_click(level);
             }
-            self.last_beat = Some(beat);
+            self.last_beat = Some(sub);
             let c = self.click_sample() * self.click_gain * master;
             if c != 0.0 {
                 Self::write(out, base, ch, self.click_route, c, c);
@@ -1747,6 +1760,36 @@ mod tests {
         for (n, r) in [("Click Track", Click), ("Guide", Guide), ("BGVS", Vocal), ("Lead Vox", Vocal), ("Drums (Live)", Rhythm), ("Perc (Live)", Rhythm),
             ("Loop", Rhythm), ("Bass", Rhythm), ("Synth Bass", Rhythm), ("AG", Rhythm), ("Keys 1", Sustain), ("Pad", Sustain), ("EG 2", Sustain), ("Strings", Sustain), ("Organ", Sustain), ("FX", Sustain), ("Piano", Sustain)] {
             assert_eq!(stem_role(n), r, "{n}");
+        }
+    }
+
+    #[test]
+    fn the_click_can_play_eighths_triplets_and_sixteenths() {
+        // 60 BPM at SR 1000: a beat every 1000 frames. Count click onsets in 4 beats.
+        for (div, want) in [(1u8, 4usize), (2, 8), (3, 12), (4, 16)] {
+            let mut e = rig(None);
+            e.handle(Command::SetStemMute(0, true));
+            e.handle(Command::SetClick(true));
+            e.handle(Command::SetClickRoute(Route::Mono(1)));
+            e.handle(Command::SetClickDiv(div));
+            e.handle(Command::Play);
+            let mut buf = vec![0.0f32; 4000 * CH];
+            e.process(&mut buf);
+            let ch1: Vec<f32> = buf.iter().skip(1).step_by(CH).copied().collect();
+            let mut onsets = vec![];
+            let mut quiet = 1000;
+            for (i, v) in ch1.iter().enumerate() {
+                if v.abs() > 0.01 && quiet > 20 {
+                    onsets.push(i);
+                }
+                quiet = if v.abs() > 0.001 { 0 } else { quiet + 1 };
+            }
+            assert_eq!(onsets.len(), want, "div {div}: {onsets:?}");
+            if div == 2 {
+                assert!((onsets[1] as i64 - 500).abs() <= 2, "the eighth lands halfway: {}", onsets[1]);
+                let peak = |a: usize| ch1[a..a + 40].iter().fold(0f32, |m, v| m.max(v.abs()));
+                assert!(peak(onsets[1]) < peak(onsets[2]) * 0.7, "in-between clicks are softer");
+            }
         }
     }
 }

@@ -24,7 +24,7 @@ pub enum ToAudio {
     /// Forget the queued next song.
     Unqueue,
     /// The free click: on/off, BPM, beats per bar, level, output.
-    Metro { on: bool, bpm: f64, beats_per_bar: u32, gain: f32, route: rig_engine::Route },
+    Metro { on: bool, bpm: f64, beats_per_bar: u32, gain: f32, route: rig_engine::Route, div: u32 },
 }
 
 /// Audio played alongside a song change: the reverb wash over the seam, or the spoken
@@ -325,7 +325,8 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                                     }
                                 }
                             }
-                            ToAudio::Metro { on, bpm, beats_per_bar, gain, route } => {
+                            ToAudio::Metro { on, bpm, beats_per_bar, gain, route, div } => {
+                                metro.div = div.clamp(1, 4);
                                 metro.gain = gain;
                                 metro.route = route;
                                 metro.set(on, bpm, beats_per_bar);
@@ -408,6 +409,20 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
     Ok(Output { info, tx, garbage, stop: stop_tx })
 }
 
+/// The output's safety limit: untouched up to -1 dBFS, then a smooth curve that never
+/// passes full scale, so turning things up can't hard-clip into the interface.
+#[inline]
+pub fn limit(x: f32) -> f32 {
+    const KNEE: f32 = 0.891; // -1 dBFS
+    let a = x.abs();
+    if a <= KNEE {
+        return x;
+    }
+    let over = (a - KNEE) / (1.0 - KNEE);
+    let y = KNEE + (1.0 - KNEE) * over.tanh();
+    y.copysign(x)
+}
+
 /// Where the master meter's peak is kept in the shared levels (stems use the slots before it).
 pub const MASTER_SLOT: usize = 63;
 
@@ -425,7 +440,7 @@ impl Master {
 
     /// Scales `data` (interleaved) toward `target`; returns the loudest sample afterwards.
     pub fn process(&mut self, data: &mut [f32], channels: usize, target: f32) -> f32 {
-        let target = if target.is_finite() { target.clamp(0.0, 2.0) } else { 1.0 };
+        let target = if target.is_finite() { target.clamp(0.0, 3.2) } else { 1.0 };
         let mut peak = 0f32;
         for frame in data.chunks_mut(channels.max(1)) {
             if self.cur < target {
@@ -434,7 +449,7 @@ impl Master {
                 self.cur = (self.cur - self.step).max(target);
             }
             for s in frame.iter_mut() {
-                *s *= self.cur;
+                *s = limit(*s * self.cur);
                 peak = peak.max(s.abs());
             }
         }
@@ -611,18 +626,19 @@ mod tests {
     fn the_master_fader_ramps_to_its_level_without_a_jump() {
         // SR 1000: the ramp takes 30 frames for a full 0..1 move.
         let mut m = Master::new(1000);
-        let mut data = vec![1.0f32; 100 * CH];
+        // (0.85: below the output limiter, so only the fader acts)
+        let mut data = vec![0.85f32; 100 * CH];
         let pk = m.process(&mut data, CH, 0.5);
         // both channels of a frame get the same gain
         assert_eq!(data[0], data[1]);
         // no step: the first frame barely moves, and each frame moves at most one ramp step
-        assert!(data[0] > 0.96, "first frame {}", data[0]);
+        assert!(data[0] > 0.96 * 0.85, "first frame {}", data[0]);
         for f in 1..100 {
-            assert!((data[f * CH] - data[(f - 1) * CH]).abs() <= 1.0 / 30.0 + 1e-6);
+            assert!((data[f * CH] - data[(f - 1) * CH]).abs() <= 0.85 / 30.0 + 1e-6);
         }
         // settled at half after 15 frames, and stays there
         for f in 16..100 {
-            assert!((data[f * CH] - 0.5).abs() < 1e-6, "frame {f}: {}", data[f * CH]);
+            assert!((data[f * CH] - 0.425).abs() < 1e-6, "frame {f}: {}", data[f * CH]);
         }
         assert!((pk - data[0]).abs() < 1e-6, "peak is the loudest sample out");
         // all the way down: silence; and back to unity
@@ -636,5 +652,17 @@ mod tests {
         let mut data = vec![0.8f32; 100 * CH];
         m.process(&mut data, CH, f32::NAN);
         assert!((data[99 * CH] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_output_never_clips_and_is_untouched_below_minus_one_db() {
+        assert_eq!(limit(0.5), 0.5);
+        assert_eq!(limit(-0.89), -0.89);
+        for x in [0.95f32, 1.0, 1.5, 3.0, 10.0] {
+            let y = limit(x);
+            assert!(y <= 1.0 && y > 0.89, "{x} -> {y}");
+            assert_eq!(limit(-x), -y);
+        }
+        assert!(limit(1.2) > limit(1.0), "still gets louder, just never past full scale");
     }
 }
