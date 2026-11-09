@@ -2,7 +2,7 @@
 //! thread, so the connection never has to cross threads. Messages go through the
 //! engine crate's `MidiMap`, which handles learn and tap/hold.
 
-use midir::MidiInput;
+use midir::{MidiInput, MidiOutput, MidiOutputConnection};
 use std::sync::mpsc;
 
 pub fn inputs() -> Vec<String> {
@@ -68,4 +68,13 @@ pub fn open(name: &str, mut on_msg: impl FnMut(&[u8]) + Send + 'static) -> Resul
         .map_err(|e| e.to_string())?;
     ready_rx.recv().map_err(|_| "The MIDI thread stopped unexpectedly.".to_string())??;
     Ok(MidiPort { name: name.to_string(), stop })
+}
+
+/// The output port that belongs with input `name` (the same name, as macOS lists a
+/// controller's in and out), for sending its lights.
+pub fn open_out(name: &str) -> Option<MidiOutputConnection> {
+    let m = MidiOutput::new("Playback Rig lights").ok()?;
+    let ports = m.ports();
+    let port = ports.iter().find(|p| m.port_name(p).ok().as_deref() == Some(name))?.clone();
+    m.connect(&port, "playback-rig-out").ok()
 }

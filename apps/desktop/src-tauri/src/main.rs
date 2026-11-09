@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod als;
+mod apc;
 mod assistant;
 mod audio;
 mod clicksong;
@@ -465,6 +466,8 @@ struct AppState {
     recovered: Mutex<Option<(PathBuf, usize)>>,
     /// Said once on screen when the set was picked back up.
     resumed: Mutex<Option<String>>,
+    /// The APC mini's lights: its output port and what it's showing.
+    lights: Mutex<Option<(midir::MidiOutputConnection, Option<Vec<apc::Light>>)>>,
 }
 
 impl AppState {
@@ -821,6 +824,26 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
                     let _ = app.emit("pedal", "refresh");
                 }
             }
+            Action::GotoBlock(i) => {
+                if let Some(st) = app.try_state::<AppState>() {
+                    let n = st.song.lock().unwrap().as_ref().map_or(0, |l| l.arr.items.len());
+                    if i < n {
+                        let _ = cmd(st, UiCmd::Goto { block: i });
+                    }
+                }
+            }
+            Action::BandPart(i) => {
+                if let (Some(st), Some(p)) = (app.try_state::<AppState>(), songfile::BAND_PARTS.get(i)) {
+                    let mut band = st.settings.lock().unwrap().band.clone();
+                    if let Some(k) = band.iter().position(|b| b == p) {
+                        band.remove(k);
+                    } else {
+                        band.push(p.to_string());
+                    }
+                    apply_band(app, &st, band);
+                    let _ = app.emit("pedal", "refresh");
+                }
+            }
             Action::PrevSong => {
                 let _ = app.emit("pedal", "prev-song");
             }
@@ -950,12 +973,14 @@ fn watch_midi(app: &AppHandle, st: &AppState, w: &midi_io::Watcher) {
     match recover::midi_step(want.as_deref(), connected, &w.names()) {
         recover::Step::Drop => {
             *st.midi.lock().unwrap() = None;
+            *st.lights.lock().unwrap() = None;
             st.core.midi_lost.store(want.is_some(), Ordering::Release);
             let _ = app.emit("connection", "midi-lost");
         }
         recover::Step::Open(Some(name)) => {
             if let Ok(p) = start_midi(&st.core, app, &name) {
                 *st.midi.lock().unwrap() = Some(p);
+                open_lights(st, Some(&name));
                 st.core.midi_lost.store(false, Ordering::Release);
                 let _ = app.emit("connection", "midi-back");
             }
@@ -1908,6 +1933,7 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
         let (item, playing) = snapshot.map_or((0, false), |s| (s.item, s.playing));
         state.write_session(Session { song, item, playing, clean: false });
     }
+    update_lights(&state);
     // On the tick the next song takes over, the snapshot can still be the old song's:
     // the pad logic waits for the next tick.
     let pad_changed = !song_changed && auto_pad(&state, &snapshot);
@@ -2007,13 +2033,14 @@ fn choose_midi(app: AppHandle, state: State<'_, AppState>, name: Option<String>)
     if let Some(n) = &name {
         let port = start_midi(&state.core, &app, n)?;
         *state.midi.lock().unwrap() = Some(port);
-        // A MIDImix with nothing assigned yet gets its ready-made layout.
-        let fresh = is_midimix(n) && state.core.map.lock().unwrap().bindings.is_empty();
-        if fresh {
-            state.core.map.lock().unwrap().bindings = midi::midimix();
+        // A MIDImix or APC mini with nothing assigned yet gets its ready-made layout.
+        let fresh = state.core.map.lock().unwrap().bindings.is_empty();
+        if let (true, Some(l)) = (fresh, layout_for(n)) {
+            state.core.map.lock().unwrap().bindings = l;
             state.core.save_map();
         }
     }
+    open_lights(&state, name.as_deref());
     state.settings.lock().unwrap().midi = name;
     state.save_settings();
     Ok(view(&state))
@@ -3106,6 +3133,11 @@ async fn check_set(state: State<'_, AppState>) -> Result<Vec<preflight::Check>, 
 /// Band tonight: which parts the band plays live (their tracks go quiet in every song).
 #[tauri::command]
 fn set_band(app: AppHandle, state: State<'_, AppState>, parts: Vec<String>) -> Result<AppView, String> {
+    apply_band(&app, &state, parts);
+    Ok(view(&state))
+}
+
+fn apply_band(app: &AppHandle, state: &AppState, parts: Vec<String>) {
     {
         let mut s = state.settings.lock().unwrap();
         s.band = songfile::BAND_PARTS.iter().filter(|p| parts.iter().any(|x| x == *p)).map(|p| p.to_string()).collect();
@@ -3115,8 +3147,70 @@ fn set_band(app: AppHandle, state: State<'_, AppState>, parts: Vec<String>) -> R
         }
     }
     state.save_settings();
-    sync_next(&app, &state);
-    Ok(view(&state))
+    sync_next(app, state);
+}
+
+/// The controller is an Akai APC mini mk2 (its Control port, not Notes).
+fn is_apc(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("apc mini") && !n.contains("notes")
+}
+
+/// The ready-made layout for this controller, if there is one.
+fn layout_for(name: &str) -> Option<Vec<Binding>> {
+    if is_apc(name) {
+        Some(midi::apc_mini_mk2())
+    } else if is_midimix(name) {
+        Some(midi::midimix())
+    } else {
+        None
+    }
+}
+
+/// Opens the APC's lights (or closes them for any other controller).
+fn open_lights(state: &AppState, name: Option<&str>) {
+    *state.lights.lock().unwrap() = name.filter(|n| is_apc(n)).and_then(midi_io::open_out).map(|c| (c, None));
+}
+
+/// Sends the APC's lights that changed since the last time.
+fn update_lights(state: &AppState) {
+    let mut g = state.lights.lock().unwrap();
+    let Some((conn, shown)) = g.as_mut() else { return };
+    let snap = state.core.snapshot();
+    let s = state.settings.lock().unwrap();
+    let song = state.song.lock().unwrap();
+    let blocks: Vec<String> = song.as_ref().map(|l| l.arr.items.iter().map(|it| l.song.sections.get(it.section).map(|x| x.name.clone()).unwrap_or_default()).collect()).unwrap_or_default();
+    let mut band = [false; 6];
+    for (i, p) in songfile::BAND_PARTS.iter().enumerate() {
+        band[i] = s.band.iter().any(|b| b == p);
+    }
+    let mut bus_muted = [false; 8];
+    for (i, b) in s.bus_list.iter().take(8).enumerate() {
+        bus_muted[i] = bus_level(&s, song.as_ref(), &b.id).1;
+    }
+    let l = apc::Lights {
+        songs: s.setlist.len(),
+        current: s.current,
+        cut_to: *state.jump_to.lock().unwrap(),
+        blocks: &blocks,
+        block: song.as_ref().and(snap.map(|x| x.item)),
+        pending: snap.and_then(|x| x.pending),
+        playing: snap.is_some_and(|x| x.playing),
+        vamp: snap.is_some_and(|x| x.vamp),
+        fading: snap.is_some_and(|x| x.tracks_out),
+        pad: *state.pad_on.lock().unwrap(),
+        free_click: state.core.metro_on.load(Ordering::Acquire),
+        band,
+        bus_muted,
+    };
+    let new = apc::lights(&l);
+    for m in apc::changes(shown.as_deref(), &new) {
+        if conn.send(&m).is_err() {
+            *g = None;
+            return;
+        }
+    }
+    *shown = Some(new);
 }
 
 /// The controller is an Akai MIDImix (by its port name).
@@ -3128,7 +3222,8 @@ fn is_midimix(name: &str) -> bool {
 /// Replaces every assignment with the MIDImix's ready-made layout.
 #[tauri::command]
 fn midi_preset(state: State<'_, AppState>) -> AppView {
-    state.core.map.lock().unwrap().bindings = midi::midimix();
+    let name = state.settings.lock().unwrap().midi.clone().unwrap_or_default();
+    state.core.map.lock().unwrap().bindings = layout_for(&name).unwrap_or_else(midi::midimix);
     state.core.pickup.lock().unwrap().clear();
     state.core.save_map();
     view(&state)
@@ -3303,7 +3398,15 @@ fn main() {
                 session: Mutex::new(Session::default()),
                 recovered: Mutex::new(recovered),
                 resumed: Mutex::new(None),
+                lights: Mutex::new(None),
             });
+            {
+                let st = app.state::<AppState>();
+                let n = st.settings.lock().unwrap().midi.clone();
+                if st.midi.lock().unwrap().is_some() {
+                    open_lights(&st, n.as_deref());
+                }
+            }
             {
                 let h = app.handle().clone();
                 std::thread::Builder::new().name("reconnect".into()).spawn(move || watch(h))?;
@@ -3439,6 +3542,7 @@ mod tests {
             session: Mutex::new(Session::default()),
             recovered: Mutex::new(None),
             resumed: Mutex::new(None),
+            lights: Mutex::new(None),
         }
     }
 

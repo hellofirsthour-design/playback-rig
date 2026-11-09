@@ -66,6 +66,10 @@ pub enum Action {
     CancelJump,
     /// Continuous: a fader or knob sets the pad level.
     PadLevel,
+    /// Jump to this block of the arrangement (0 = the first), on the quantize setting.
+    GotoBlock(usize),
+    /// Turn a Live tonight part on or off (its place in BAND_PARTS).
+    BandPart(usize),
 }
 
 impl Action {
@@ -160,6 +164,39 @@ pub fn midimix() -> Vec<Binding> {
     v.push(bind(cc(LOW_KNOBS[1]), Action::PadLevel));
     v.push(bind(note(25), Action::PrevSong));
     v.push(bind(note(26), Action::NextSong));
+    v
+}
+
+/// The Akai APC mini mk2's layout (its "Control" port, factory settings), ready to play.
+/// Pads count up from the bottom-left (0) to the top-right (63).
+///   top row        Song 1-8
+///   rows 7 and 6   Section 1-16 of the arrangement (jump on the quantize setting)
+///   row 5          Play/stop, Next block, Repeat, Vamp, Cancel jump, Fade out now, Pad, Free click
+///   row 4          (the Drummer)
+///   row 3          Live tonight: Drums, Bass, Piano, Organ, Electric, Acoustic
+///   track buttons  mute bus 1-8;  faders 1-8 = buses 1-8, fader 9 = master
+///   scene buttons  1 = previous song, 2 = next song
+pub fn apc_mini_mk2() -> Vec<Binding> {
+    let note = |key: u8| Control::Note { ch: 0, key };
+    let cc = |num: u8| Control::Cc { ch: 0, num };
+    let bind = |control, tap| Binding { control, tap, hold: None };
+    let pad = |row: u8, col: u8| note((row - 1) * 8 + col - 1);
+    const ROW5: [Action; 8] = [Action::PlayStop, Action::Next, Action::Repeat, Action::ToggleVamp, Action::CancelJump, Action::FadeOut, Action::PadOnly, Action::FreeClick];
+    let mut v = vec![];
+    for i in 0..8u8 {
+        v.push(bind(cc(48 + i), Action::BusLevel(i as usize)));
+        v.push(bind(note(100 + i), Action::BusMute(i as usize)));
+        v.push(bind(pad(8, i + 1), Action::Song(i as usize)));
+        v.push(bind(pad(7, i + 1), Action::GotoBlock(i as usize)));
+        v.push(bind(pad(6, i + 1), Action::GotoBlock(8 + i as usize)));
+        v.push(bind(pad(5, i + 1), ROW5[i as usize]));
+    }
+    for i in 0..6u8 {
+        v.push(bind(pad(3, i + 1), Action::BandPart(i as usize)));
+    }
+    v.push(bind(cc(56), Action::MasterLevel));
+    v.push(bind(note(112), Action::PrevSong));
+    v.push(bind(note(113), Action::NextSong));
     v
 }
 
@@ -260,6 +297,19 @@ mod tests {
         assert_eq!(m.handle(&[0x90, 26, 127], 30), Some(Event::Fire(Action::NextSong)));
         assert_eq!(m.handle(&[0xb0, 62, 127], 40), Some(Event::Level(Action::MasterLevel, 1.0)));
         assert_eq!(m.handle(&[0xb0, 23, 0], 50), Some(Event::Level(Action::BusLevel(1), 0.0)));
+    }
+
+    #[test]
+    fn the_apc_mini_layout_plays_straight_away() {
+        let mut m = MidiMap { bindings: apc_mini_mk2(), ..Default::default() };
+        let mut seen = std::collections::HashSet::new();
+        assert!(m.bindings.iter().all(|b| seen.insert(b.control)), "one action per control");
+        assert_eq!(m.handle(&[0x90, 56, 127], 0), Some(Event::Fire(Action::Song(0))), "top-left pad");
+        assert_eq!(m.handle(&[0x90, 63, 127], 10), Some(Event::Fire(Action::Song(7))), "top-right pad");
+        assert_eq!(m.handle(&[0x90, 37, 127], 20), Some(Event::Fire(Action::FadeOut)), "row 5, pad 6");
+        assert_eq!(m.handle(&[0x90, 41, 127], 30), Some(Event::Fire(Action::GotoBlock(9))), "row 6, pad 2");
+        assert_eq!(m.handle(&[0x90, 100, 127], 40), Some(Event::Fire(Action::BusMute(0))));
+        assert_eq!(m.handle(&[0xb0, 56, 127], 50), Some(Event::Level(Action::MasterLevel, 1.0)));
     }
 
     #[test]

@@ -711,3 +711,4 @@ body.live-mode .bar .lcd { display: none }
 .chk i { font-style: normal; font-weight: 800; text-align: center }
 .chk.ok i { color: var(--play) } .chk.warn i { color: var(--cue) } .chk.bad i { color: var(--danger) }
 .chk.ok span { color: var(--muted) }
+.warnline { color: var(--cue) }

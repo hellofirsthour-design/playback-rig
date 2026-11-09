@@ -1583,6 +1583,8 @@
   function actionLabel(a) {
     if (a && a.Song !== undefined) return `Song ${a.Song + 1}`;
     if (a && a.BusLevel !== undefined) { const b = (V.all_buses || [])[a.BusLevel]; return `${b ? b.name : 'Bus ' + (a.BusLevel + 1)} fader`; }
+    if (a && a.GotoBlock !== undefined) return `Section ${a.GotoBlock + 1}`;
+    if (a && a.BandPart !== undefined) return `Live tonight: ${(PARTS[a.BandPart] || ['', '?'])[1]}`;
     if (a && a.BusMute !== undefined) { const b = (V.all_buses || [])[a.BusMute]; return `${b ? b.name : 'Bus ' + (a.BusMute + 1)} mute`; }
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
     return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad on / off', ClickLevel: 'Built-in click level', PadLevel: 'Pad level', CancelJump: 'Cancel jump', PrevSong: 'Previous song', MasterLevel: 'Master fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
@@ -1599,8 +1601,19 @@
       const k = MIX_KNOBS.findIndex(x => n >= x && n <= x + 2); if (k >= 0) return `Knob ${k + 1}, row ${n - MIX_KNOBS[k] + 1}`; }
     return null;
   }
+  // APC mini mk2 (Control port): pads count from the bottom-left, rows 1-8 from the bottom.
+  function apcName(c) {
+    if (c.Note && c.Note.ch === 0) { const k = c.Note.key;
+      if (k < 64) return `Pad row ${Math.floor(k / 8) + 1}, ${k % 8 + 1}`;
+      if (k >= 100 && k <= 107) return `Track button ${k - 99}`;
+      if (k >= 112 && k <= 119) return `Scene button ${k - 111}`;
+      if (k === 122) return 'Shift'; }
+    if (c.Cc && c.Cc.ch === 0 && c.Cc.num >= 48 && c.Cc.num <= 56) return c.Cc.num === 56 ? 'Fader 9 (master)' : `Fader ${c.Cc.num - 47}`;
+    return null;
+  }
   const isMidimix = () => !!V && !!V.midi && /midi ?mix/i.test(V.midi);
-  const controlLabel = c => (isMidimix() && mixName(c)) || (c.Note ? `Note ${c.Note.key} · ch ${c.Note.ch + 1}` : c.Cc ? `CC ${c.Cc.num} · ch ${c.Cc.ch + 1}` : '?');
+  const isApc = () => !!V && !!V.midi && /apc mini/i.test(V.midi) && !/notes/i.test(V.midi);
+  const controlLabel = c => (isMidimix() && mixName(c)) || (isApc() && apcName(c)) || (c.Note ? `Note ${c.Note.key} · ch ${c.Note.ch + 1}` : c.Cc ? `CC ${c.Cc.num} · ch ${c.Cc.ch + 1}` : '?');
   function renderSetup() {
     const os = $('#outSel'); os.innerHTML = '';
     V.outputs.forEach(o => os.append(new Option(`${o.name} (${o.channels} outputs)${o.is_default ? ' · default' : ''}`, o.name)));
@@ -1637,7 +1650,10 @@
       };
       d.append(t, b); box.append(d);
     });
-    $('#midimixBtn').hidden = !isMidimix();
+    $('#midimixBtn').hidden = !isMidimix() && !isApc();
+    $('#midimixUse').textContent = isApc() ? 'Use the APC mini layout' : 'Use the MIDImix layout';
+    $('#mixMapMidimix').hidden = !isMidimix(); $('#mixMapApc').hidden = !isApc();
+    $('#apcNotes').hidden = !(V.midi && /apc mini/i.test(V.midi) && /notes/i.test(V.midi));
     const bl = $('#bindings'); bl.innerHTML = '';
     if (!V.bindings.length) bl.append(el('p', 'hint', 'Nothing assigned yet.'));
     V.bindings.forEach((bd, i) => {
@@ -1661,10 +1677,11 @@
   $('#announceChk').onchange = e => { V.announce = e.target.checked; send({ type: 'Announce', on: V.announce }); };
   $('#clickRoute').onchange = e => { V.click_route = keyRoute(e.target.value); send({ type: 'ClickRoute', route: V.click_route }); };
   $('#clickGain').oninput = e => { V.click_gain = +e.target.value; send({ type: 'ClickGain', gain: V.click_gain }); };
-  $('#midiSel').onchange = e => invoke('choose_midi', { name: e.target.value || null }).then(v => { const was = V.bindings.length; refresh(v); if (!was && v.bindings.length && isMidimix()) toast('MIDImix ready: its layout is set up. See Setup → MIDI.'); }).catch(err);
+  $('#midiSel').onchange = e => invoke('choose_midi', { name: e.target.value || null }).then(v => { const was = V.bindings.length; refresh(v); if (!was && v.bindings.length && (isMidimix() || isApc())) toast(`${isApc() ? 'APC mini' : 'MIDImix'} ready: its layout is set up. See Setup → MIDI.`); }).catch(err);
   $('#midimixUse').onclick = () => {
-    if (V.bindings.length && !confirm('Replace every assignment with the MIDImix layout?')) return;
-    invoke('midi_preset').then(v => { refresh(v); toast('MIDImix layout set.'); }).catch(err);
+    const n = isApc() ? 'APC mini' : 'MIDImix';
+    if (V.bindings.length && !confirm(`Replace every assignment with the ${n} layout?`)) return;
+    invoke('midi_preset').then(v => { refresh(v); toast(`${n} layout set.`); }).catch(err);
   };
 
   /* ---------- drawers ---------- */

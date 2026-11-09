@@ -241,9 +241,11 @@
     <h3>MIDI controller</h3>
     <div class="form one"><label>MIDI input<select id="midiSel"></select></label></div>
     <p class="hint">Press <b>Learn</b>, then press the button (or move the fader) on your controller. Faders are the master and the buses, the way you would map them in Ableton; tracks follow their bus.</p>
+    <p class="hint warnline" id="apcNotes" hidden>This is the APC mini's <b>Notes</b> port. Pick the one ending in <b>Control</b> for the pads, faders and lights.</p>
     <div class="mixmap" id="midimixBtn" hidden>
       <button class="btn" id="midimixUse">Use the MIDImix layout</button>
-      <p class="hint"><b>Faders 1-8:</b> Click, Guide, Drums, Bass, Guitars, Keys, Other, Vocals · <b>Master fader:</b> master · <b>Mute 1-8:</b> mute that bus · <b>Hold SOLO + Mute 1-8:</b> Song 1-8 · <b>Rec arm 1-8:</b> Play/stop, Next block, Repeat, Vamp, Cancel jump, Fade out now, Pad on/off, Free click · <b>Bank ◀ ▶:</b> previous / next song · <b>Bottom knobs 1-2:</b> built-in click level, pad level. A fader only takes over once you move it to where the screen's fader is, so nothing jumps.</p>
+      <p class="hint" id="mixMapApc"><b>Top row:</b> Song 1-8 · <b>Rows 7-6:</b> Sections 1-16 of the song (jump on your Now/Bar/End setting) · <b>Row 5:</b> Play/stop, Next block, Repeat, Vamp, Cancel jump, Fade out now, Pad on/off, Free click · <b>Row 4:</b> the Drummer (coming) · <b>Row 3:</b> Live tonight: Drums, Bass, Piano, Organ, Electric, Acoustic · <b>Track buttons 1-8:</b> mute that bus · <b>Faders 1-8:</b> Click, Guide, Drums, Bass, Guitars, Keys, Other, Vocals · <b>Fader 9:</b> master · <b>Scene 1-2:</b> previous / next song. The pads light up: this song green, next song yellow, sections in their colours, the playing one green. A fader only takes over once you move it to where the screen's fader is.</p>
+      <p class="hint" id="mixMapMidimix"><b>Faders 1-8:</b> Click, Guide, Drums, Bass, Guitars, Keys, Other, Vocals · <b>Master fader:</b> master · <b>Mute 1-8:</b> mute that bus · <b>Hold SOLO + Mute 1-8:</b> Song 1-8 · <b>Rec arm 1-8:</b> Play/stop, Next block, Repeat, Vamp, Cancel jump, Fade out now, Pad on/off, Free click · <b>Bank ◀ ▶:</b> previous / next song · <b>Bottom knobs 1-2:</b> built-in click level, pad level. A fader only takes over once you move it to where the screen's fader is, so nothing jumps.</p>
     </div>
     <div class="learn" id="learn"></div>
     <h3>Assigned</h3>
