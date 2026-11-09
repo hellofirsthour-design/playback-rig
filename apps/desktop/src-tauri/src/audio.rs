@@ -25,6 +25,20 @@ pub enum ToAudio {
     Unqueue,
     /// The free click: on/off, BPM, beats per bar, level, output.
     Metro { on: bool, bpm: f64, beats_per_bar: u32, gain: f32, route: rig_engine::Route, div: u32 },
+    /// The Drummer: a command, or its kit (made off the audio thread).
+    Drum(rig_engine::drummer::DrumCmd),
+    DrumKit(Box<rig_engine::drummer::Kit>),
+}
+
+/// What the Drummer is doing, for the screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct DrumState {
+    pub running: bool,
+    /// Waiting for the song's next bar to come in.
+    pub waiting: bool,
+    pub level: u8,
+    pub bpm: f64,
+    pub has_kit: bool,
 }
 
 /// Audio played alongside a song change: the reverb wash over the seam, or the spoken
@@ -184,6 +198,7 @@ pub enum Garbage {
     Arrangement(Box<Arrangement>),
     Pad(Box<crate::pads::PadVoice>),
     Overlay(Box<Overlay>),
+    Kit(Box<rig_engine::drummer::Kit>),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -242,7 +257,7 @@ pub fn list_outputs() -> Vec<OutputInfo> {
 }
 
 /// Opens an output (by name, or the system default) using all of its channels.
-pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, levels: Arc<Mutex<[f32; 64]>>, master: Arc<std::sync::atomic::AtomicU32>, on_error: impl Fn(String, bool) + Send + 'static) -> Result<Output, String> {
+pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: Arc<AtomicU64>, metro_on: Arc<std::sync::atomic::AtomicBool>, levels: Arc<Mutex<[f32; 64]>>, master: Arc<std::sync::atomic::AtomicU32>, drum_state: Arc<Mutex<DrumState>>, on_error: impl Fn(String, bool) + Send + 'static) -> Result<Output, String> {
     let (tx, mut rx) = rtrb::RingBuffer::<ToAudio>::new(1024);
     let (mut gtx, garbage) = rtrb::RingBuffer::<Garbage>::new(32);
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -288,6 +303,8 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
             let mut metro = crate::metronome::Metronome::new(sample_rate);
             let mut pads = crate::pads::PadPlayer::new(sample_rate);
             let mut out_level = Master::new(sample_rate);
+            let mut drummer = rig_engine::drummer::Drummer::new(sample_rate);
+            let mut has_kit = false;
             let stream = dev.build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
@@ -332,6 +349,13 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                                 metro.set(on, bpm, beats_per_bar);
                                 metro_on.store(metro.on, Ordering::Release);
                             }
+                            ToAudio::Drum(c) => drummer.handle(c),
+                            ToAudio::DrumKit(k) => {
+                                has_kit = true;
+                                if let Some(old) = drummer.set_kit(k) {
+                                    let _ = gtx.push(Garbage::Kit(old));
+                                }
+                            }
                             ToAudio::Unqueue => {
                                 if let Some((old, mut oh)) = decks.queued.take() {
                                     let _ = gtx.push(Garbage::Engine(old));
@@ -340,6 +364,14 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                                     }
                                 }
                             }
+                        }
+                    }
+                    // The Drummer locks to the song where it is at the start of this block.
+                    if drummer.running() {
+                        match decks.engine.as_ref().and_then(|e| e.bar_phase()) {
+                            Some((beat, bpm)) => drummer.follow(beat, bpm),
+                            None if drummer.waiting() => drummer.unsync(),
+                            None => {}
                         }
                     }
                     // Hand over to the next song when the current one is about to end.
@@ -371,6 +403,10 @@ pub fn open(name: Option<String>, status: Arc<Mutex<Option<Snapshot>>>, segues: 
                         metro_on.store(false, Ordering::Release);
                     }
                     metro.process(data, channels);
+                    drummer.process(data, channels);
+                    if let Ok(mut ds) = drum_state.try_lock() {
+                        *ds = DrumState { running: drummer.running(), waiting: drummer.waiting(), level: drummer.level(), bpm: drummer.bpm(), has_kit };
+                    }
                     if let Some(done) = pads.process(data, channels) {
                         let _ = gtx.push(Garbage::Pad(done));
                     }

@@ -38,6 +38,8 @@ pub struct Lights<'a> {
     pub free_click: bool,
     pub band: [bool; 6],
     pub bus_muted: [bool; 8],
+    /// The Drummer: playing, waiting for the bar, its level (0-5), half-time.
+    pub drum: (bool, bool, u8, bool),
 }
 
 /// A section's colour by its name, like the section tiles on screen.
@@ -105,10 +107,30 @@ pub fn lights(l: &Lights) -> Vec<Light> {
         let s = if i < 6 { if l.band[i] { (FULL, ORANGE) } else { (DIM, WHITE) } } else { (0, OFF) };
         v.push((s.0, pad(3, i as u8 + 1), s.1));
     }
-    for row in [4u8, 2, 1] {
-        for col in 1..=8 {
-            v.push((0, pad(row, col), OFF));
-        }
+    let (drum_on, drum_wait, drum_level, half) = l.drum;
+    let row4 = [
+        if drum_wait { (PULSE, GREEN) } else if drum_on { (FULL, GREEN) } else { (DIM, GREEN) },
+        (DIM, YELLOW),
+        (DIM, ORANGE),
+        (DIM, BLUE),
+        (DIM, RED),
+        if half { (FULL, PURPLE) } else { (DIM, PURPLE) },
+        (DIM, WHITE),
+        (DIM, CYAN),
+    ];
+    for (i, (ch, c)) in row4.into_iter().enumerate() {
+        v.push((ch, pad(4, i as u8 + 1), c));
+    }
+    for i in 0..8u8 {
+        let s = match i {
+            _ if i > 5 => (0, OFF),
+            _ if drum_on && i == drum_level => (FULL, ORANGE),
+            _ => (DIM, ORANGE),
+        };
+        v.push((s.0, pad(2, i + 1), s.1));
+    }
+    for col in 1..=8 {
+        v.push((0, pad(1, col), OFF));
     }
     for i in 0..8u8 {
         v.push((0, 100 + i, l.bus_muted[i as usize] as u8));
@@ -134,7 +156,7 @@ mod tests {
     use super::*;
 
     fn base<'a>(blocks: &'a [String]) -> Lights<'a> {
-        Lights { songs: 4, current: Some(1), cut_to: None, blocks, block: Some(2), pending: None, playing: true, vamp: false, fading: false, pad: false, free_click: false, band: [true, false, false, false, false, false], bus_muted: [false; 8] }
+        Lights { songs: 4, current: Some(1), cut_to: None, blocks, block: Some(2), pending: None, playing: true, vamp: false, fading: false, pad: false, free_click: false, band: [true, false, false, false, false, false], bus_muted: [false; 8], drum: (true, false, 3, false) }
     }
 
     #[test]
@@ -150,6 +172,9 @@ mod tests {
         assert_eq!(at(51), (DIM, 51, PURPLE), "bridge");
         assert_eq!(at(32), (FULL, 32, GREEN), "playing");
         assert_eq!(at(16), (FULL, 16, ORANGE), "drums live tonight");
+        assert_eq!(at(24), (FULL, 24, GREEN), "drummer playing");
+        assert_eq!(at(11), (FULL, 11, ORANGE), "drummer on level 3 (row 2, pad 4)");
+        assert_eq!(at(10), (DIM, 10, ORANGE));
         assert_eq!(l.len(), 64 + 16);
         // Only what changed is sent again.
         let mut b2 = base(&blocks);

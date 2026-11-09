@@ -42,6 +42,18 @@ impl P {
     fn is_hat(self) -> bool {
         matches!(self, P::HatClosed | P::HatPedal | P::HatHalf | P::HatOpen)
     }
+    /// The piece's level in the kit (dB): cymbals sit well under the drums, the way a
+    /// worship mix has them, natural rather than splashy.
+    fn trim_db(self) -> f32 {
+        match self {
+            P::HatClosed | P::HatPedal => -5.0,
+            P::HatHalf | P::HatOpen => -7.0,
+            P::Ride | P::RideBell => -7.0,
+            P::RideCrash => -9.0,
+            P::CrashL | P::CrashR => -9.0,
+            _ => 0.0,
+        }
+    }
     /// How far the hit wanders from the grid (ms) and where it sits (ms, + = behind).
     fn feel(self) -> (f32, f32) {
         match self {
@@ -55,16 +67,19 @@ impl P {
 }
 
 /// One recorded hit: stereo, interleaved, at the output rate; and its attack loudness.
+#[derive(Clone)]
 pub struct Hit {
     pub data: Arc<[f32]>,
     pub rms: f32,
 }
 
+#[derive(Clone)]
 pub struct Piece {
     /// Softest first.
     pub hits: Vec<Hit>,
 }
 
+#[derive(Clone)]
 pub struct Kit {
     pub pieces: Vec<Piece>,
 }
@@ -105,6 +120,10 @@ pub enum DrumCmd {
     Cue(Cue),
     Gain(f32),
     Route(Route),
+    /// Its own click in the in-ears: on, level, output.
+    Click(bool, f32, Route),
+    /// Start with a song playing: it comes in on the song's next bar (see `follow`).
+    StartSynced,
 }
 
 const VOICES: usize = 48;
@@ -165,6 +184,13 @@ pub struct Drummer {
     /// After a stop crash: let it ring, play nothing.
     stopped: bool,
     gain_smooth: f32,
+    /// Its own click (when there's no song's click): on, level, output, and the sounding click.
+    click_on: bool,
+    click_gain: f32,
+    click_route: Route,
+    click: (u32, f32, f32, u32), // wait, freq, amp, frames played (u32::MAX = idle)
+    /// Waiting to come in on the song's next bar (see `follow`).
+    sync_start: bool,
 }
 
 impl Default for Drummer {
@@ -199,6 +225,11 @@ impl Drummer {
             downbeat: None,
             stopped: false,
             gain_smooth: 1.0,
+            click_on: false,
+            click_gain: 0.8,
+            click_route: Route::Pair(2),
+            click: (0, 0.0, 0.0, u32::MAX),
+            sync_start: false,
         }
     }
 
@@ -263,6 +294,15 @@ impl Drummer {
             }
             DrumCmd::Gain(g) => self.gain = g.clamp(0.0, 4.0),
             DrumCmd::Route(r) => self.route = r,
+            DrumCmd::Click(on, g, r) => {
+                self.click_on = on;
+                self.click_gain = g.clamp(0.0, 2.0);
+                self.click_route = r;
+            }
+            DrumCmd::StartSynced => {
+                self.handle(DrumCmd::Start);
+                self.sync_start = true;
+            }
         }
     }
 
@@ -332,7 +372,7 @@ impl Drummer {
         }
         self.last_hit[p as usize] = pick;
         let h = &piece.hits[pick];
-        let gain = (target / h.rms.max(1e-6)).clamp(0.25, 4.0);
+        let gain = (target / h.rms.max(1e-6)).clamp(0.25, 4.0) * 10f32.powf(p.trim_db() / 20.0);
         // The hi-hat closing chokes an open hat.
         if p.is_hat() && p != P::HatOpen {
             let fade = 1.0 / (0.012 * self.sr as f32);
@@ -431,7 +471,7 @@ impl Drummer {
                     push(P::Cross, 0.75 * lift);
                 }
                 if eighth {
-                    push(P::HatClosed, if on_beat { 0.5 } else { 0.32 } * lift);
+                    push(P::HatClosed, if on_beat { 0.42 } else { 0.28 } * lift);
                 }
             }
             4 => {
@@ -453,9 +493,9 @@ impl Drummer {
                 }
                 let open = last_beat && sub == spb / 2 && bar % 2 == 1;
                 if open {
-                    push(P::HatHalf, 0.55 * lift);
+                    push(P::HatHalf, 0.42 * lift);
                 } else if eighth {
-                    push(P::HatClosed, if on_beat { 0.62 } else { 0.42 } * lift);
+                    push(P::HatClosed, if on_beat { 0.5 } else { 0.34 } * lift);
                 }
             }
             _ => {
@@ -468,7 +508,7 @@ impl Drummer {
                     push(P::Snare, 0.95 * lift);
                 }
                 if on_beat {
-                    push(P::RideCrash, if beat == 0 { 0.6 } else { 0.5 } * lift);
+                    push(P::RideCrash, if beat == 0 { 0.45 } else { 0.36 } * lift);
                 }
                 if eighth {
                     push(P::TomFloor, if on_beat { 0.5 } else { 0.36 } * lift);
@@ -549,17 +589,17 @@ impl Drummer {
                 self.active = None;
             }
             if let Some(v) = self.downbeat.take() {
-                notes[0] = Some(Note { p: P::CrashL, vel: v * 0.9 });
+                notes[0] = Some(Note { p: P::CrashL, vel: v * 0.72 });
                 notes[1] = Some(Note { p: P::Kick, vel: v });
-                notes[2] = Some(Note { p: P::CrashR, vel: v * 0.7 });
+                notes[2] = Some(Note { p: P::CrashR, vel: v * 0.55 });
             }
             match self.pending.take() {
                 Some(Cue::Hit) => {
-                    notes[0] = Some(Note { p: P::CrashL, vel: 0.85 });
+                    notes[0] = Some(Note { p: P::CrashL, vel: 0.7 });
                     notes[1] = Some(Note { p: P::Kick, vel: 0.9 });
                 }
                 Some(Cue::Drop) => {
-                    notes[0] = Some(Note { p: P::CrashL, vel: 0.8 });
+                    notes[0] = Some(Note { p: P::CrashL, vel: 0.65 });
                     notes[1] = Some(Note { p: P::Kick, vel: 0.85 });
                     notes[2] = Some(Note { p: P::TomFloor, vel: 0.6 });
                     self.intensity = 0.25;
@@ -568,9 +608,9 @@ impl Drummer {
                     return;
                 }
                 Some(Cue::Stop) => {
-                    notes[0] = Some(Note { p: P::CrashL, vel: 0.85 });
+                    notes[0] = Some(Note { p: P::CrashL, vel: 0.7 });
                     notes[1] = Some(Note { p: P::Kick, vel: 0.9 });
-                    notes[2] = Some(Note { p: P::CrashR, vel: 0.65 });
+                    notes[2] = Some(Note { p: P::CrashR, vel: 0.5 });
                     self.stopped = true;
                     self.running = false;
                     return;
@@ -583,7 +623,7 @@ impl Drummer {
             }
             let target = level_of(self.intensity);
             if target > self.level + 1 && notes[0].is_none() {
-                notes[0] = Some(Note { p: P::CrashL, vel: 0.75 });
+                notes[0] = Some(Note { p: P::CrashL, vel: 0.6 });
             }
             self.level = target;
         }
@@ -613,11 +653,50 @@ impl Drummer {
         self.groove(lv, s, bar, notes);
     }
 
+    /// Locks to a song that's playing: where it is in its bar (in beats) and its tempo, called
+    /// once per block. A synced start comes in on the song's next bar line; after that the
+    /// drummer's time is nudged (never jumped) so it can't drift from the song.
+    pub fn follow(&mut self, beat_in_bar: f64, bpm: f64) {
+        if !self.running || !bpm.is_finite() || bpm <= 0.0 {
+            return;
+        }
+        self.bpm = bpm.clamp(30.0, 240.0);
+        self.glide = None;
+        let beats = self.beats as f64;
+        let beat_frames = self.step_frames() * self.steps_per_beat() as f64;
+        if self.sync_start {
+            self.sync_start = false;
+            self.step = 0;
+            self.next_step_in = ((beats - beat_in_bar.rem_euclid(beats)) % beats) * beat_frames;
+            return;
+        }
+        let spb = self.steps_per_beat() as f64;
+        let mine = (((self.step % self.steps_per_bar() as u64) as f64 - self.next_step_in / self.step_frames()) / spb).rem_euclid(beats);
+        let mut err = beat_in_bar.rem_euclid(beats) - mine;
+        if err > beats / 2.0 {
+            err -= beats;
+        } else if err < -beats / 2.0 {
+            err += beats;
+        }
+        // Behind the song (err > 0): the next step comes sooner. At most 1 ms per block.
+        let fix = (err * beat_frames * 0.25).clamp(-0.001 * self.sr, 0.001 * self.sr);
+        self.next_step_in -= fix;
+    }
+
+    /// Whether it's waiting for the song's bar line.
+    pub fn waiting(&self) -> bool {
+        self.sync_start
+    }
+    /// The song it was waiting for isn't playing after all: start on its own now.
+    pub fn unsync(&mut self) {
+        self.sync_start = false;
+    }
+
     /// Adds the drummer into `out` (interleaved, `ch` channels).
     pub fn process(&mut self, out: &mut [f32], ch: usize) {
         let frames = out.len() / ch.max(1);
         // Steps that start within this block (plus a little lookahead for hits ahead of the grid).
-        if self.running {
+        if self.running && !self.sync_start {
             let look = LOOKAHEAD_MS * self.sr / 1000.0;
             while self.next_step_in < frames as f64 + look && self.running {
                 if let Some((from, to, start, steps)) = self.glide {
@@ -629,8 +708,13 @@ impl Drummer {
                     }
                 }
                 let mut notes = [None; PER_STEP];
+                let s_in_bar = (self.step % self.steps_per_bar() as u64) as u32;
                 self.plan(&mut notes);
                 let at = self.next_step_in;
+                if self.click_on && self.running && s_in_bar % self.steps_per_beat() == 0 {
+                    let first = s_in_bar == 0;
+                    self.click = (at.max(0.0) as u32, if first { 1760.0 } else { 1175.0 }, 0.9, 0);
+                }
                 for n in notes.into_iter().flatten() {
                     let (wander, sit) = n.p.feel();
                     let ms = sit + wander * self.gauss();
@@ -643,6 +727,7 @@ impl Drummer {
             }
             self.next_step_in -= frames as f64;
         }
+        self.render_click(out, ch, frames);
         let gain_target = if self.halting > 0.0 { 0.0 } else { self.gain };
         let Some(kit) = self.kit.as_deref() else { return };
         let step_g = 1.0 / (0.005 * self.sr as f32);
@@ -697,6 +782,44 @@ impl Drummer {
             }
             self.gain_smooth = self.gain;
         }
+    }
+}
+
+impl Drummer {
+    /// The click: a short sine blip on each beat, accented on the one, like the built-in click.
+    fn render_click(&mut self, out: &mut [f32], ch: usize, frames: usize) {
+        let (mut wait, freq, amp, mut pos) = self.click;
+        if pos == u32::MAX {
+            return;
+        }
+        let (a, b) = match self.click_route {
+            Route::Pair(n) => (n as usize, n as usize + 1),
+            Route::Mono(n) => (n as usize, n as usize),
+        };
+        if b >= ch {
+            return;
+        }
+        let len = (0.03 * self.sr) as u32;
+        let fade_in = (0.0005 * self.sr) as u32;
+        for f in 0..frames {
+            if wait > 0 {
+                wait -= 1;
+                continue;
+            }
+            if pos >= len {
+                pos = u32::MAX;
+                break;
+            }
+            let t = pos as f32 / self.sr as f32;
+            let env = (-t * 140.0).exp() * (pos.min(fade_in) as f32 / fade_in.max(1) as f32);
+            let x = (t * freq * std::f32::consts::TAU).sin() * env * amp * self.click_gain * 0.5;
+            out[f * ch + a] += x;
+            if b != a {
+                out[f * ch + b] += x;
+            }
+            pos += 1;
+        }
+        self.click = (wait, freq, amp, pos);
     }
 }
 
@@ -826,6 +949,58 @@ mod tests {
         let jump = x.windows(4).map(|w| (w[2] - w[0]).abs()).fold(0f32, f32::max);
         assert!(jump < 0.2, "{jump}");
         assert!(x[x.len() / 2..].iter().all(|s| *s == 0.0), "silent after the fade");
+    }
+
+    #[test]
+    fn a_synced_start_comes_in_on_the_songs_next_bar_and_stays_locked() {
+        let sr = 48_000;
+        let mut d = Drummer::new(sr);
+        d.set_kit(kit(sr));
+        d.handle(DrumCmd::Intensity(0.9));
+        d.handle(DrumCmd::StartSynced);
+        // The song is 1.5 beats into a 4/4 bar at 120: its next bar is 2.5 beats = 1.25 s away.
+        let bpm = 120.0;
+        let block = 256usize;
+        let mut song_beats = 1.5f64;
+        let mut all = vec![];
+        for _ in 0..(4.0 * sr as f64) as usize / block {
+            d.follow(song_beats % 4.0, bpm);
+            let mut b = vec![0f32; block * 2];
+            d.process(&mut b, 2);
+            all.extend_from_slice(&b);
+            song_beats += block as f64 / sr as f64 * bpm / 60.0;
+        }
+        let on = onsets(&all, sr);
+        assert!((on[0] - 1.25).abs() < 0.01, "first hit on the bar: {on:?}");
+        // The next bar (1.25 + 2 s) also has a hit within a few ms of the song's bar.
+        assert!(on.iter().any(|t| (t - 3.25).abs() < 0.006), "{on:?}");
+    }
+
+    #[test]
+    fn its_click_plays_every_beat_in_the_in_ears() {
+        let sr = 48_000;
+        let mut d = Drummer::new(sr);
+        d.set_kit(kit(sr));
+        d.handle(DrumCmd::Intensity(0.0)); // drums silent: only the click
+        d.handle(DrumCmd::Click(true, 1.0, Route::Pair(2)));
+        d.handle(DrumCmd::Tempo(120.0));
+        d.handle(DrumCmd::Start);
+        let block = 256usize;
+        let mut ears = vec![];
+        let mut foh = 0f32;
+        for _ in 0..(2.0 * sr as f64) as usize / block {
+            let mut b = vec![0f32; block * 4];
+            d.process(&mut b, 4);
+            for f in 0..block {
+                foh = foh.max(b[f * 4].abs());
+                ears.push(b[f * 4 + 2]);
+                ears.push(b[f * 4 + 3]);
+            }
+        }
+        assert_eq!(foh, 0.0, "nothing in front of house");
+        let on = onsets(&ears, sr);
+        assert_eq!(on.len(), 4, "{on:?}");
+        assert!((on[1] - 0.5).abs() < 0.003);
     }
 
     #[test]

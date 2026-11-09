@@ -712,3 +712,22 @@ body.live-mode .bar .lcd { display: none }
 .chk.ok i { color: var(--play) } .chk.warn i { color: var(--cue) } .chk.bad i { color: var(--danger) }
 .chk.ok span { color: var(--muted) }
 .warnline { color: var(--cue) }
+
+/* Drummer */
+.dmoments { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px }
+.dmoments .btn { height: 44px; font-weight: 700 }
+.dlevels { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px }
+.drumcards .dlv { height: 38px }
+.dlv { height: 44px; min-width: 0; padding: 0 4px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--bg); color: var(--muted); font: 700 12px var(--f-body); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.dlv.on { background: color-mix(in srgb, var(--go) 22%, var(--bg)); border-color: var(--go); color: var(--fg) }
+.drumcards { grid-template-columns: minmax(200px, 1.1fr) minmax(200px, 1.1fr) minmax(220px, 1fr) auto; height: 100%; align-items: stretch }
+.drumcards .ccard { gap: 8px; padding: 10px 12px; min-height: 0 }
+.drumcards .dgo { height: 46px; font-size: 15px }
+.drumcards .clk { gap: 8px }
+.drumcards .clk .bpm { font-size: 28px; min-width: 80px; padding: 6px 8px }
+.drumcards .ib { width: 36px; height: 36px }
+.dlevelcard { padding: 6px; justify-content: stretch }
+.dlevelcard .strips { height: 100% }
+@media (max-width: 1250px) { .drumcards { grid-template-columns: 1fr 1fr auto; } .drumcards .ccard:nth-child(3) { display: none } }
+.drumcards .dgo.on { background: var(--go); border-color: var(--go); color: #111 }
+.drumcards .dgo { width: 100% }

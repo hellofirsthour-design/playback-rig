@@ -8,7 +8,6 @@ mod audio;
 mod clicksong;
 mod decode;
 mod guide;
-#[allow(dead_code)] // wired into the app with the Drummer
 mod kit;
 mod metronome;
 mod midi_io;
@@ -84,9 +83,32 @@ struct Settings {
     /// Band tonight: the parts played live (songfile::BAND_PARTS). Their tracks are muted
     /// in every song, without touching each song's own mix.
     band: Vec<String>,
+    /// The Drummer: level, tempo and feel when it plays on its own, how hard it plays.
+    drum: DrumSettings,
+    /// The Drummer is playing over a song: the song's drums and percussion are quiet.
+    #[serde(skip)]
+    drummer_over_song: bool,
     /// Tracks moved to a bus by hand, by track name (lowercase) -> bus id.
     /// Applies to that track name in every song.
     bus_of_track: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct DrumSettings {
+    gain: f32,
+    /// Tempo, beats per bar and 6/8 feel when there's no song playing.
+    bpm: f64,
+    beats: u32,
+    compound: bool,
+    intensity: f32,
+    half: bool,
+}
+
+impl Default for DrumSettings {
+    fn default() -> Self {
+        DrumSettings { gain: 0.9, bpm: 72.0, beats: 4, compound: false, intensity: 0.5, half: false }
+    }
 }
 
 fn one_u32() -> u32 {
@@ -316,7 +338,7 @@ fn effective(settings: &Settings, file: &SongFile, st: &songfile::StemFile) -> (
 impl Settings {
     /// The band plays this track's part live tonight.
     fn plays_live(&self, track: &str) -> bool {
-        songfile::band_part(track).map_or(false, |p| self.band.iter().any(|b| b == p))
+        songfile::band_part(track).map_or(false, |p| self.band.iter().any(|b| b == p)) || (self.drummer_over_song && matches!(songfile::stem_category(track), 1 | 2))
     }
 }
 
@@ -358,6 +380,8 @@ impl Default for Settings {
             buses: vec![],
             bus_list: vec![],
             band: vec![],
+            drum: DrumSettings::default(),
+            drummer_over_song: false,
             bus_of_track: Default::default(),
         };
         s.ensure_buses();
@@ -406,6 +430,8 @@ struct Core {
     audio_lost: AtomicBool,
     midi_lost: AtomicBool,
     map: Mutex<MidiMap>,
+    /// What the Drummer is doing (written by the audio thread).
+    drum: Arc<Mutex<audio::DrumState>>,
     /// Controller faders' soft takeover: (last position, level they set).
     pickup: Mutex<std::collections::HashMap<String, (Option<f32>, Option<f32>)>>,
     config_dir: PathBuf,
@@ -468,6 +494,11 @@ struct AppState {
     recovered: Mutex<Option<(PathBuf, usize)>>,
     /// Said once on screen when the set was picked back up.
     resumed: Mutex<Option<String>>,
+    /// The Drummer's kit at the output rate (kept to hand it to a new audio stream), whether
+    /// it's being downloaded, and the last taps for tap tempo.
+    drum_kit: Mutex<Option<(u32, rig_engine::drummer::Kit)>>,
+    drum_loading: AtomicBool,
+    drum_taps: Mutex<Vec<u64>>,
     /// The APC mini's lights: its output port and what it's showing.
     lights: Mutex<Option<(midir::MidiOutputConnection, Option<Vec<apc::Light>>)>>,
 }
@@ -767,6 +798,12 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
                 let _ = app.emit("master-level", g);
             }
         }
+        Event::Level(Action::DrumIntensity, v) => {
+            if let Some(st) = app.try_state::<AppState>() {
+                let _ = drum_do(app, &st, DrumUi::Intensity { x: v });
+                let _ = app.emit("drum-intensity", v);
+            }
+        }
         Event::Level(..) => {}
         Event::Fire(a) => match a {
             Action::PlayStop => {
@@ -858,7 +895,26 @@ fn dispatch(core: &Core, app: &AppHandle, ev: Event) {
                 }
                 let _ = app.emit("pedal", "refresh");
             }
-            Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_) | Action::PadLevel => {}
+            Action::DrumStartStop | Action::DrumFill | Action::DrumBuild | Action::DrumDrop | Action::DrumHit | Action::DrumHalfTime | Action::DrumTap | Action::DrumFaster | Action::DrumLevel(_) => {
+                let Some(st) = app.try_state::<AppState>() else { return };
+                let ui = match a {
+                    Action::DrumStartStop => DrumUi::StartStop,
+                    Action::DrumFill => DrumUi::Cue { cue: DrumCue::Fill },
+                    Action::DrumBuild => DrumUi::Cue { cue: DrumCue::Build },
+                    Action::DrumDrop => DrumUi::Cue { cue: DrumCue::Drop },
+                    Action::DrumHit => DrumUi::Cue { cue: DrumCue::Hit },
+                    Action::DrumHalfTime => DrumUi::Half { on: !st.settings.lock().unwrap().drum.half },
+                    Action::DrumTap => DrumUi::Tap,
+                    Action::DrumFaster => DrumUi::Faster,
+                    Action::DrumLevel(n) => DrumUi::Level { level: n },
+                    _ => return,
+                };
+                if let Err(e) = drum_do(app, &st, ui) {
+                    let _ = app.emit("audio-error", e);
+                }
+                let _ = app.emit("pedal", "refresh");
+            }
+            Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_) | Action::PadLevel | Action::DrumIntensity => {}
         },
     }
 }
@@ -880,7 +936,7 @@ fn open_output(core: &Core, app: &AppHandle, name: Option<String>) -> Result<Ope
     let h = app.clone();
     let failed = core.audio_failed.clone();
     failed.store(false, Ordering::Release);
-    let out = audio::open(name, core.status.clone(), core.segues.clone(), core.metro_on.clone(), core.levels.clone(), core.master.clone(), move |e, gone| {
+    let out = audio::open(name, core.status.clone(), core.segues.clone(), core.metro_on.clone(), core.levels.clone(), core.master.clone(), core.drum.clone(), move |e, gone| {
         if gone {
             failed.store(true, Ordering::Release); // the watcher takes it from here
         } else {
@@ -933,6 +989,7 @@ fn watch_audio(app: &AppHandle, st: &AppState) {
                     st.save_settings();
                 }
                 reinstall(st);
+                drum_kit_install(app);
                 st.core.audio_lost.store(false, Ordering::Release);
                 let _ = app.emit("connection", "audio-back");
             }
@@ -1721,6 +1778,19 @@ struct SetItem {
 }
 
 #[derive(Serialize)]
+struct DrumView {
+    running: bool,
+    waiting: bool,
+    level: u8,
+    bpm: f64,
+    has_kit: bool,
+    kit_ready: bool,
+    downloading: bool,
+    over_song: bool,
+    settings: DrumSettings,
+}
+
+#[derive(Serialize)]
 struct AppView {
     outputs: Vec<OutputInfo>,
     output: Option<OpenOutput>,
@@ -1740,6 +1810,7 @@ struct AppView {
     band: Vec<String>,
     /// Said once: the set was picked back up after a crash.
     resumed: Option<String>,
+    drum: DrumView,
     /// A song being cut to on the next bar (set list place), while one plays.
     jump_to: Option<usize>,
     bindings: Vec<Binding>,
@@ -1875,6 +1946,10 @@ fn view(state: &AppState) -> AppView {
         announce: s.announce,
         band: s.band.clone(),
         resumed: state.resumed.lock().unwrap().take(),
+        drum: {
+            let ds = *state.core.drum.lock().unwrap();
+            DrumView { running: ds.running, waiting: ds.waiting, level: ds.level, bpm: ds.bpm, has_kit: ds.has_kit, kit_ready: kit::ready(&state.core.data_dir), downloading: state.drum_loading.load(Ordering::Relaxed), over_song: s.drummer_over_song, settings: s.drum.clone() }
+        },
         jump_to: *state.jump_to.lock().unwrap(),
         bindings,
         learning,
@@ -1921,6 +1996,8 @@ struct Status {
     levels: Vec<f32>,
     /// The master output's peak since the last status.
     master_level: f32,
+    /// What the Drummer is doing.
+    drum: audio::DrumState,
 }
 
 #[tauri::command]
@@ -1934,6 +2011,24 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
         let song = state.song.lock().unwrap().as_ref().map(|l| l.folder.clone());
         let (item, playing) = snapshot.map_or((0, false), |s| (s.item, s.playing));
         state.write_session(Session { song, item, playing, clean: false });
+    }
+    // The Drummer over a song: when it stops, the song's drums come back; when the song
+    // stops under it, it carries on by itself with its own click.
+    {
+        let ds = *state.core.drum.lock().unwrap();
+        let song_playing = snapshot.is_some_and(|x| x.playing);
+        let mut s = state.settings.lock().unwrap();
+        if s.drummer_over_song && (!ds.running && !ds.waiting || !song_playing) {
+            s.drummer_over_song = false;
+            if let Some(l) = state.song.lock().unwrap().as_ref() {
+                push_mix(&state.core, &s, &l.file);
+            }
+            if ds.running && !song_playing {
+                let ch = state.core.output.lock().unwrap().as_ref().map_or(2, |o| o.info.channels);
+                let r = s.click_route.unwrap_or_else(|| songfile::default_route("click", ch));
+                drum_send(&state.core, rig_engine::drummer::DrumCmd::Click(true, s.click_gain, r));
+            }
+        }
     }
     update_lights(&state);
     // On the tick the next song takes over, the snapshot can still be the old song's:
@@ -1992,6 +2087,7 @@ fn status(app: AppHandle, state: State<'_, AppState>) -> Status {
         midi_lost: state.core.midi_lost.load(Ordering::Acquire),
         levels,
         master_level,
+        drum: *state.core.drum.lock().unwrap(),
     }
 }
 
@@ -2025,6 +2121,7 @@ async fn choose_output(app: AppHandle, state: State<'_, AppState>, name: Option<
     state.save_settings();
     *state.pad_key.lock().unwrap() = None; // the new output starts without a pad
     reload_current(&state).await?;
+    drum_kit_install(&app);
     let _ = pad_update(&state);
     Ok(view(&state))
 }
@@ -3152,6 +3249,233 @@ fn apply_band(app: &AppHandle, state: &AppState, parts: Vec<String>) {
     sync_next(app, state);
 }
 
+/* ---------------- the Drummer ---------------- */
+
+fn drum_send(core: &Core, c: rig_engine::drummer::DrumCmd) {
+    if let Some(o) = core.output.lock().unwrap().as_mut() {
+        o.send(ToAudio::Drum(c));
+    }
+}
+
+/// Hands the kit to the audio thread, loading it (at the output's rate) if needed. Off the
+/// audio thread; does nothing until the kit has been downloaded.
+fn drum_kit_install(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let st = app.state::<AppState>();
+        if !kit::ready(&st.core.data_dir) {
+            return;
+        }
+        let Some(sr) = st.core.output.lock().unwrap().as_ref().map(|o| o.info.sample_rate) else { return };
+        let have = st.drum_kit.lock().unwrap().as_ref().filter(|(r, _)| *r == sr).map(|(_, k)| k.clone());
+        let k = match have {
+            Some(k) => k,
+            None => match kit::load(&kit::folder(&st.core.data_dir), sr) {
+                Ok(k) => {
+                    *st.drum_kit.lock().unwrap() = Some((sr, k.clone()));
+                    k
+                }
+                Err(e) => {
+                    let _ = app.emit("audio-error", e);
+                    return;
+                }
+            },
+        };
+        if let Some(o) = st.core.output.lock().unwrap().as_mut() {
+            o.send(ToAudio::DrumKit(Box::new(k)));
+        }
+        drum_configure(&st);
+        let _ = app.emit("pedal", "refresh");
+    });
+}
+
+/// Level and output (front of house: wherever the drums bus goes).
+fn drum_configure(st: &AppState) {
+    use rig_engine::drummer::DrumCmd;
+    let s = st.settings.lock().unwrap().clone();
+    drum_send(&st.core, DrumCmd::Gain(s.drum.gain));
+    drum_send(&st.core, DrumCmd::Route(s.bus_route("drums")));
+}
+
+/// What can be asked of the Drummer, from the screen or the controller.
+#[derive(Deserialize, Clone, Copy, Debug)]
+#[serde(tag = "type")]
+enum DrumUi {
+    StartStop,
+    Cue { cue: DrumCue },
+    Level { level: u8 },
+    Intensity { x: f32 },
+    Tempo { bpm: f64 },
+    Tap,
+    Faster,
+    Half { on: bool },
+    Meter { compound: bool },
+    Gain { gain: f32 },
+}
+
+#[derive(Deserialize, Clone, Copy, Debug)]
+enum DrumCue {
+    Fill,
+    Build,
+    Drop,
+    Hit,
+    Stop,
+}
+
+/// Does what was asked; a message for the screen when it can't.
+fn drum_do(app: &AppHandle, st: &AppState, a: DrumUi) -> Result<(), String> {
+    use rig_engine::drummer::{Cue, DrumCmd};
+    let ds = *st.core.drum.lock().unwrap();
+    let song_playing = st.core.playing();
+    let mut save = true;
+    match a {
+        DrumUi::StartStop => {
+            save = false;
+            if ds.waiting {
+                drum_send(&st.core, DrumCmd::Halt);
+            } else if ds.running {
+                drum_send(&st.core, DrumCmd::Cue(Cue::Stop));
+            } else {
+                if !ds.has_kit {
+                    return Err(if st.drum_loading.load(Ordering::Relaxed) { "The drum kit is still downloading.".into() } else { "Download the drum kit first (Live → Drummer).".into() });
+                }
+                drum_configure(st);
+                let s = st.settings.lock().unwrap().clone();
+                drum_send(&st.core, DrumCmd::Intensity(s.drum.intensity));
+                drum_send(&st.core, DrumCmd::HalfTime(s.drum.half));
+                // The free click and the Drummer's click would double up.
+                if st.core.metro_on.load(Ordering::Acquire) {
+                    let _ = free_click(app.state::<AppState>(), false, s.free_click_bpm, s.free_click_bpb, None);
+                }
+                let song_meter = st.song.lock().unwrap().as_ref().map(|l| (l.file.beats_per_bar, l.file.meter_den == 8 && l.file.beats_per_bar % 3 == 0));
+                match (song_playing, song_meter) {
+                    (true, Some((beats, compound))) => {
+                        // Over the song: in on its next bar, at its tempo; its click stays, its drums go quiet.
+                        drum_send(&st.core, DrumCmd::Meter(beats, compound));
+                        drum_send(&st.core, DrumCmd::Click(false, 0.0, Route::Pair(0)));
+                        drum_send(&st.core, DrumCmd::StartSynced);
+                        let mut s2 = st.settings.lock().unwrap();
+                        s2.drummer_over_song = true;
+                        if let Some(l) = st.song.lock().unwrap().as_ref() {
+                            push_mix(&st.core, &s2, &l.file);
+                        }
+                    }
+                    _ => {
+                        let ch = st.core.output.lock().unwrap().as_ref().map_or(2, |o| o.info.channels);
+                        drum_send(&st.core, DrumCmd::Tempo(s.drum.bpm));
+                        drum_send(&st.core, DrumCmd::Meter(s.drum.beats, s.drum.compound));
+                        drum_send(&st.core, DrumCmd::Click(true, s.click_gain, s.click_route.unwrap_or_else(|| songfile::default_route("click", ch))));
+                        drum_send(&st.core, DrumCmd::Start);
+                    }
+                }
+            }
+        }
+        DrumUi::Cue { cue } => {
+            save = false;
+            if !ds.running {
+                return Err("Start the Drummer first.".into());
+            }
+            let c = match cue {
+                DrumCue::Fill => Cue::Fill,
+                DrumCue::Build => Cue::Build,
+                DrumCue::Drop => Cue::Drop,
+                DrumCue::Hit => Cue::Hit,
+                DrumCue::Stop => Cue::Stop,
+            };
+            drum_send(&st.core, DrumCmd::Cue(c));
+        }
+        DrumUi::Level { level } => {
+            let x = if level == 0 { 0.0 } else { (level.min(5) as f32 - 0.5) / 5.0 };
+            st.settings.lock().unwrap().drum.intensity = x;
+            drum_send(&st.core, DrumCmd::Intensity(x));
+        }
+        DrumUi::Intensity { x } => {
+            let x = x.clamp(0.0, 1.0);
+            st.settings.lock().unwrap().drum.intensity = x;
+            drum_send(&st.core, DrumCmd::Intensity(x));
+        }
+        DrumUi::Tempo { bpm } => {
+            if st.settings.lock().unwrap().drummer_over_song {
+                return Err("The Drummer follows the song's tempo while the song plays.".into());
+            }
+            let bpm = bpm.clamp(40.0, 220.0);
+            st.settings.lock().unwrap().drum.bpm = bpm;
+            drum_send(&st.core, DrumCmd::Tempo(bpm));
+        }
+        DrumUi::Tap => {
+            let now = st.core.now_ms();
+            let bpm = {
+                let mut t = st.drum_taps.lock().unwrap();
+                t.retain(|x| now.saturating_sub(*x) < 2500);
+                t.push(now);
+                (t.len() >= 3).then(|| 60_000.0 / ((t[t.len() - 1] - t[0]) as f64 / (t.len() - 1) as f64))
+            };
+            save = false;
+            if let Some(b) = bpm {
+                // In 6/8 you tap the big beat (three eighths); the Drummer counts eighths.
+                let b = if st.settings.lock().unwrap().drum.compound { b * 3.0 } else { b };
+                return drum_do(app, st, DrumUi::Tempo { bpm: (b * 2.0).round() / 2.0 });
+            }
+        }
+        DrumUi::Faster => {
+            if st.settings.lock().unwrap().drummer_over_song {
+                return Err("The Drummer follows the song's tempo while the song plays.".into());
+            }
+            let to = (ds.bpm.max(40.0) + 8.0).min(220.0);
+            st.settings.lock().unwrap().drum.bpm = to;
+            drum_send(&st.core, DrumCmd::GlideTo(to, 4));
+        }
+        DrumUi::Half { on } => {
+            st.settings.lock().unwrap().drum.half = on;
+            drum_send(&st.core, DrumCmd::HalfTime(on));
+        }
+        DrumUi::Meter { compound } => {
+            {
+                let mut s = st.settings.lock().unwrap();
+                s.drum.compound = compound;
+                s.drum.beats = if compound { 6 } else { 4 };
+            }
+            if !st.settings.lock().unwrap().drummer_over_song {
+                drum_send(&st.core, DrumCmd::Meter(if compound { 6 } else { 4 }, compound));
+            }
+        }
+        DrumUi::Gain { gain } => {
+            st.settings.lock().unwrap().drum.gain = gain.clamp(0.0, MAX_GAIN);
+            drum_configure(st);
+        }
+    }
+    if save {
+        st.save_settings();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn drummer(app: AppHandle, state: State<'_, AppState>, a: DrumUi) -> Result<AppView, String> {
+    drum_do(&app, &state, a)?;
+    std::thread::sleep(Duration::from_millis(15)); // let the audio thread take it in for the view
+    Ok(view(&state))
+}
+
+/// Downloads the drum kit (once), then loads it.
+#[tauri::command]
+async fn drum_download(app: AppHandle, state: State<'_, AppState>) -> Result<AppView, String> {
+    if state.drum_loading.swap(true, Ordering::AcqRel) {
+        return Err("The drum kit is already downloading.".into());
+    }
+    let dir = state.core.data_dir.clone();
+    let h = app.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || kit::download(&dir, |p| {
+        let _ = h.emit("drum-download", p);
+    }))
+    .await
+    .map_err(|e| e.to_string())?;
+    state.drum_loading.store(false, Ordering::Release);
+    r?;
+    drum_kit_install(&app);
+    Ok(view(&state))
+}
+
 /// The controller is an Akai APC mini mk2 (its Control port, not Notes).
 fn is_apc(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
@@ -3204,6 +3528,10 @@ fn update_lights(state: &AppState) {
         free_click: state.core.metro_on.load(Ordering::Acquire),
         band,
         bus_muted,
+        drum: {
+            let ds = *state.core.drum.lock().unwrap();
+            (ds.running, ds.waiting, ds.level, s.drum.half)
+        },
     };
     let new = apc::lights(&l);
     for m in apc::changes(shown.as_deref(), &new) {
@@ -3353,6 +3681,7 @@ fn main() {
                 midi_lost: AtomicBool::new(false),
                 map: Mutex::new(map),
                 pickup: Default::default(),
+                drum: Default::default(),
                 config_dir: dir,
                 data_dir,
                 start: Instant::now(),
@@ -3401,7 +3730,11 @@ fn main() {
                 recovered: Mutex::new(recovered),
                 resumed: Mutex::new(None),
                 lights: Mutex::new(None),
+                drum_kit: Mutex::new(None),
+                drum_loading: AtomicBool::new(false),
+                drum_taps: Mutex::new(vec![]),
             });
+            drum_kit_install(app.handle());
             {
                 let st = app.state::<AppState>();
                 let n = st.settings.lock().unwrap().midi.clone();
@@ -3452,6 +3785,8 @@ fn main() {
             midi_preset,
             set_band,
             check_set,
+            drummer,
+            drum_download,
             midi_learn,
             midi_cancel,
             midi_unbind
@@ -3522,6 +3857,7 @@ mod tests {
                 midi_lost: AtomicBool::new(false),
                 map: Mutex::new(MidiMap::default()),
                 pickup: Default::default(),
+                drum: Default::default(),
                 config_dir: dir.clone(),
                 data_dir: dir,
                 start: Instant::now(),
@@ -3545,6 +3881,9 @@ mod tests {
             recovered: Mutex::new(None),
             resumed: Mutex::new(None),
             lights: Mutex::new(None),
+            drum_kit: Mutex::new(None),
+            drum_loading: AtomicBool::new(false),
+            drum_taps: Mutex::new(vec![]),
         }
     }
 

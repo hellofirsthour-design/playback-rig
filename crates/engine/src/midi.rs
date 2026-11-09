@@ -70,11 +70,24 @@ pub enum Action {
     GotoBlock(usize),
     /// Turn a Live tonight part on or off (its place in BAND_PARTS).
     BandPart(usize),
+    /// The Drummer: start (or stop on the next bar), its moments, and how hard it plays.
+    DrumStartStop,
+    DrumFill,
+    DrumBuild,
+    DrumDrop,
+    DrumHit,
+    DrumHalfTime,
+    DrumTap,
+    DrumFaster,
+    /// Straight to a level: 0 nothing, 1 swells, 2 heartbeat, 3 light, 4 groove, 5 full.
+    DrumLevel(u8),
+    /// Continuous: a fader or knob sets how hard it plays.
+    DrumIntensity,
 }
 
 impl Action {
     pub fn is_level(&self) -> bool {
-        matches!(self, Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_) | Action::PadLevel)
+        matches!(self, Action::StemLevel(_) | Action::ClickLevel | Action::MasterLevel | Action::BusLevel(_) | Action::PadLevel | Action::DrumIntensity)
     }
 }
 
@@ -172,7 +185,8 @@ pub fn midimix() -> Vec<Binding> {
 ///   top row        Song 1-8
 ///   rows 7 and 6   Section 1-16 of the arrangement (jump on the quantize setting)
 ///   row 5          Play/stop, Next block, Repeat, Vamp, Cancel jump, Fade out now, Pad, Free click
-///   row 4          (the Drummer)
+///   row 4          Drummer: Start/stop, Fill, Build, Drop, Hit, Half-time, Tap, Faster
+///   row 2          Drummer level: Nothing, Swells, Heartbeat, Light, Groove, Full
 ///   row 3          Live tonight: Drums, Bass, Piano, Organ, Electric, Acoustic
 ///   track buttons  mute bus 1-8;  faders 1-8 = buses 1-8, fader 9 = master
 ///   scene buttons  1 = previous song, 2 = next song
@@ -191,8 +205,13 @@ pub fn apc_mini_mk2() -> Vec<Binding> {
         v.push(bind(pad(6, i + 1), Action::GotoBlock(8 + i as usize)));
         v.push(bind(pad(5, i + 1), ROW5[i as usize]));
     }
+    const ROW4: [Action; 8] = [Action::DrumStartStop, Action::DrumFill, Action::DrumBuild, Action::DrumDrop, Action::DrumHit, Action::DrumHalfTime, Action::DrumTap, Action::DrumFaster];
+    for i in 0..8u8 {
+        v.push(bind(pad(4, i + 1), ROW4[i as usize]));
+    }
     for i in 0..6u8 {
         v.push(bind(pad(3, i + 1), Action::BandPart(i as usize)));
+        v.push(bind(pad(2, i + 1), Action::DrumLevel(i)));
     }
     v.push(bind(cc(56), Action::MasterLevel));
     v.push(bind(note(112), Action::PrevSong));
@@ -309,6 +328,8 @@ mod tests {
         assert_eq!(m.handle(&[0x90, 37, 127], 20), Some(Event::Fire(Action::FadeOut)), "row 5, pad 6");
         assert_eq!(m.handle(&[0x90, 41, 127], 30), Some(Event::Fire(Action::GotoBlock(9))), "row 6, pad 2");
         assert_eq!(m.handle(&[0x90, 100, 127], 40), Some(Event::Fire(Action::BusMute(0))));
+        assert_eq!(m.handle(&[0x90, 24, 127], 45), Some(Event::Fire(Action::DrumStartStop)), "row 4, pad 1");
+        assert_eq!(m.handle(&[0x90, 13, 127], 46), Some(Event::Fire(Action::DrumLevel(5))), "row 2, pad 6");
         assert_eq!(m.handle(&[0xb0, 56, 127], 50), Some(Event::Level(Action::MasterLevel, 1.0)));
     }
 

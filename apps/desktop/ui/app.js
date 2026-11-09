@@ -434,6 +434,8 @@
       g.append(faderStrip('Pad', V.pads.level, 1.5, x => { V.pads.level = x; invoke('pad_mix', { level: x, route: null }).catch(err); }, !V.pads.on, () => togglePad()));
       if (!(V.buses || []).length) box.append(el('p', 'hint', 'Load a song to see its buses.'));
       box.append(g);
+    } else if (liveTab === 'drum') {
+      renderDrummer(box);
     } else if (liveTab === 'pads') {
       const pd = V.pads;
       if (!pd.folder) {
@@ -545,6 +547,75 @@
     }
   }
   let taps = [];
+  // The Drummer: a live drummer for flow moments when nobody's on the kit.
+  const DLEVELS = [['Nothing', 'Silence (the click keeps going)'], ['Swells', 'Floor tom and cymbal swells into each phrase'], ['Heartbeat', 'Kick and floor tom on the beat'], ['Light', 'Cross-stick and closed hats'], ['Groove', 'Snare backbeat, ghost notes'], ['Full', 'Four on the floor, crash-ride, big backbeat']];
+  let drumDl = null;
+  const drum = a => invoke('drummer', { a }).then(refresh).catch(err);
+  function renderDrummer(box) {
+    const D = V.drum || {};
+    const S = D.settings || {};
+    if (!D.kit_ready) {
+      const c = el('div', 'ccard');
+      c.append(el('div', 'lbl', 'Drummer'), el('p', 'hint', 'A live drummer on a real recorded acoustic kit, for flow moments when nobody is on drums. It downloads once (about 41 MB) and works offline after that.'));
+      const b = el('button', 'btn go', D.downloading ? `Downloading… ${Math.round((drumDl || 0) * 100)}%` : 'Download the drum kit');
+      b.disabled = !!D.downloading;
+      b.onclick = () => { V.drum.downloading = true; renderLiveTab(); invoke('drum_download').then(v => { drumDl = null; refresh(v); toast('Drum kit ready.'); }).catch(e => { drumDl = null; err(e); refresh(); }); };
+      c.append(b, el('p', 'hint', 'Kit: DRSKit by the DrumGizmo team and DRSDrums, CC BY 4.0.'));
+      box.append(c);
+      return;
+    }
+    const cards = el('div', 'ccards drumcards');
+    // Start / stop and the moments.
+    const c1 = el('div', 'ccard');
+    const head = el('div', 'lbl', D.over_song ? `Drummer · over ${V.song ? V.song.name : 'the song'}` : 'Drummer');
+    const go = el('button', 'btn go big' + (D.running ? ' on' : ''), D.waiting ? 'Coming in on the bar…' : D.running ? 'Stop on the bar' : (playing() ? 'Start on the next bar' : 'Start'));
+    go.title = D.running ? 'Crash and stop on the next bar (press again while waiting to cancel)' : playing() ? "Comes in on the song's next bar at its tempo; the song's drums and percussion go quiet" : 'Starts now with its own click in the in-ears';
+    go.onclick = () => drum({ type: 'StartStop' });
+    const moments = el('div', 'dmoments');
+    go.classList.add('dgo');
+    [['Fill', 'Fill', 'A fill into the next bar'], ['Build', 'Build', 'Two bars of snare building into a big downbeat'], ['Drop', 'Drop', 'Crash on the next bar, then down to swells'], ['Hit', 'Hit', 'Crash and kick on the next bar']].forEach(([cue, t, tip]) => {
+      const b = el('button', 'btn', t); b.title = tip; b.disabled = !D.running; b.onclick = () => drum({ type: 'Cue', cue }); moments.append(b);
+    });
+    c1.title = playing() ? "With a song playing it locks to the song: its tempo, its bars, its click. The song's drums and percussion go quiet until it stops." : 'With no song playing it plays at its own tempo with its own click in the in-ears.';
+    c1.append(head, go, moments);
+    // How hard it plays.
+    const c2 = el('div', 'ccard');
+    c2.append(el('div', 'lbl', 'How hard'));
+    const lv = el('div', 'dlevels');
+    const cur = D.running ? D.level : (S.intensity < 0.04 ? 0 : Math.min(5, Math.ceil(S.intensity * 5)));
+    DLEVELS.forEach(([t, tip], i) => { const b = el('button', 'dlv' + (i === cur ? ' on' : ''), t); b.title = tip; b.onclick = () => drum({ type: 'Level', level: i }); lv.append(b); });
+    const rg = el('input'); rg.type = 'range'; rg.min = 0; rg.max = 1; rg.step = 0.01; rg.value = S.intensity ?? 0.5; rg.setAttribute('aria-label', 'How hard the Drummer plays');
+    rg.onchange = () => drum({ type: 'Intensity', x: +rg.value });
+    const r2 = el('div', 'crow'); r2.append(el('span', 'plbl', 'Fine'), rg);
+    c2.title = 'Changes come in on the next bar. Jumping up two or more levels adds a crash.';
+    c2.append(lv, r2);
+    // Tempo and feel (when it plays on its own).
+    const c3 = el('div', 'ccard');
+    c3.append(el('div', 'lbl', 'Tempo & feel'));
+    const own = !D.over_song;
+    const bpmNow = D.running ? D.bpm : S.bpm;
+    const dn = el('button', 'ib', '−'), up = el('button', 'ib', '+'); dn.setAttribute('aria-label', 'Slower'); up.setAttribute('aria-label', 'Faster');
+    dn.disabled = up.disabled = !own;
+    dn.onclick = () => drum({ type: 'Tempo', bpm: Math.round(bpmNow) - 1 }); up.onclick = () => drum({ type: 'Tempo', bpm: Math.round(bpmNow) + 1 });
+    const t = el('div', 'clk'); t.append(dn, el('span', 'bpm screen', String(+(bpmNow || 72).toFixed(1))), up, el('span', 'lbl', S.compound ? 'BPM (eighths)' : 'BPM'));
+    const tap = el('button', 'btn big', 'Tap'); tap.disabled = !own; tap.onclick = () => drum({ type: 'Tap' });
+    const faster = el('button', 'btn', 'Faster'); faster.title = 'Glides up 8 BPM over 4 bars, into a celebration'; faster.disabled = !own || !D.running; faster.onclick = () => drum({ type: 'Faster' });
+    const songT = el('button', 'btn', 'Song tempo'); songT.disabled = !own || !V.song; songT.onclick = () => drum({ type: 'Tempo', bpm: Math.round(playBpm() * 100) / 100 });
+    const tr = el('div', 'clk'); tr.append(tap, faster, songT);
+    const feel = seg([[false, '4/4'], [true, '6/8']], !!S.compound, v => drum({ type: 'Meter', compound: v }), 'Feel');
+    const half = el('button', 'tog' + (S.half ? ' on' : ''), 'Half-time'); half.onclick = () => drum({ type: 'Half', on: !S.half });
+    const r3 = el('div', 'crow'); r3.append(feel, half);
+    c3.title = own ? 'In 6/8, tap the big beat (three eighths).' : 'Following the song: its tempo and feel.';
+    c3.append(t, tr, r3);
+    // Level.
+    const c4 = el('div', 'ccard');
+    const g = el('div', 'strips'); g.append(faderStrip('Drummer', S.gain ?? 0.9, 'db', x => { S.gain = x; invoke('drummer', { a: { type: 'Gain', gain: x } }).catch(err); }, null, null));
+    c4.title = 'Goes where the Drums bus goes (front of house). Kit: DRSKit by the DrumGizmo team and DRSDrums, CC BY 4.0.';
+    c4.classList.add('dlevelcard');
+    c4.append(g);
+    cards.append(c1, c2, c3, c4);
+    box.append(cards);
+  }
   // Key change, staged: tap − / + as many times as you like (nothing happens to the tracks
   // yet), then "Change key" re-pitches them once. Cancel goes back.
   let keyTarget = null, keyFor = null;
@@ -1576,7 +1647,11 @@
     { label: 'Pad on / off', tap: 'PadOnly', desc: "In this song's key" }, { label: 'Free click', tap: 'FreeClick', desc: 'Starts or stops the click with no song' },
     { label: 'Live / Edit page', tap: 'ToggleView' },
     { label: 'Master fader', tap: 'MasterLevel', desc: 'Everything the app sends out', fader: true },
+    { label: 'Drummer: start / stop', tap: 'DrumStartStop', desc: 'Comes in (or stops) on the bar' }, { label: 'Drummer: fill', tap: 'DrumFill' },
+    { label: 'Drummer: build', tap: 'DrumBuild' }, { label: 'Drummer: drop', tap: 'DrumDrop' }, { label: 'Drummer: hit', tap: 'DrumHit' },
+    { label: 'Drummer: half-time', tap: 'DrumHalfTime' }, { label: 'Drummer: tap tempo', tap: 'DrumTap' }, { label: 'Drummer: faster', tap: 'DrumFaster' },
     { label: 'Built-in click level', tap: 'ClickLevel', fader: true }, { label: 'Pad level', tap: 'PadLevel', fader: true },
+    { label: 'Drummer: how hard', tap: 'DrumIntensity', desc: 'A fader or knob', fader: true },
   ];
   // Song buttons: one per place in the set (Song 1 = the first song, whatever it is that day).
   const SONG_BUTTONS = 10;
@@ -1584,10 +1659,11 @@
     if (a && a.Song !== undefined) return `Song ${a.Song + 1}`;
     if (a && a.BusLevel !== undefined) { const b = (V.all_buses || [])[a.BusLevel]; return `${b ? b.name : 'Bus ' + (a.BusLevel + 1)} fader`; }
     if (a && a.GotoBlock !== undefined) return `Section ${a.GotoBlock + 1}`;
+    if (a && a.DrumLevel !== undefined) return `Drummer: ${DLEVELS[a.DrumLevel] ? DLEVELS[a.DrumLevel][0] : a.DrumLevel}`;
     if (a && a.BandPart !== undefined) return `Live tonight: ${(PARTS[a.BandPart] || ['', '?'])[1]}`;
     if (a && a.BusMute !== undefined) { const b = (V.all_buses || [])[a.BusMute]; return `${b ? b.name : 'Bus ' + (a.BusMute + 1)} mute`; }
     if (a && a.StemLevel !== undefined) return `${V.song && V.song.stems[a.StemLevel] ? V.song.stems[a.StemLevel].name : 'Stem ' + (a.StemLevel + 1)} fader`;
-    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad on / off', ClickLevel: 'Built-in click level', PadLevel: 'Pad level', CancelJump: 'Cancel jump', PrevSong: 'Previous song', MasterLevel: 'Master fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
+    return ({ PlayStop: 'Play / stop', Panic: 'Panic stop', Next: 'Next block', SkipAhead: 'Skip ahead', Repeat: 'Repeat block', ToggleVamp: 'Vamp', NextSong: 'Next song', PadOnly: 'Pad on / off', ClickLevel: 'Built-in click level', PadLevel: 'Pad level', CancelJump: 'Cancel jump', PrevSong: 'Previous song', DrumStartStop: 'Drummer: start / stop', DrumFill: 'Drummer: fill', DrumBuild: 'Drummer: build', DrumDrop: 'Drummer: drop', DrumHit: 'Drummer: hit', DrumHalfTime: 'Drummer: half-time', DrumTap: 'Drummer: tap tempo', DrumFaster: 'Drummer: faster', DrumIntensity: 'Drummer: how hard', MasterLevel: 'Master fader', ToggleView: 'Live / Edit page', FadeOut: 'Fade out', FreeClick: 'Free click' })[a] || String(a);
   }
   // On a MIDImix, controls are named as printed on it (factory settings, channel 1).
   const MIX_FADERS = [19, 23, 27, 31, 49, 53, 57, 61], MIX_KNOBS = [16, 20, 24, 28, 46, 50, 54, 58];
@@ -1775,6 +1851,7 @@
   let busRedraw = 0;
   T.event.listen('stem-level', e => { const [i, g] = e.payload; if (!V || !V.song || !V.song.stems[i]) return; V.song.stems[i].gain = g; const f = $('#fader-' + i); if (f) f.value = g; });
   T.event.listen('click-level', e => { if (V) { V.click_gain = e.payload; if (page === 'live' && (liveTab === 'mix' || liveTab === 'click') && !busRedraw) busRedraw = requestAnimationFrame(() => { busRedraw = 0; renderLiveTab(); }); } });
+  T.event.listen('drum-download', e => { drumDl = e.payload; if (page === 'live' && liveTab === 'drum') { const b = document.querySelector('#lvTab .ccard .btn.go'); if (b) b.textContent = `Downloading… ${Math.round(e.payload * 100)}%`; } });
   T.event.listen('pad-level', e => { if (V) { V.pads.level = e.payload; if (page === 'live' && (liveTab === 'mix' || liveTab === 'pads') && !busRedraw) busRedraw = requestAnimationFrame(() => { busRedraw = 0; renderLiveTab(); }); } });
   // A bus fader moved on the controller: the Live mixer follows (redrawn once per frame at most).
   T.event.listen('bus-level', e => {
@@ -1905,6 +1982,15 @@
       renderConn(s);
       if (s.levels) showMeters(s.levels, s.master_level);
       if (V && V.free_click && s.free_click !== V.free_click.on) { V.free_click.on = s.free_click; if (page === 'live') renderLiveTab(); }
+      // The Drummer changes on the bar (and stops by itself after a Stop): keep its page true.
+      if (V && V.drum && s.drum) {
+        const d = V.drum, n = s.drum;
+        if (d.running !== n.running || d.waiting !== n.waiting || d.level !== n.level || d.has_kit !== n.has_kit || Math.abs((d.bpm || 0) - (n.bpm || 0)) > 0.05) {
+          const was = d.running || d.waiting;
+          Object.assign(d, { running: n.running, waiting: n.waiting, level: n.level, bpm: n.bpm, has_kit: n.has_kit });
+          if (was && !n.running && !n.waiting) await refresh(); else if (page === 'live' && liveTab === 'drum') renderLiveTab();
+        }
+      }
       // The next song loads in the background: show when it's ready.
       if (V && V.song && !V.next_ready && V.current != null && V.setlist[V.current + 1] && ++readyPoll % 50 === 0) await refresh();
       if (update && !updating) $('#updBtn').disabled = playing();

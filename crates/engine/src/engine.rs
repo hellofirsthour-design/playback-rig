@@ -536,6 +536,17 @@ impl Engine {
 
     /// Frames to the next bar line (for a song that takes over on the bar). None when
     /// not playing music yet (count-in, waiting).
+    /// Where the song is in its bar (beats, fractional) and its tempo there, while it plays
+    /// past any count-in. The Drummer locks to this.
+    pub fn bar_phase(&self) -> Option<(f64, f64)> {
+        if !self.playing || self.count_left > 0 || self.wait > 0 || self.stopping.is_some() {
+            return None;
+        }
+        let s = (self.section(self.item).start + self.fpos) as f64;
+        let bpb = self.song.beats_per_bar.max(1) as f64;
+        Some((self.song.beat_pos(s).rem_euclid(bpb), self.song.bpm_at(s)))
+    }
+
     pub fn frames_to_bar(&self) -> Option<u64> {
         (self.playing && self.count_left == 0 && self.wait == 0 && self.stopping.is_none()).then(|| self.boundary(Quantize::Bar).saturating_sub(self.abs))
     }
@@ -1761,6 +1772,40 @@ mod tests {
             ("Loop", Rhythm), ("Bass", Rhythm), ("Synth Bass", Rhythm), ("AG", Rhythm), ("Keys 1", Sustain), ("Pad", Sustain), ("EG 2", Sustain), ("Strings", Sustain), ("Organ", Sustain), ("FX", Sustain), ("Piano", Sustain)] {
             assert_eq!(stem_role(n), r, "{n}");
         }
+    }
+
+    #[test]
+    fn a_drummer_locked_to_the_song_hits_on_its_bars() {
+        // 60 BPM at SR 1000, 4/4: bars every 4000 frames. Start the drummer 1500 frames in;
+        // its first hit is the song's next bar (4000), and the one after is on 8000.
+        use crate::drummer::{DrumCmd, Drummer, Hit, Kit, Piece};
+        let mut e = rig(None);
+        e.handle(Command::Play);
+        let mut d = Drummer::new(SR);
+        let click: Vec<f32> = (0..40).flat_map(|i| { let x = if i < 2 { 0.9 } else { 0.0 }; [x, x] }).collect();
+        let pieces = (0..16).map(|_| Piece { hits: vec![Hit { data: click.clone().into(), rms: 0.5 }] }).collect();
+        d.set_kit(Box::new(Kit { pieces }));
+        d.handle(DrumCmd::Intensity(0.9));
+        let mut drum = vec![];
+        let mut synced = false;
+        for b in 0..90 {
+            if b == 15 && !synced {
+                d.handle(DrumCmd::StartSynced);
+                synced = true;
+            }
+            // Where the song is at the start of this block, then both play the block.
+            if let Some((beat, bpm)) = e.bar_phase() {
+                d.follow(beat, bpm);
+            }
+            let mut buf = vec![0.0f32; 100 * CH];
+            e.process(&mut buf);
+            let mut db = vec![0.0f32; 100 * 2];
+            d.process(&mut db, 2);
+            drum.extend(db.iter().step_by(2).copied());
+        }
+        let first = drum.iter().position(|v| v.abs() > 0.1).unwrap();
+        assert!((first as i64 - 4000).abs() <= 8, "first hit {first}");
+        assert!(drum[7990..8010].iter().any(|v| v.abs() > 0.1), "on the next bar too");
     }
 
     #[test]
