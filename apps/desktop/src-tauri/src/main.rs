@@ -8,6 +8,8 @@ mod audio;
 mod clicksong;
 mod decode;
 mod guide;
+#[allow(dead_code)] // wired into the app with the Drummer
+mod kit;
 mod metronome;
 mod midi_io;
 mod recover;
