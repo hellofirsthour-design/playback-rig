@@ -8,7 +8,8 @@ mic. Hits are sorted by how hard they were played and their loudness is measured
 app can pick the right hit for any velocity and match its level exactly.
 
 Usage: python3 -I make-drum-kit.py <DRSKit folder: .../DrumGizmo/DRSKit> <out folder>
-Writes <out>/kit.json and <out>/<piece>/<n>.flac (stereo, 44.1 kHz, 24-bit).
+Writes <out>/kit.json and <out>/<piece>/<n>.flac (stereo, 44.1 kHz, 16-bit at full scale plus
+a gain per hit).
 """
 import glob
 import json
@@ -47,7 +48,7 @@ MICS = {
     'Snare_top': (0.8, 0.0), 'Snare_bottom': (0.3, 0.0),
     'Hihat': (0.3, -0.45), 'Ride': (0.3, 0.5),
     'Tom1': (0.7, -0.2), 'Tom2': (0.7, 0.3), 'Tom3': (0.7, 0.5),
-    'OHL': (0.75, -0.85), 'OHR': (0.75, 0.85),
+    'OHL': (0.6, -0.85), 'OHR': (0.6, 0.85),
     'AmbL': (0.6, -1.0), 'AmbR': (0.6, 1.0),
 }
 CLOSE = {'Kdrum_front', 'Kdrum_back', 'Snare_top', 'Snare_bottom', 'Tom1', 'Tom2', 'Tom3'}
@@ -110,11 +111,14 @@ for name, art, own, choke in PIECES:
     entries = []
     for i, (rms, n, y) in enumerate(out):
         rel = f'{name}/{i + 1}.flac'
-        sf.write(os.path.join(OUT, rel), y.astype(np.float32), 44100, subtype='PCM_24')
-        entries.append({'file': rel, 'rms': round(rms, 6), 'len': round(len(y) / 44100, 3)})
+        # Each hit is stored at full scale (16-bit keeps its detail that way) with the gain
+        # that puts it back where it was recorded.
+        peak = float(np.abs(y).max())
+        scale = peak / 0.99 if peak > 0 else 1.0
+        sf.write(os.path.join(OUT, rel), (y / scale).astype(np.float32), 44100, subtype='PCM_16')
+        entries.append({'file': rel, 'rms': round(rms, 7), 'scale': round(scale, 7), 'len': round(len(y) / 44100, 3)})
     kit['pieces'][name] = {'hits': entries, 'choke': choke}
     print(name, len(entries), 'hits', 'flip', flip, flush=True)
 
 json.dump(kit, open(os.path.join(OUT, 'kit.json'), 'w'), indent=1)
-peak = 0
 print('done')

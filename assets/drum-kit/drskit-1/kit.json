@@ -1,0 +1,1718 @@
+{
+ "source": "DRSKit by the DrumGizmo team and Jes Eiler of DRSDrums, CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Mixed to stereo by Playback Rig.",
+ "sample_rate": 44100,
+ "pieces": {
+  "kick": {
+   "hits": [
+    {
+     "file": "kick/1.flac",
+     "rms": 0.0150104,
+     "scale": 0.0322258,
+     "len": 1.491
+    },
+    {
+     "file": "kick/2.flac",
+     "rms": 0.0169461,
+     "scale": 0.0377414,
+     "len": 1.925
+    },
+    {
+     "file": "kick/3.flac",
+     "rms": 0.0205251,
+     "scale": 0.0477966,
+     "len": 1.956
+    },
+    {
+     "file": "kick/4.flac",
+     "rms": 0.0221835,
+     "scale": 0.0519268,
+     "len": 1.876
+    },
+    {
+     "file": "kick/5.flac",
+     "rms": 0.0282913,
+     "scale": 0.073082,
+     "len": 1.833
+    },
+    {
+     "file": "kick/6.flac",
+     "rms": 0.0326533,
+     "scale": 0.0886791,
+     "len": 1.992
+    },
+    {
+     "file": "kick/7.flac",
+     "rms": 0.03419,
+     "scale": 0.0950059,
+     "len": 0.603
+    },
+    {
+     "file": "kick/8.flac",
+     "rms": 0.0366749,
+     "scale": 0.1048115,
+     "len": 1.933
+    },
+    {
+     "file": "kick/9.flac",
+     "rms": 0.046364,
+     "scale": 0.1445635,
+     "len": 1.532
+    },
+    {
+     "file": "kick/10.flac",
+     "rms": 0.052007,
+     "scale": 0.1624645,
+     "len": 0.345
+    },
+    {
+     "file": "kick/11.flac",
+     "rms": 0.0552149,
+     "scale": 0.1707213,
+     "len": 1.008
+    },
+    {
+     "file": "kick/12.flac",
+     "rms": 0.0562309,
+     "scale": 0.1749768,
+     "len": 1.214
+    },
+    {
+     "file": "kick/13.flac",
+     "rms": 0.066725,
+     "scale": 0.202393,
+     "len": 1.008
+    },
+    {
+     "file": "kick/14.flac",
+     "rms": 0.0691703,
+     "scale": 0.2110865,
+     "len": 1.409
+    },
+    {
+     "file": "kick/15.flac",
+     "rms": 0.076915,
+     "scale": 0.2201892,
+     "len": 2.476
+    },
+    {
+     "file": "kick/16.flac",
+     "rms": 0.0815282,
+     "scale": 0.2425545,
+     "len": 2.379
+    },
+    {
+     "file": "kick/17.flac",
+     "rms": 0.091317,
+     "scale": 0.2931736,
+     "len": 2.264
+    },
+    {
+     "file": "kick/18.flac",
+     "rms": 0.0993217,
+     "scale": 0.3327833,
+     "len": 2.263
+    },
+    {
+     "file": "kick/19.flac",
+     "rms": 0.1039622,
+     "scale": 0.3476885,
+     "len": 2.22
+    },
+    {
+     "file": "kick/20.flac",
+     "rms": 0.1131519,
+     "scale": 0.3592341,
+     "len": 2.382
+    },
+    {
+     "file": "kick/21.flac",
+     "rms": 0.1215391,
+     "scale": 0.386891,
+     "len": 2.374
+    },
+    {
+     "file": "kick/22.flac",
+     "rms": 0.1216323,
+     "scale": 0.3705342,
+     "len": 0.576
+    },
+    {
+     "file": "kick/23.flac",
+     "rms": 0.1256458,
+     "scale": 0.3682909,
+     "len": 2.219
+    },
+    {
+     "file": "kick/24.flac",
+     "rms": 0.1464912,
+     "scale": 0.4242852,
+     "len": 1.585
+    }
+   ],
+   "choke": null
+  },
+  "kick_tight": {
+   "hits": [
+    {
+     "file": "kick_tight/1.flac",
+     "rms": 0.0030599,
+     "scale": 0.006368,
+     "len": 0.725
+    },
+    {
+     "file": "kick_tight/2.flac",
+     "rms": 0.0232398,
+     "scale": 0.0698637,
+     "len": 1.077
+    },
+    {
+     "file": "kick_tight/3.flac",
+     "rms": 0.026275,
+     "scale": 0.0815176,
+     "len": 0.631
+    },
+    {
+     "file": "kick_tight/4.flac",
+     "rms": 0.0382466,
+     "scale": 0.1233856,
+     "len": 0.454
+    },
+    {
+     "file": "kick_tight/5.flac",
+     "rms": 0.0412526,
+     "scale": 0.1350115,
+     "len": 0.657
+    },
+    {
+     "file": "kick_tight/6.flac",
+     "rms": 0.04462,
+     "scale": 0.1434755,
+     "len": 0.998
+    },
+    {
+     "file": "kick_tight/7.flac",
+     "rms": 0.0586515,
+     "scale": 0.2110075,
+     "len": 0.99
+    },
+    {
+     "file": "kick_tight/8.flac",
+     "rms": 0.0609905,
+     "scale": 0.2261847,
+     "len": 0.627
+    },
+    {
+     "file": "kick_tight/9.flac",
+     "rms": 0.066609,
+     "scale": 0.2481264,
+     "len": 0.902
+    },
+    {
+     "file": "kick_tight/10.flac",
+     "rms": 0.0684542,
+     "scale": 0.2408051,
+     "len": 1.064
+    },
+    {
+     "file": "kick_tight/11.flac",
+     "rms": 0.0890045,
+     "scale": 0.2999363,
+     "len": 1.126
+    },
+    {
+     "file": "kick_tight/12.flac",
+     "rms": 0.0915289,
+     "scale": 0.3188859,
+     "len": 1.008
+    },
+    {
+     "file": "kick_tight/13.flac",
+     "rms": 0.1008256,
+     "scale": 0.3453794,
+     "len": 1.02
+    },
+    {
+     "file": "kick_tight/14.flac",
+     "rms": 0.106671,
+     "scale": 0.3639215,
+     "len": 0.968
+    },
+    {
+     "file": "kick_tight/15.flac",
+     "rms": 0.1135048,
+     "scale": 0.430703,
+     "len": 1.138
+    },
+    {
+     "file": "kick_tight/16.flac",
+     "rms": 0.1180559,
+     "scale": 0.4690071,
+     "len": 0.977
+    },
+    {
+     "file": "kick_tight/17.flac",
+     "rms": 0.1323087,
+     "scale": 0.5328725,
+     "len": 0.572
+    },
+    {
+     "file": "kick_tight/18.flac",
+     "rms": 0.14078,
+     "scale": 0.5672831,
+     "len": 0.926
+    },
+    {
+     "file": "kick_tight/19.flac",
+     "rms": 0.1532627,
+     "scale": 0.6422456,
+     "len": 0.95
+    },
+    {
+     "file": "kick_tight/20.flac",
+     "rms": 0.1564686,
+     "scale": 0.6515886,
+     "len": 0.74
+    },
+    {
+     "file": "kick_tight/21.flac",
+     "rms": 0.1665106,
+     "scale": 0.6753109,
+     "len": 0.963
+    },
+    {
+     "file": "kick_tight/22.flac",
+     "rms": 0.1758635,
+     "scale": 0.7226964,
+     "len": 0.743
+    }
+   ],
+   "choke": null
+  },
+  "snare": {
+   "hits": [
+    {
+     "file": "snare/1.flac",
+     "rms": 0.0046694,
+     "scale": 0.0175185,
+     "len": 0.245
+    },
+    {
+     "file": "snare/2.flac",
+     "rms": 0.0055826,
+     "scale": 0.018059,
+     "len": 0.249
+    },
+    {
+     "file": "snare/3.flac",
+     "rms": 0.0070746,
+     "scale": 0.0227662,
+     "len": 0.253
+    },
+    {
+     "file": "snare/4.flac",
+     "rms": 0.0088961,
+     "scale": 0.0278059,
+     "len": 0.286
+    },
+    {
+     "file": "snare/5.flac",
+     "rms": 0.0090635,
+     "scale": 0.0307483,
+     "len": 0.296
+    },
+    {
+     "file": "snare/6.flac",
+     "rms": 0.0098411,
+     "scale": 0.0318333,
+     "len": 0.294
+    },
+    {
+     "file": "snare/7.flac",
+     "rms": 0.0113178,
+     "scale": 0.0381052,
+     "len": 0.299
+    },
+    {
+     "file": "snare/8.flac",
+     "rms": 0.012469,
+     "scale": 0.0417819,
+     "len": 0.306
+    },
+    {
+     "file": "snare/9.flac",
+     "rms": 0.0131647,
+     "scale": 0.0454413,
+     "len": 0.308
+    },
+    {
+     "file": "snare/10.flac",
+     "rms": 0.0139066,
+     "scale": 0.0484047,
+     "len": 0.319
+    },
+    {
+     "file": "snare/11.flac",
+     "rms": 0.0158683,
+     "scale": 0.0579967,
+     "len": 0.321
+    },
+    {
+     "file": "snare/12.flac",
+     "rms": 0.0165083,
+     "scale": 0.0609717,
+     "len": 0.32
+    },
+    {
+     "file": "snare/13.flac",
+     "rms": 0.019368,
+     "scale": 0.0697167,
+     "len": 0.323
+    },
+    {
+     "file": "snare/14.flac",
+     "rms": 0.0213157,
+     "scale": 0.0746274,
+     "len": 0.34
+    },
+    {
+     "file": "snare/15.flac",
+     "rms": 0.0234597,
+     "scale": 0.0845015,
+     "len": 0.385
+    },
+    {
+     "file": "snare/16.flac",
+     "rms": 0.0256964,
+     "scale": 0.0897995,
+     "len": 0.403
+    },
+    {
+     "file": "snare/17.flac",
+     "rms": 0.0266838,
+     "scale": 0.0962824,
+     "len": 0.398
+    },
+    {
+     "file": "snare/18.flac",
+     "rms": 0.0270728,
+     "scale": 0.1042041,
+     "len": 0.383
+    },
+    {
+     "file": "snare/19.flac",
+     "rms": 0.0296607,
+     "scale": 0.1065526,
+     "len": 0.399
+    },
+    {
+     "file": "snare/20.flac",
+     "rms": 0.0304411,
+     "scale": 0.1488538,
+     "len": 0.413
+    },
+    {
+     "file": "snare/21.flac",
+     "rms": 0.0308565,
+     "scale": 0.113487,
+     "len": 0.464
+    },
+    {
+     "file": "snare/22.flac",
+     "rms": 0.0322781,
+     "scale": 0.1257601,
+     "len": 0.397
+    },
+    {
+     "file": "snare/23.flac",
+     "rms": 0.0376804,
+     "scale": 0.2039095,
+     "len": 0.398
+    },
+    {
+     "file": "snare/24.flac",
+     "rms": 0.0379246,
+     "scale": 0.1966887,
+     "len": 0.35
+    },
+    {
+     "file": "snare/25.flac",
+     "rms": 0.0418241,
+     "scale": 0.1670121,
+     "len": 0.44
+    },
+    {
+     "file": "snare/26.flac",
+     "rms": 0.04568,
+     "scale": 0.2617025,
+     "len": 0.435
+    },
+    {
+     "file": "snare/27.flac",
+     "rms": 0.0486446,
+     "scale": 0.2310251,
+     "len": 0.44
+    },
+    {
+     "file": "snare/28.flac",
+     "rms": 0.0496937,
+     "scale": 0.2429156,
+     "len": 0.432
+    },
+    {
+     "file": "snare/29.flac",
+     "rms": 0.0503392,
+     "scale": 0.2042677,
+     "len": 0.436
+    },
+    {
+     "file": "snare/30.flac",
+     "rms": 0.0553004,
+     "scale": 0.2246038,
+     "len": 0.48
+    },
+    {
+     "file": "snare/31.flac",
+     "rms": 0.0561651,
+     "scale": 0.2657116,
+     "len": 0.545
+    },
+    {
+     "file": "snare/32.flac",
+     "rms": 0.0575041,
+     "scale": 0.2722985,
+     "len": 0.445
+    },
+    {
+     "file": "snare/33.flac",
+     "rms": 0.0597161,
+     "scale": 0.2713184,
+     "len": 0.662
+    },
+    {
+     "file": "snare/34.flac",
+     "rms": 0.0599068,
+     "scale": 0.3068762,
+     "len": 0.638
+    },
+    {
+     "file": "snare/35.flac",
+     "rms": 0.0607936,
+     "scale": 0.2518622,
+     "len": 0.477
+    },
+    {
+     "file": "snare/36.flac",
+     "rms": 0.0633149,
+     "scale": 0.3141271,
+     "len": 0.447
+    },
+    {
+     "file": "snare/37.flac",
+     "rms": 0.068645,
+     "scale": 0.3629781,
+     "len": 0.718
+    },
+    {
+     "file": "snare/38.flac",
+     "rms": 0.0698919,
+     "scale": 0.3322008,
+     "len": 0.656
+    },
+    {
+     "file": "snare/39.flac",
+     "rms": 0.0746878,
+     "scale": 0.3801043,
+     "len": 0.692
+    },
+    {
+     "file": "snare/40.flac",
+     "rms": 0.0758102,
+     "scale": 0.4079215,
+     "len": 0.632
+    },
+    {
+     "file": "snare/41.flac",
+     "rms": 0.0768557,
+     "scale": 0.3120175,
+     "len": 0.711
+    },
+    {
+     "file": "snare/42.flac",
+     "rms": 0.0786972,
+     "scale": 0.4153591,
+     "len": 0.706
+    },
+    {
+     "file": "snare/43.flac",
+     "rms": 0.0801284,
+     "scale": 0.3383182,
+     "len": 0.63
+    },
+    {
+     "file": "snare/44.flac",
+     "rms": 0.0808935,
+     "scale": 0.3827809,
+     "len": 0.714
+    },
+    {
+     "file": "snare/45.flac",
+     "rms": 0.0848653,
+     "scale": 0.4267491,
+     "len": 0.691
+    },
+    {
+     "file": "snare/46.flac",
+     "rms": 0.0854919,
+     "scale": 0.3680851,
+     "len": 0.717
+    },
+    {
+     "file": "snare/47.flac",
+     "rms": 0.0871765,
+     "scale": 0.4503957,
+     "len": 0.691
+    },
+    {
+     "file": "snare/48.flac",
+     "rms": 0.0878955,
+     "scale": 0.3694869,
+     "len": 0.858
+    },
+    {
+     "file": "snare/49.flac",
+     "rms": 0.0965003,
+     "scale": 0.503634,
+     "len": 0.893
+    }
+   ],
+   "choke": null
+  },
+  "cross_stick": {
+   "hits": [
+    {
+     "file": "cross_stick/1.flac",
+     "rms": 0.0027108,
+     "scale": 0.0229897,
+     "len": 0.155
+    },
+    {
+     "file": "cross_stick/2.flac",
+     "rms": 0.0029162,
+     "scale": 0.0252566,
+     "len": 0.137
+    },
+    {
+     "file": "cross_stick/3.flac",
+     "rms": 0.0046569,
+     "scale": 0.0358199,
+     "len": 0.155
+    },
+    {
+     "file": "cross_stick/4.flac",
+     "rms": 0.0054674,
+     "scale": 0.0466654,
+     "len": 0.182
+    },
+    {
+     "file": "cross_stick/5.flac",
+     "rms": 0.0059296,
+     "scale": 0.043748,
+     "len": 0.192
+    },
+    {
+     "file": "cross_stick/6.flac",
+     "rms": 0.0073577,
+     "scale": 0.0670715,
+     "len": 0.192
+    },
+    {
+     "file": "cross_stick/7.flac",
+     "rms": 0.0092116,
+     "scale": 0.0745602,
+     "len": 0.219
+    },
+    {
+     "file": "cross_stick/8.flac",
+     "rms": 0.0101815,
+     "scale": 0.0824239,
+     "len": 0.232
+    },
+    {
+     "file": "cross_stick/9.flac",
+     "rms": 0.0112711,
+     "scale": 0.0797631,
+     "len": 0.216
+    },
+    {
+     "file": "cross_stick/10.flac",
+     "rms": 0.0127115,
+     "scale": 0.1018004,
+     "len": 0.234
+    }
+   ],
+   "choke": null
+  },
+  "tom_high": {
+   "hits": [
+    {
+     "file": "tom_high/1.flac",
+     "rms": 0.015043,
+     "scale": 0.0336767,
+     "len": 1.712
+    },
+    {
+     "file": "tom_high/2.flac",
+     "rms": 0.0181552,
+     "scale": 0.041137,
+     "len": 1.655
+    },
+    {
+     "file": "tom_high/3.flac",
+     "rms": 0.0194507,
+     "scale": 0.0454082,
+     "len": 1.935
+    },
+    {
+     "file": "tom_high/4.flac",
+     "rms": 0.0198964,
+     "scale": 0.0415429,
+     "len": 1.489
+    },
+    {
+     "file": "tom_high/5.flac",
+     "rms": 0.0287503,
+     "scale": 0.0606824,
+     "len": 1.661
+    },
+    {
+     "file": "tom_high/6.flac",
+     "rms": 0.0306218,
+     "scale": 0.0660774,
+     "len": 1.826
+    },
+    {
+     "file": "tom_high/7.flac",
+     "rms": 0.0328661,
+     "scale": 0.0724183,
+     "len": 1.954
+    },
+    {
+     "file": "tom_high/8.flac",
+     "rms": 0.0390714,
+     "scale": 0.0853901,
+     "len": 2.258
+    },
+    {
+     "file": "tom_high/9.flac",
+     "rms": 0.0493891,
+     "scale": 0.1174154,
+     "len": 2.039
+    },
+    {
+     "file": "tom_high/10.flac",
+     "rms": 0.0502909,
+     "scale": 0.1228805,
+     "len": 2.216
+    },
+    {
+     "file": "tom_high/11.flac",
+     "rms": 0.0532583,
+     "scale": 0.1253835,
+     "len": 1.885
+    },
+    {
+     "file": "tom_high/12.flac",
+     "rms": 0.0551253,
+     "scale": 0.1262693,
+     "len": 2.315
+    },
+    {
+     "file": "tom_high/13.flac",
+     "rms": 0.0695909,
+     "scale": 0.1699988,
+     "len": 2.25
+    },
+    {
+     "file": "tom_high/14.flac",
+     "rms": 0.074525,
+     "scale": 0.178694,
+     "len": 1.87
+    },
+    {
+     "file": "tom_high/15.flac",
+     "rms": 0.0815177,
+     "scale": 0.1918519,
+     "len": 2.03
+    },
+    {
+     "file": "tom_high/16.flac",
+     "rms": 0.084335,
+     "scale": 0.2108231,
+     "len": 2.489
+    },
+    {
+     "file": "tom_high/17.flac",
+     "rms": 0.0949192,
+     "scale": 0.2558431,
+     "len": 2.226
+    },
+    {
+     "file": "tom_high/18.flac",
+     "rms": 0.0970075,
+     "scale": 0.2395415,
+     "len": 2.444
+    },
+    {
+     "file": "tom_high/19.flac",
+     "rms": 0.1010627,
+     "scale": 0.235906,
+     "len": 2.534
+    },
+    {
+     "file": "tom_high/20.flac",
+     "rms": 0.1048409,
+     "scale": 0.2937557,
+     "len": 2.238
+    },
+    {
+     "file": "tom_high/21.flac",
+     "rms": 0.1143464,
+     "scale": 0.3226201,
+     "len": 2.626
+    },
+    {
+     "file": "tom_high/22.flac",
+     "rms": 0.1144552,
+     "scale": 0.45204,
+     "len": 1.866
+    },
+    {
+     "file": "tom_high/23.flac",
+     "rms": 0.1162261,
+     "scale": 0.3165803,
+     "len": 2.236
+    },
+    {
+     "file": "tom_high/24.flac",
+     "rms": 0.1181311,
+     "scale": 0.4724697,
+     "len": 2.015
+    }
+   ],
+   "choke": null
+  },
+  "tom_mid": {
+   "hits": [
+    {
+     "file": "tom_mid/1.flac",
+     "rms": 0.0213338,
+     "scale": 0.0663723,
+     "len": 3.187
+    },
+    {
+     "file": "tom_mid/2.flac",
+     "rms": 0.0224336,
+     "scale": 0.0777958,
+     "len": 3.325
+    },
+    {
+     "file": "tom_mid/3.flac",
+     "rms": 0.0250934,
+     "scale": 0.0842186,
+     "len": 2.975
+    },
+    {
+     "file": "tom_mid/4.flac",
+     "rms": 0.0376127,
+     "scale": 0.1356856,
+     "len": 2.764
+    },
+    {
+     "file": "tom_mid/5.flac",
+     "rms": 0.041704,
+     "scale": 0.1514963,
+     "len": 3.579
+    },
+    {
+     "file": "tom_mid/6.flac",
+     "rms": 0.0426802,
+     "scale": 0.1566538,
+     "len": 2.711
+    },
+    {
+     "file": "tom_mid/7.flac",
+     "rms": 0.0646302,
+     "scale": 0.2366887,
+     "len": 3.527
+    },
+    {
+     "file": "tom_mid/8.flac",
+     "rms": 0.0653696,
+     "scale": 0.2364051,
+     "len": 3.589
+    },
+    {
+     "file": "tom_mid/9.flac",
+     "rms": 0.075326,
+     "scale": 0.2038278,
+     "len": 2.818
+    },
+    {
+     "file": "tom_mid/10.flac",
+     "rms": 0.0925034,
+     "scale": 0.3485558,
+     "len": 3.667
+    },
+    {
+     "file": "tom_mid/11.flac",
+     "rms": 0.1046133,
+     "scale": 0.4449849,
+     "len": 3.26
+    },
+    {
+     "file": "tom_mid/12.flac",
+     "rms": 0.1091135,
+     "scale": 0.4160192,
+     "len": 3.6
+    },
+    {
+     "file": "tom_mid/13.flac",
+     "rms": 0.1170514,
+     "scale": 0.4623113,
+     "len": 3.389
+    },
+    {
+     "file": "tom_mid/14.flac",
+     "rms": 0.1226211,
+     "scale": 0.4856305,
+     "len": 3.521
+    },
+    {
+     "file": "tom_mid/15.flac",
+     "rms": 0.1313601,
+     "scale": 0.576405,
+     "len": 3.606
+    },
+    {
+     "file": "tom_mid/16.flac",
+     "rms": 0.1414387,
+     "scale": 0.54675,
+     "len": 3.401
+    },
+    {
+     "file": "tom_mid/17.flac",
+     "rms": 0.155561,
+     "scale": 0.5778653,
+     "len": 3.609
+    },
+    {
+     "file": "tom_mid/18.flac",
+     "rms": 0.1706508,
+     "scale": 0.625272,
+     "len": 3.007
+    }
+   ],
+   "choke": null
+  },
+  "tom_floor": {
+   "hits": [
+    {
+     "file": "tom_floor/1.flac",
+     "rms": 0.021415,
+     "scale": 0.0848648,
+     "len": 3.466
+    },
+    {
+     "file": "tom_floor/2.flac",
+     "rms": 0.0225893,
+     "scale": 0.0846832,
+     "len": 3.202
+    },
+    {
+     "file": "tom_floor/3.flac",
+     "rms": 0.0256363,
+     "scale": 0.091739,
+     "len": 3.545
+    },
+    {
+     "file": "tom_floor/4.flac",
+     "rms": 0.0373364,
+     "scale": 0.1438235,
+     "len": 3.672
+    },
+    {
+     "file": "tom_floor/5.flac",
+     "rms": 0.0382621,
+     "scale": 0.1760365,
+     "len": 3.677
+    },
+    {
+     "file": "tom_floor/6.flac",
+     "rms": 0.0408164,
+     "scale": 0.1757984,
+     "len": 2.846
+    },
+    {
+     "file": "tom_floor/7.flac",
+     "rms": 0.0581633,
+     "scale": 0.273051,
+     "len": 2.999
+    },
+    {
+     "file": "tom_floor/8.flac",
+     "rms": 0.0620461,
+     "scale": 0.2735488,
+     "len": 2.539
+    },
+    {
+     "file": "tom_floor/9.flac",
+     "rms": 0.0638393,
+     "scale": 0.2813485,
+     "len": 3.847
+    },
+    {
+     "file": "tom_floor/10.flac",
+     "rms": 0.0776218,
+     "scale": 0.347487,
+     "len": 2.595
+    },
+    {
+     "file": "tom_floor/11.flac",
+     "rms": 0.0802005,
+     "scale": 0.3626804,
+     "len": 3.353
+    },
+    {
+     "file": "tom_floor/12.flac",
+     "rms": 0.0878807,
+     "scale": 0.3732938,
+     "len": 3.307
+    },
+    {
+     "file": "tom_floor/13.flac",
+     "rms": 0.1099429,
+     "scale": 0.5057345,
+     "len": 3.232
+    },
+    {
+     "file": "tom_floor/14.flac",
+     "rms": 0.1133428,
+     "scale": 0.5319386,
+     "len": 3.898
+    },
+    {
+     "file": "tom_floor/15.flac",
+     "rms": 0.1153904,
+     "scale": 0.5187845,
+     "len": 3.496
+    },
+    {
+     "file": "tom_floor/16.flac",
+     "rms": 0.1353545,
+     "scale": 0.6592316,
+     "len": 3.825
+    },
+    {
+     "file": "tom_floor/17.flac",
+     "rms": 0.1370278,
+     "scale": 0.6629916,
+     "len": 4.274
+    },
+    {
+     "file": "tom_floor/18.flac",
+     "rms": 0.1502808,
+     "scale": 0.696728,
+     "len": 4.168
+    }
+   ],
+   "choke": null
+  },
+  "hat_closed": {
+   "hits": [
+    {
+     "file": "hat_closed/1.flac",
+     "rms": 0.0008804,
+     "scale": 0.0091729,
+     "len": 0.196
+    },
+    {
+     "file": "hat_closed/2.flac",
+     "rms": 0.0011249,
+     "scale": 0.0125565,
+     "len": 0.161
+    },
+    {
+     "file": "hat_closed/3.flac",
+     "rms": 0.0014549,
+     "scale": 0.0144134,
+     "len": 0.185
+    },
+    {
+     "file": "hat_closed/4.flac",
+     "rms": 0.0026331,
+     "scale": 0.0289617,
+     "len": 0.195
+    },
+    {
+     "file": "hat_closed/5.flac",
+     "rms": 0.0031131,
+     "scale": 0.0378329,
+     "len": 0.171
+    },
+    {
+     "file": "hat_closed/6.flac",
+     "rms": 0.0032912,
+     "scale": 0.0271969,
+     "len": 0.267
+    },
+    {
+     "file": "hat_closed/7.flac",
+     "rms": 0.0045094,
+     "scale": 0.0504335,
+     "len": 0.308
+    },
+    {
+     "file": "hat_closed/8.flac",
+     "rms": 0.0048988,
+     "scale": 0.0615955,
+     "len": 0.221
+    },
+    {
+     "file": "hat_closed/9.flac",
+     "rms": 0.0060476,
+     "scale": 0.0708722,
+     "len": 0.238
+    },
+    {
+     "file": "hat_closed/10.flac",
+     "rms": 0.0065265,
+     "scale": 0.0752712,
+     "len": 0.362
+    },
+    {
+     "file": "hat_closed/11.flac",
+     "rms": 0.0075545,
+     "scale": 0.0787562,
+     "len": 0.364
+    },
+    {
+     "file": "hat_closed/12.flac",
+     "rms": 0.0078976,
+     "scale": 0.0950365,
+     "len": 0.272
+    },
+    {
+     "file": "hat_closed/13.flac",
+     "rms": 0.0090076,
+     "scale": 0.1089862,
+     "len": 0.364
+    },
+    {
+     "file": "hat_closed/14.flac",
+     "rms": 0.0091091,
+     "scale": 0.0745588,
+     "len": 0.351
+    },
+    {
+     "file": "hat_closed/15.flac",
+     "rms": 0.0106317,
+     "scale": 0.10666,
+     "len": 0.365
+    },
+    {
+     "file": "hat_closed/16.flac",
+     "rms": 0.0127022,
+     "scale": 0.1143791,
+     "len": 0.309
+    },
+    {
+     "file": "hat_closed/17.flac",
+     "rms": 0.0131883,
+     "scale": 0.110725,
+     "len": 0.317
+    },
+    {
+     "file": "hat_closed/18.flac",
+     "rms": 0.0144337,
+     "scale": 0.1175398,
+     "len": 0.341
+    }
+   ],
+   "choke": "hat"
+  },
+  "hat_pedal": {
+   "hits": [
+    {
+     "file": "hat_pedal/1.flac",
+     "rms": 0.0007497,
+     "scale": 0.0037552,
+     "len": 0.285
+    },
+    {
+     "file": "hat_pedal/2.flac",
+     "rms": 0.001736,
+     "scale": 0.0085115,
+     "len": 0.232
+    },
+    {
+     "file": "hat_pedal/3.flac",
+     "rms": 0.0020348,
+     "scale": 0.0091492,
+     "len": 0.202
+    },
+    {
+     "file": "hat_pedal/4.flac",
+     "rms": 0.0026707,
+     "scale": 0.015467,
+     "len": 0.213
+    },
+    {
+     "file": "hat_pedal/5.flac",
+     "rms": 0.0032853,
+     "scale": 0.0160666,
+     "len": 0.196
+    },
+    {
+     "file": "hat_pedal/6.flac",
+     "rms": 0.0033426,
+     "scale": 0.0206888,
+     "len": 0.18
+    },
+    {
+     "file": "hat_pedal/7.flac",
+     "rms": 0.0033747,
+     "scale": 0.0181601,
+     "len": 0.221
+    },
+    {
+     "file": "hat_pedal/8.flac",
+     "rms": 0.0044413,
+     "scale": 0.0244725,
+     "len": 0.191
+    }
+   ],
+   "choke": "hat"
+  },
+  "hat_half": {
+   "hits": [
+    {
+     "file": "hat_half/1.flac",
+     "rms": 0.0036095,
+     "scale": 0.0164963,
+     "len": 0.911
+    },
+    {
+     "file": "hat_half/2.flac",
+     "rms": 0.0058592,
+     "scale": 0.035146,
+     "len": 1.466
+    },
+    {
+     "file": "hat_half/3.flac",
+     "rms": 0.008421,
+     "scale": 0.0490045,
+     "len": 1.534
+    },
+    {
+     "file": "hat_half/4.flac",
+     "rms": 0.0103912,
+     "scale": 0.0502819,
+     "len": 1.137
+    },
+    {
+     "file": "hat_half/5.flac",
+     "rms": 0.0126111,
+     "scale": 0.0571153,
+     "len": 1.154
+    },
+    {
+     "file": "hat_half/6.flac",
+     "rms": 0.0146324,
+     "scale": 0.0741847,
+     "len": 1.349
+    },
+    {
+     "file": "hat_half/7.flac",
+     "rms": 0.0184099,
+     "scale": 0.078635,
+     "len": 1.327
+    },
+    {
+     "file": "hat_half/8.flac",
+     "rms": 0.0246945,
+     "scale": 0.1194558,
+     "len": 1.576
+    },
+    {
+     "file": "hat_half/9.flac",
+     "rms": 0.0258,
+     "scale": 0.1103842,
+     "len": 1.8
+    },
+    {
+     "file": "hat_half/10.flac",
+     "rms": 0.0266303,
+     "scale": 0.1220038,
+     "len": 2.021
+    },
+    {
+     "file": "hat_half/11.flac",
+     "rms": 0.0359087,
+     "scale": 0.156773,
+     "len": 1.913
+    },
+    {
+     "file": "hat_half/12.flac",
+     "rms": 0.0371375,
+     "scale": 0.1885506,
+     "len": 1.841
+    },
+    {
+     "file": "hat_half/13.flac",
+     "rms": 0.037532,
+     "scale": 0.1695197,
+     "len": 1.924
+    }
+   ],
+   "choke": "hat"
+  },
+  "hat_open": {
+   "hits": [
+    {
+     "file": "hat_open/1.flac",
+     "rms": 0.0013558,
+     "scale": 0.0056178,
+     "len": 3.555
+    },
+    {
+     "file": "hat_open/2.flac",
+     "rms": 0.0016227,
+     "scale": 0.0069577,
+     "len": 3.479
+    },
+    {
+     "file": "hat_open/3.flac",
+     "rms": 0.0024638,
+     "scale": 0.0112815,
+     "len": 4.228
+    },
+    {
+     "file": "hat_open/4.flac",
+     "rms": 0.0030713,
+     "scale": 0.0154273,
+     "len": 4.229
+    },
+    {
+     "file": "hat_open/5.flac",
+     "rms": 0.0052359,
+     "scale": 0.0297497,
+     "len": 4.72
+    },
+    {
+     "file": "hat_open/6.flac",
+     "rms": 0.0075739,
+     "scale": 0.0361331,
+     "len": 4.958
+    },
+    {
+     "file": "hat_open/7.flac",
+     "rms": 0.0096499,
+     "scale": 0.043875,
+     "len": 5.021
+    },
+    {
+     "file": "hat_open/8.flac",
+     "rms": 0.0113669,
+     "scale": 0.0521197,
+     "len": 5.745
+    },
+    {
+     "file": "hat_open/9.flac",
+     "rms": 0.0141717,
+     "scale": 0.0659523,
+     "len": 5.487
+    },
+    {
+     "file": "hat_open/10.flac",
+     "rms": 0.0160693,
+     "scale": 0.0839342,
+     "len": 5.607
+    },
+    {
+     "file": "hat_open/11.flac",
+     "rms": 0.0177863,
+     "scale": 0.0747051,
+     "len": 6.239
+    },
+    {
+     "file": "hat_open/12.flac",
+     "rms": 0.024335,
+     "scale": 0.1294309,
+     "len": 6.188
+    },
+    {
+     "file": "hat_open/13.flac",
+     "rms": 0.0266661,
+     "scale": 0.1235704,
+     "len": 6.153
+    },
+    {
+     "file": "hat_open/14.flac",
+     "rms": 0.0287135,
+     "scale": 0.144441,
+     "len": 6.116
+    }
+   ],
+   "choke": "hat"
+  },
+  "ride": {
+   "hits": [
+    {
+     "file": "ride/1.flac",
+     "rms": 0.0016792,
+     "scale": 0.0238521,
+     "len": 2.403
+    },
+    {
+     "file": "ride/2.flac",
+     "rms": 0.0029706,
+     "scale": 0.0411826,
+     "len": 3.428
+    },
+    {
+     "file": "ride/3.flac",
+     "rms": 0.0034737,
+     "scale": 0.043164,
+     "len": 3.327
+    },
+    {
+     "file": "ride/4.flac",
+     "rms": 0.0042189,
+     "scale": 0.053145,
+     "len": 4.054
+    },
+    {
+     "file": "ride/5.flac",
+     "rms": 0.0056388,
+     "scale": 0.0451171,
+     "len": 4.67
+    },
+    {
+     "file": "ride/6.flac",
+     "rms": 0.0075126,
+     "scale": 0.0775003,
+     "len": 4.96
+    },
+    {
+     "file": "ride/7.flac",
+     "rms": 0.0082895,
+     "scale": 0.0806935,
+     "len": 5.511
+    },
+    {
+     "file": "ride/8.flac",
+     "rms": 0.0105711,
+     "scale": 0.1191508,
+     "len": 5.982
+    },
+    {
+     "file": "ride/9.flac",
+     "rms": 0.0135076,
+     "scale": 0.0621563,
+     "len": 6.927
+    },
+    {
+     "file": "ride/10.flac",
+     "rms": 0.0138227,
+     "scale": 0.108679,
+     "len": 6.179
+    },
+    {
+     "file": "ride/11.flac",
+     "rms": 0.013882,
+     "scale": 0.1354077,
+     "len": 6.006
+    }
+   ],
+   "choke": null
+  },
+  "ride_crash": {
+   "hits": [
+    {
+     "file": "ride_crash/1.flac",
+     "rms": 0.0038818,
+     "scale": 0.0159325,
+     "len": 5.434
+    },
+    {
+     "file": "ride_crash/2.flac",
+     "rms": 0.0042779,
+     "scale": 0.0281545,
+     "len": 4.913
+    },
+    {
+     "file": "ride_crash/3.flac",
+     "rms": 0.0076327,
+     "scale": 0.0321229,
+     "len": 6.181
+    },
+    {
+     "file": "ride_crash/4.flac",
+     "rms": 0.0100742,
+     "scale": 0.0437891,
+     "len": 6.097
+    },
+    {
+     "file": "ride_crash/5.flac",
+     "rms": 0.0115828,
+     "scale": 0.0496337,
+     "len": 5.632
+    },
+    {
+     "file": "ride_crash/6.flac",
+     "rms": 0.0116819,
+     "scale": 0.090089,
+     "len": 6.189
+    },
+    {
+     "file": "ride_crash/7.flac",
+     "rms": 0.0150427,
+     "scale": 0.0792905,
+     "len": 6.619
+    },
+    {
+     "file": "ride_crash/8.flac",
+     "rms": 0.0172653,
+     "scale": 0.165972,
+     "len": 7.171
+    },
+    {
+     "file": "ride_crash/9.flac",
+     "rms": 0.0186969,
+     "scale": 0.0894432,
+     "len": 7.117
+    },
+    {
+     "file": "ride_crash/10.flac",
+     "rms": 0.0229827,
+     "scale": 0.1196543,
+     "len": 6.909
+    },
+    {
+     "file": "ride_crash/11.flac",
+     "rms": 0.029087,
+     "scale": 0.2683284,
+     "len": 7.165
+    },
+    {
+     "file": "ride_crash/12.flac",
+     "rms": 0.0307044,
+     "scale": 0.364654,
+     "len": 7.029
+    }
+   ],
+   "choke": null
+  },
+  "ride_bell": {
+   "hits": [
+    {
+     "file": "ride_bell/1.flac",
+     "rms": 0.0019377,
+     "scale": 0.0119107,
+     "len": 2.588
+    },
+    {
+     "file": "ride_bell/2.flac",
+     "rms": 0.0045076,
+     "scale": 0.0282175,
+     "len": 4.408
+    },
+    {
+     "file": "ride_bell/3.flac",
+     "rms": 0.004876,
+     "scale": 0.0379138,
+     "len": 3.304
+    },
+    {
+     "file": "ride_bell/4.flac",
+     "rms": 0.0050781,
+     "scale": 0.031803,
+     "len": 3.957
+    },
+    {
+     "file": "ride_bell/5.flac",
+     "rms": 0.0099977,
+     "scale": 0.0622129,
+     "len": 4.91
+    },
+    {
+     "file": "ride_bell/6.flac",
+     "rms": 0.0139086,
+     "scale": 0.0966107,
+     "len": 5.428
+    },
+    {
+     "file": "ride_bell/7.flac",
+     "rms": 0.0170581,
+     "scale": 0.1312457,
+     "len": 4.353
+    },
+    {
+     "file": "ride_bell/8.flac",
+     "rms": 0.0177594,
+     "scale": 0.1142405,
+     "len": 6.477
+    },
+    {
+     "file": "ride_bell/9.flac",
+     "rms": 0.0242419,
+     "scale": 0.1244015,
+     "len": 6.59
+    },
+    {
+     "file": "ride_bell/10.flac",
+     "rms": 0.0264995,
+     "scale": 0.1651308,
+     "len": 6.125
+    }
+   ],
+   "choke": null
+  },
+  "crash_left": {
+   "hits": [
+    {
+     "file": "crash_left/1.flac",
+     "rms": 0.0009532,
+     "scale": 0.0041196,
+     "len": 1.359
+    },
+    {
+     "file": "crash_left/2.flac",
+     "rms": 0.002424,
+     "scale": 0.0113604,
+     "len": 2.271
+    },
+    {
+     "file": "crash_left/3.flac",
+     "rms": 0.0041398,
+     "scale": 0.0171781,
+     "len": 2.607
+    },
+    {
+     "file": "crash_left/4.flac",
+     "rms": 0.005914,
+     "scale": 0.0229123,
+     "len": 3.199
+    },
+    {
+     "file": "crash_left/5.flac",
+     "rms": 0.0071382,
+     "scale": 0.0326709,
+     "len": 3.241
+    },
+    {
+     "file": "crash_left/6.flac",
+     "rms": 0.0108392,
+     "scale": 0.0490371,
+     "len": 3.563
+    },
+    {
+     "file": "crash_left/7.flac",
+     "rms": 0.0140192,
+     "scale": 0.0575437,
+     "len": 3.915
+    },
+    {
+     "file": "crash_left/8.flac",
+     "rms": 0.015573,
+     "scale": 0.074757,
+     "len": 3.815
+    },
+    {
+     "file": "crash_left/9.flac",
+     "rms": 0.0199451,
+     "scale": 0.1007152,
+     "len": 3.982
+    },
+    {
+     "file": "crash_left/10.flac",
+     "rms": 0.0216941,
+     "scale": 0.098435,
+     "len": 4.717
+    },
+    {
+     "file": "crash_left/11.flac",
+     "rms": 0.0223894,
+     "scale": 0.102017,
+     "len": 4.067
+    }
+   ],
+   "choke": null
+  },
+  "crash_right": {
+   "hits": [
+    {
+     "file": "crash_right/1.flac",
+     "rms": 0.0012025,
+     "scale": 0.0049044,
+     "len": 1.772
+    },
+    {
+     "file": "crash_right/2.flac",
+     "rms": 0.0013778,
+     "scale": 0.0059015,
+     "len": 2.147
+    },
+    {
+     "file": "crash_right/3.flac",
+     "rms": 0.0036586,
+     "scale": 0.0219126,
+     "len": 3.276
+    },
+    {
+     "file": "crash_right/4.flac",
+     "rms": 0.0056505,
+     "scale": 0.0242181,
+     "len": 3.705
+    },
+    {
+     "file": "crash_right/5.flac",
+     "rms": 0.0082801,
+     "scale": 0.0302514,
+     "len": 3.363
+    },
+    {
+     "file": "crash_right/6.flac",
+     "rms": 0.0092441,
+     "scale": 0.040837,
+     "len": 4.103
+    },
+    {
+     "file": "crash_right/7.flac",
+     "rms": 0.0120884,
+     "scale": 0.045023,
+     "len": 4.496
+    },
+    {
+     "file": "crash_right/8.flac",
+     "rms": 0.0132374,
+     "scale": 0.0536458,
+     "len": 4.592
+    },
+    {
+     "file": "crash_right/9.flac",
+     "rms": 0.0176531,
+     "scale": 0.070325,
+     "len": 3.92
+    },
+    {
+     "file": "crash_right/10.flac",
+     "rms": 0.0177553,
+     "scale": 0.0800796,
+     "len": 4.363
+    }
+   ],
+   "choke": null
+  }
+ }
+}
